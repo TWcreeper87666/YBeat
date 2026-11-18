@@ -1,0 +1,223 @@
+import type React from 'react';
+import { useStore, mediaUsable, type TrackKind } from '../store';
+import { parseDuration } from '../engine/params';
+import { addMediaBlob } from '../engine/media';
+import { toast, useDrag, type DragPayload, type DragState, type DropTarget } from './uiStore';
+
+const SNAP_PX = 10;
+
+function elementsAt(x: number, y: number) {
+  return document.elementsFromPoint(x, y) as HTMLElement[];
+}
+
+function laneDuration(payload: DragPayload): { dur: number; label: string; accepts: (k: TrackKind) => boolean } | null {
+  const s = useStore.getState();
+  if (payload.kind === 'media') {
+    const m = s.media.find((x) => x.id === payload.id);
+    if (!mediaUsable(m)) return null;
+    if (m.kind === 'audio') return { dur: m.duration, label: m.name, accepts: (k) => k === 'audio' };
+    return {
+      dur: m.kind === 'video' ? Math.min(m.duration, 6) : 2,
+      label: m.name,
+      accepts: (k) => k === 'video' || (k === 'audio' && m.hasAudio),
+    };
+  }
+  if (payload.kind === 'module' && payload.moduleKind === 'effect') {
+    const m = s.modules.find((x) => x.id === payload.id);
+    return { dur: m ? parseDuration(m.code, 0.5) : 0.5, label: m?.name ?? '', accepts: (k) => k === 'fx' };
+  }
+  if (payload.kind === 'files') return { dur: 2, label: `${payload.count} 個檔案`, accepts: (k) => k !== 'fx' };
+  return null;
+}
+
+/** 這個拖曳內容可以放在哪種軌道（給時間軸顯示可放 / 不可放） */
+export function laneAccepts(payload: DragPayload, kind: TrackKind): boolean {
+  if (payload.kind === 'module' && payload.moduleKind !== 'effect') return false;
+  return laneDuration(payload)?.accepts(kind) ?? false;
+}
+
+/** 依滑鼠位置計算放置目標 */
+export function computeTarget(payload: DragPayload, x: number, y: number): DropTarget {
+  const els = elementsAt(x, y);
+  const s = useStore.getState();
+  const clipEl = els.find((e) => e.dataset.key?.startsWith('clip:'));
+  const clip = clipEl ? s.clips.find((c) => c.id === clipEl.dataset.key!.slice(5)) : undefined;
+
+  // 片段上的放置：轉場 / 變速 / 重新連結遺失素材
+  if (payload.kind === 'module' && payload.moduleKind !== 'effect') {
+    if (!clip) return null;
+    if (payload.moduleKind === 'transition') {
+      const prev = s.clips.find((c) => c.track === clip.track && c.id !== clip.id && Math.abs(c.start + c.duration - clip.start) < 0.01);
+      return { kind: 'clip', clipId: clip.id, action: 'transition', valid: !!prev };
+    }
+    const m = s.media.find((x) => x.id === clip.mediaId);
+    return { kind: 'clip', clipId: clip.id, action: 'remap', valid: m?.kind === 'video' };
+  }
+  if (clip && (payload.kind === 'media' || payload.kind === 'files')) {
+    const old = s.media.find((x) => x.id === clip.mediaId);
+    if (!mediaUsable(old)) {
+      let valid = true;
+      if (payload.kind === 'media') {
+        const nm = s.media.find((x) => x.id === payload.id);
+        valid = mediaUsable(nm) && nm.kind !== 'audio';
+      }
+      return { kind: 'clip', clipId: clip.id, action: 'relink', valid };
+    }
+  }
+
+  const laneEl = els.find((e) => e.dataset.laneKind);
+  if (!laneEl) return null;
+  const lane = laneEl.dataset.laneKind as TrackKind;
+  const idx = Number(laneEl.dataset.laneIdx);
+  const info = laneDuration(payload);
+  if (!info || !info.accepts(lane)) return null;
+
+  // 時間：游標位置，吸附到同軌片段的頭尾
+  const pps = s.pps;
+  let time = Math.max(0, (x - laneEl.getBoundingClientRect().left) / pps);
+  const list = lane === 'video' ? s.clips : lane === 'fx' ? s.effects : s.audios;
+  const pts = [0, s.time];
+  for (const it of list) if (it.track === idx) pts.push(it.start, it.start + it.duration);
+  let best = SNAP_PX / pps;
+  for (const p of pts) {
+    if (Math.abs(p - time) < best) { best = Math.abs(p - time); time = p; }
+  }
+  return { kind: 'lane', lane, idx, time, duration: info.dur, label: info.label };
+}
+
+/** 執行放置 */
+export async function applyDrop(payload: DragPayload, target: DropTarget, files?: File[]) {
+  const s = useStore.getState();
+  if (!target) {
+    if (files) await importMany(files);
+    return;
+  }
+  if (target.kind === 'clip') {
+    if (!target.valid && target.action !== 'transition') return toast('這裡不能放', 'error');
+    const clip = s.clips.find((c) => c.id === target.clipId);
+    if (!clip) return;
+    if (payload.kind === 'module') {
+      if (target.action === 'transition') {
+        s.setTransition(clip.id, payload.id);
+        if (!target.valid) toast('轉場已套用，但前面沒有緊貼的片段，所以暫時不會生效', 'error');
+      } else s.setRemap(clip.id, payload.id);
+      return;
+    }
+    // 重新連結
+    let newId: string | null = null;
+    if (payload.kind === 'media') newId = payload.id;
+    else if (files?.length) newId = (await addMediaBlob(files[0], files[0].name))?.id ?? null;
+    if (!newId) return;
+    const old = s.media.find((m) => m.id === clip.mediaId);
+    useStore.getState().relinkMedia(clip.mediaId, newId);
+    toast(`已重新連結${old ? `「${old.name}」` : ''}`);
+    return;
+  }
+  // 軌道
+  const place = (mediaId: string, time: number) => {
+    const st = useStore.getState();
+    const m = st.media.find((x) => x.id === mediaId);
+    if (!mediaUsable(m)) return 0;
+    if (target.lane === 'audio' || m.kind === 'audio') st.addAudio(mediaId, time, target.lane === 'audio' ? target.idx : 0);
+    else st.addClip(mediaId, time, target.lane === 'video' ? target.idx : 0);
+    const after = useStore.getState();
+    const sel = after.selection;
+    const it = sel && [...after.clips, ...after.audios].find((x) => x.id === sel.id);
+    return it ? it.duration : 0;
+  };
+  if (payload.kind === 'media') place(payload.id, target.time);
+  else if (payload.kind === 'module') s.addEffect(payload.id, target.time, target.idx);
+  else if (files) {
+    let t = target.time;
+    for (const f of files) {
+      const m = await addMediaBlob(f, f.name).catch(() => null);
+      if (m) t += place(m.id, t);
+    }
+  }
+}
+
+async function importMany(files: File[]) {
+  let n = 0;
+  for (const f of files) if (await addMediaBlob(f, f.name).catch(() => null)) n++;
+  if (n) toast(`已匯入 ${n} 個檔案`);
+  else toast('無法匯入這些檔案', 'error');
+}
+
+/** 素材庫項目：按下後拖超過 4px 才開始拖曳；回傳 true 代表變成拖曳（外部應取消 click） */
+export function startLibraryDrag(e: React.PointerEvent, payload: DragPayload, label: string, thumb?: string) {
+  if (e.button !== 0) return;
+  const x0 = e.clientX, y0 = e.clientY;
+  let started = false;
+  const move = (ev: PointerEvent) => {
+    if (!started && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return;
+    started = true;
+    const target = computeTarget(payload, ev.clientX, ev.clientY);
+    document.body.classList.toggle('drag-ok', !!target);
+    document.body.classList.toggle('drag-no', !target);
+    useDrag.setState({ drag: { payload, label, thumb, x: ev.clientX, y: ev.clientY, target } as DragState });
+  };
+  const up = () => {
+    window.removeEventListener('pointermove', move);
+    window.removeEventListener('pointerup', up);
+    window.removeEventListener('keydown', esc);
+    const d = useDrag.getState().drag;
+    useDrag.setState({ drag: null });
+    document.body.classList.remove('drag-ok', 'drag-no');
+    if (started && d) {
+      suppressClick();
+      applyDrop(payload, d.target);
+    }
+  };
+  const esc = (ev: KeyboardEvent) => {
+    if (ev.key !== 'Escape') return;
+    started = false;
+    useDrag.setState({ drag: null });
+    up();
+  };
+  window.addEventListener('pointermove', move);
+  window.addEventListener('pointerup', up);
+  window.addEventListener('keydown', esc);
+}
+
+/** 拖曳結束後吞掉緊接著的 click，避免誤觸 */
+function suppressClick() {
+  const stop = (e: Event) => {
+    e.stopPropagation();
+    e.preventDefault();
+  };
+  window.addEventListener('click', stop, { capture: true, once: true });
+  setTimeout(() => window.removeEventListener('click', stop, { capture: true }), 50);
+}
+
+/** 從作業系統拖檔案進來：任何地方都能放，時間軸上會顯示位置 */
+export function installFileDrop() {
+  let depth = 0;
+  const hasFiles = (e: DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes('Files');
+  window.addEventListener('dragenter', (e) => {
+    if (!hasFiles(e)) return;
+    depth++;
+  });
+  window.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    if (!hasFiles(e)) return;
+    e.dataTransfer!.dropEffect = 'copy';
+    const payload: DragPayload = { kind: 'files', count: e.dataTransfer!.items.length };
+    useDrag.setState({ drag: { payload, label: `匯入 ${payload.count} 個檔案`, x: e.clientX, y: e.clientY, target: computeTarget(payload, e.clientX, e.clientY) } });
+  });
+  window.addEventListener('dragleave', (e) => {
+    if (!hasFiles(e)) return;
+    if (--depth <= 0) {
+      depth = 0;
+      useDrag.setState({ drag: null });
+    }
+  });
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    depth = 0;
+    const d = useDrag.getState().drag;
+    useDrag.setState({ drag: null });
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (!files.length) return;
+    applyDrop({ kind: 'files', count: files.length }, d?.target ?? null, files);
+  });
+}

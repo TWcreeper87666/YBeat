@@ -1,0 +1,750 @@
+import type { Clip, FxItem, Media, Module, Tracks } from '../store';
+import { hexToRgb, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
+import { clipSource, plainSpeed } from './remap';
+import { clipTransformAt } from './transform';
+import { evalKeys, type Keyframe } from './keyframes';
+
+export interface RenderCtx {
+  clips: Clip[];
+  videoTracks: Clip[][]; // 依軌道分組、依開始時間排序
+  effects: FxItem[];
+  tracks: Tracks;
+  modules: Map<string, Module>;
+  media: Map<string, Media>;
+}
+
+export type FrameInfo =
+  | { kind: 'empty' }
+  | { kind: 'clip'; clip: Clip }
+  | { kind: 'transition'; A: Clip; B: Clip; progress: number; d: number };
+
+const ADJ_EPS = 0.01;
+
+/** 轉場以剪接點為中心，長度不超過前後片段 */
+export function transitionWindow(A: Clip | undefined, B: Clip): { t0: number; d: number } | null {
+  if (!B.transitionIn || !A) return null;
+  if (Math.abs(A.start + A.duration - B.start) > ADJ_EPS) return null;
+  const d = Math.min(B.transitionIn.duration, A.duration, B.duration);
+  return { t0: B.start - d / 2, d };
+}
+
+export function sortClips(clips: Clip[]) {
+  return [...clips].sort((a, b) => a.start - b.start);
+}
+
+/** 單一軌道在時間 t 的狀態（clips 需已排序） */
+export function computeFrame(sorted: Clip[], t: number): FrameInfo {
+  for (let i = 1; i < sorted.length; i++) {
+    const w = transitionWindow(sorted[i - 1], sorted[i]);
+    if (w && t >= w.t0 && t < w.t0 + w.d) return { kind: 'transition', A: sorted[i - 1], B: sorted[i], progress: (t - w.t0) / w.d, d: w.d };
+  }
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const c = sorted[i];
+    if (t >= c.start && t < c.start + c.duration) return { kind: 'clip', clip: c };
+  }
+  return { kind: 'empty' };
+}
+
+// ───────────────────────── GLSL ─────────────────────────
+
+const VS = `#version 300 es
+in vec2 a_pos;
+out vec2 v_uv;
+void main() { v_uv = a_pos * 0.5 + 0.5; gl_Position = vec4(a_pos, 0.0, 1.0); }`;
+
+const HEAD = `#version 300 es
+precision highp float;
+in vec2 v_uv;
+out vec4 outColor;
+uniform vec2 u_resolution;
+uniform float u_time;
+uniform float u_local;
+uniform float u_duration;
+uniform float u_progress;
+`;
+
+export const GLSL_LIB = `
+#define PI 3.14159265
+#define ASPECT (u_resolution.x / u_resolution.y)
+float rand(vec2 c) { return fract(sin(dot(c, vec2(12.9898, 78.233))) * 43758.5453); }
+float noise1(float x) { float i = floor(x), f = fract(x); return mix(rand(vec2(i, 0.0)), rand(vec2(i + 1.0, 0.0)), smoothstep(0.0, 1.0, f)) * 2.0 - 1.0; }
+mat2 rot(float a) { float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+vec2 rotateUV(vec2 uv, float a, vec2 c) { vec2 p = uv - c; p.x *= ASPECT; p = rot(a) * p; p.x /= ASPECT; return p + c; }
+vec2 zoomUV(vec2 uv, float z, vec2 c) { return (uv - c) / z + c; }
+vec2 mirrorUV(vec2 uv) { return 1.0 - abs(1.0 - mod(uv, 2.0)); }
+float easeOutExpo(float x) { return x >= 1.0 ? 1.0 : 1.0 - pow(2.0, -10.0 * x); }
+float easeInExpo(float x) { return x <= 0.0 ? 0.0 : pow(2.0, 10.0 * x - 10.0); }
+float easeInOutCubic(float x) { return x < 0.5 ? 4.0 * x * x * x : 1.0 - pow(-2.0 * x + 2.0, 3.0) / 2.0; }
+float easeOutBack(float x) { float c1 = 1.70158, c3 = c1 + 1.0; return 1.0 + c3 * pow(x - 1.0, 3.0) + c1 * pow(x - 1.0, 2.0); }
+`;
+
+function paramUniforms(defs: ParamDef[]) {
+  const t = { float: 'float', int: 'int', bool: 'bool', color: 'vec3' } as const;
+  return defs.map((d) => `uniform ${t[d.type]} ${d.name};`).join('\n');
+}
+
+function buildEffectFS(code: string, defs: ParamDef[]) {
+  return `${HEAD}uniform sampler2D u_tex;
+${GLSL_LIB}
+vec4 tex(vec2 uv) { return texture(u_tex, uv); }
+${paramUniforms(defs)}
+#line 1
+${code}
+void main() { outColor = effect(v_uv); }`;
+}
+
+function buildTransitionFS(code: string, defs: ParamDef[]) {
+  return `${HEAD}uniform sampler2D u_from;
+uniform sampler2D u_to;
+#define progress u_progress
+${GLSL_LIB}
+vec4 getFrom(vec2 uv) { return texture(u_from, uv); }
+vec4 getTo(vec2 uv) { return texture(u_to, uv); }
+${paramUniforms(defs)}
+#line 1
+${code}
+void main() { outColor = transition(v_uv); }`;
+}
+
+/** 素材 → 畫面：縮放 / 位移 / 旋轉 / 翻轉 / 不透明度 / 填滿模式（輸出 premultiplied alpha） */
+const CLIP_FS = `${HEAD}uniform sampler2D u_tex;
+uniform float u_srcAspect;
+uniform vec4 u_xf;       // x, y, scale, rotation(rad)
+uniform float u_opacity;
+uniform int u_fit;       // 0 cover, 1 contain, 2 contain + blur bg
+uniform float u_flip;
+#define ASPECT (u_resolution.x / u_resolution.y)
+vec2 fitSize(bool cover) {
+  float A = ASPECT, S = u_srcAspect;
+  bool wide = S > A;
+  if (cover) return wide ? vec2(S, 1.0) : vec2(A, A / S);
+  return wide ? vec2(A, A / S) : vec2(S, 1.0);
+}
+void main() {
+  vec2 p = vec2(v_uv.x - 0.5, 0.5 - v_uv.y) - u_xf.xy;   // 畫面座標，y 向下
+  p.x *= ASPECT;
+  float c = cos(u_xf.w), s = sin(u_xf.w);
+  vec2 q = vec2(c * p.x + s * p.y, -s * p.x + c * p.y) / u_xf.z;
+  vec2 uv = q / fitSize(u_fit == 0) + 0.5;
+  if (u_flip > 0.5) uv.x = 1.0 - uv.x;
+  vec4 col = vec4(0.0);
+  vec2 aa = fwidth(uv) * 0.75;
+  vec2 edge = smoothstep(vec2(0.0), aa, uv) * smoothstep(vec2(0.0), aa, 1.0 - uv);
+  float inside = edge.x * edge.y;
+  if (inside > 0.0) col = vec4(texture(u_tex, vec2(uv.x, 1.0 - uv.y)).rgb, 1.0) * inside;
+  if (u_fit == 2) {
+    vec2 bu = (v_uv - 0.5) * vec2(ASPECT, 1.0) / fitSize(true) + 0.5;
+    vec3 bg = vec3(0.0);
+    for (int i = -2; i <= 2; i++)
+      for (int j = -2; j <= 2; j++) bg += textureLod(u_tex, bu + vec2(i, j) * 0.012, 6.0).rgb;
+    col = col + vec4(bg / 25.0 * 0.6, 1.0) * (1.0 - col.a);
+  }
+  outColor = col * u_opacity;
+}`;
+
+const BLIT_FS = `${HEAD}uniform sampler2D u_tex;
+void main() { outColor = texture(u_tex, v_uv); }`;
+
+// ───────────────────────── Renderer ─────────────────────────
+
+interface Target { tex: WebGLTexture; fb: WebGLFramebuffer }
+interface Prog { prog: WebGLProgram; defs: ParamDef[]; locs: Map<string, WebGLUniformLocation | null> }
+
+export class Renderer {
+  readonly w: number;
+  readonly h: number;
+  readonly gl: WebGL2RenderingContext;
+  private vao: WebGLVertexArrayObject;
+  private vs: WebGLShader;
+  private targets: Target[];
+  private clipProg: Prog;
+  private blit: Prog;
+  private progs = new Map<string, { code: string; good: Prog | null }>();
+  private textures = new Map<string, WebGLTexture>();
+  private images = new Map<string, HTMLImageElement>();
+  private uploaded = new Set<string>();
+  private videos = new Map<string, HTMLVideoElement>();
+  onError: (id: string, msg: string | null) => void = () => {};
+
+  constructor(public canvas: HTMLCanvasElement, size = { w: 1080, h: 1920 }) {
+    this.w = size.w;
+    this.h = size.h;
+    canvas.width = this.w;
+    canvas.height = this.h;
+    const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, preserveDrawingBuffer: true, premultipliedAlpha: false });
+    if (!gl) throw new Error('此瀏覽器不支援 WebGL2');
+    this.gl = gl;
+
+    this.vao = gl.createVertexArray()!;
+    gl.bindVertexArray(this.vao);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(0);
+    gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+    this.vs = gl.createShader(gl.VERTEX_SHADER)!;
+    gl.shaderSource(this.vs, VS);
+    gl.compileShader(this.vs);
+
+    this.targets = [0, 1, 2, 3].map(() => this.makeTarget());
+    this.clipProg = this.mustCompile(CLIP_FS);
+    this.blit = this.mustCompile(BLIT_FS);
+  }
+
+  private makeTarget(): Target {
+    const gl = this.gl;
+    const tex = this.newTexture(false);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, this.w, this.h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    const fb = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { tex, fb };
+  }
+
+  private newTexture(mip: boolean) {
+    const gl = this.gl;
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mip ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  private compile(fsSrc: string): { prog: WebGLProgram | null; error: string | null } {
+    const gl = this.gl;
+    const fs = gl.createShader(gl.FRAGMENT_SHADER)!;
+    gl.shaderSource(fs, fsSrc);
+    gl.compileShader(fs);
+    if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+      const error = gl.getShaderInfoLog(fs) || '編譯失敗';
+      gl.deleteShader(fs);
+      return { prog: null, error: error.trim() };
+    }
+    const prog = gl.createProgram()!;
+    gl.attachShader(prog, this.vs);
+    gl.attachShader(prog, fs);
+    gl.bindAttribLocation(prog, 0, 'a_pos');
+    gl.linkProgram(prog);
+    gl.deleteShader(fs);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      const error = gl.getProgramInfoLog(prog) || '連結失敗';
+      gl.deleteProgram(prog);
+      return { prog: null, error: error.trim() };
+    }
+    return { prog, error: null };
+  }
+
+  private mustCompile(fs: string): Prog {
+    const r = this.compile(fs);
+    if (!r.prog) throw new Error(r.error ?? '');
+    return { prog: r.prog, defs: [], locs: new Map() };
+  }
+
+  /** 取得模組的 shader；程式碼改變就重新編譯，失敗時沿用上一個可用版本 */
+  private moduleProg(m: Module): Prog | null {
+    let e = this.progs.get(m.id);
+    if (e && e.code === m.code) return e.good;
+    const defs = parseParams(m.code);
+    const fs = m.kind === 'transition' ? buildTransitionFS(m.code, defs) : buildEffectFS(m.code, defs);
+    const r = this.compile(fs);
+    if (r.prog) {
+      if (e?.good) this.gl.deleteProgram(e.good.prog);
+      e = { code: m.code, good: { prog: r.prog, defs, locs: new Map() } };
+      this.onError(m.id, null);
+    } else {
+      e = { code: m.code, good: e?.good ?? null };
+      this.onError(m.id, r.error);
+    }
+    this.progs.set(m.id, e);
+    return e.good;
+  }
+
+  private loc(p: Prog, name: string) {
+    if (!p.locs.has(name)) p.locs.set(name, this.gl.getUniformLocation(p.prog, name));
+    return p.locs.get(name)!;
+  }
+
+  private pass(target: Target | null, p: Prog, setup: (p: Prog) => void, blend = false) {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fb : null);
+    gl.viewport(0, 0, this.w, this.h);
+    gl.useProgram(p.prog);
+    gl.uniform2f(this.loc(p, 'u_resolution'), this.w, this.h);
+    setup(p);
+    if (blend) {
+      gl.enable(gl.BLEND);
+      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+    }
+    gl.bindVertexArray(this.vao);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    if (blend) gl.disable(gl.BLEND);
+  }
+
+  private bindTex(p: Prog, name: string, tex: WebGLTexture, unit: number) {
+    const gl = this.gl;
+    gl.activeTexture(gl.TEXTURE0 + unit);
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.uniform1i(this.loc(p, name), unit);
+  }
+
+  private setCommon(p: Prog, time: number, local: number, duration: number, progress: number) {
+    const gl = this.gl;
+    gl.uniform1f(this.loc(p, 'u_time'), time);
+    gl.uniform1f(this.loc(p, 'u_local'), local);
+    gl.uniform1f(this.loc(p, 'u_duration'), duration);
+    gl.uniform1f(this.loc(p, 'u_progress'), Math.min(1, Math.max(0, progress)));
+  }
+
+  private setParams(p: Prog, values: ParamValues, keys?: Record<string, Keyframe[]>, local = 0) {
+    const gl = this.gl;
+    const v = resolveParams(p.defs, values);
+    for (const d of p.defs) {
+      const l = this.loc(p, d.name);
+      if (!l) continue;
+      const k = keys?.[d.name];
+      const x = k?.length && (d.type === 'float' || d.type === 'int') ? evalKeys(k, local) : v[d.name];
+      if (d.type === 'float') gl.uniform1f(l, Number(x));
+      else if (d.type === 'int') gl.uniform1i(l, Math.round(Number(x)));
+      else if (d.type === 'bool') gl.uniform1i(l, x ? 1 : 0);
+      else gl.uniform3f(l, ...hexToRgb(String(x)));
+    }
+  }
+
+  private clear(target: Target, opaque: boolean) {
+    const gl = this.gl;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, target.fb);
+    gl.clearColor(0, 0, 0, opaque ? 1 : 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+  }
+
+  private upload(key: string, source: TexImageSource, mip = true) {
+    const gl = this.gl;
+    let tex = this.textures.get(key);
+    if (!tex) {
+      tex = this.newTexture(mip);
+      this.textures.set(key, tex);
+    }
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, mip ? gl.LINEAR_MIPMAP_LINEAR : gl.LINEAR);
+    if (mip) gl.generateMipmap(gl.TEXTURE_2D);
+    return tex;
+  }
+
+  private image(media: Media) {
+    let img = this.images.get(media.id);
+    if (!img || img.src !== media.url) {
+      img = new Image();
+      img.src = media.url;
+      this.images.set(media.id, img);
+      this.uploaded.delete('img:' + media.id);
+    }
+    return img;
+  }
+
+  private imageTex(media: Media): WebGLTexture | null {
+    const key = 'img:' + media.id;
+    const img = this.image(media);
+    if (this.uploaded.has(key)) return this.textures.get(key)!;
+    if (!img.complete || !img.naturalWidth) return null;
+    this.upload(key, img);
+    this.uploaded.add(key);
+    return this.textures.get(key)!;
+  }
+
+  private videoFor(clip: Clip, media: Media) {
+    let v = this.videos.get(clip.id);
+    if (!v || v.dataset.src !== media.url) {
+      v?.pause();
+      v = document.createElement('video');
+      v.muted = true;
+      v.playsInline = true;
+      v.preload = 'auto';
+      v.src = media.url;
+      v.dataset.src = media.url;
+      const vv = v as HTMLVideoElement & { _dirty?: boolean };
+      vv._dirty = true;
+      if ('requestVideoFrameCallback' in v) {
+        const mark = () => {
+          vv._dirty = true;
+          vv.requestVideoFrameCallback(mark);
+        };
+        vv.requestVideoFrameCallback(mark);
+      }
+      this.videos.set(clip.id, v);
+    }
+    return v;
+  }
+
+  /** 影片貼圖：只有新影格才重新上傳（rVFC 標記）；匯出時一律上傳 */
+  private videoTex(clipId: string, v: HTMLVideoElement, mip: boolean, force: boolean): WebGLTexture | null {
+    const key = 'vid:' + clipId;
+    const vv = v as HTMLVideoElement & { _dirty?: boolean };
+    const has = this.textures.get(key);
+    const hasRvfc = 'requestVideoFrameCallback' in v;
+    if (v.readyState >= 2 && (force || !has || !hasRvfc || vv._dirty || this.mipState.get(key) !== mip)) {
+      vv._dirty = false;
+      this.mipState.set(key, mip);
+      return this.upload(key, v, mip);
+    }
+    return has ?? null;
+  }
+  private mipState = new Map<string, boolean>();
+
+  /** 預覽用：能用原生播放就用（順暢、可帶原音），倒放 / 極端速度改用逐幀 seek。回傳是否為原生播放 */
+  private syncVideo(v: HTMLVideoElement, src: number, rate: number, playing: boolean) {
+    if (playing && rate >= 0.0625 && rate <= 16) {
+      if (v.paused) {
+        if (Math.abs(v.currentTime - src) > 0.04) v.currentTime = src;
+        v.playbackRate = rate;
+        v.play().catch(() => {});
+      } else {
+        // 影片落後 → 稍微加速、超前 → 稍微減速；差太多才硬 seek
+        const drift = src - v.currentTime;
+        if (Math.abs(drift) > 0.75 && !v.seeking) v.currentTime = src;
+        const adj = Math.min(16, Math.max(0.0625, rate * (1 + Math.max(-0.4, Math.min(0.4, drift * 1.2)))));
+        if (Math.abs(v.playbackRate - adj) > 0.015) v.playbackRate = adj;
+      }
+      return true;
+    }
+    if (!v.paused) v.pause();
+    if (!v.seeking && Math.abs(v.currentTime - src) > 0.008) v.currentTime = src;
+    return false;
+  }
+
+  /** 把片段畫到 target；blend=true 時疊在現有內容上 */
+  private drawClip(target: Target, clip: Clip, t: number, ctx: RenderCtx, mode: 'preview' | 'export', playing: boolean, blend: boolean) {
+    const local = t - clip.start;
+    const media = ctx.media.get(clip.mediaId);
+    let tex: WebGLTexture | null = null;
+    if (!media || media.missing) {
+      // 素材遺失：畫警示圖樣，保留片段的位置與變換
+      const fake = { ...(media ?? { width: 1080, height: 1920 }), width: media?.width || 1080, height: media?.height || 1920 } as Media;
+      return this.drawTex(target, clip, local, this.missingTex(), fake, blend);
+    }
+    if (media.kind === 'image') tex = this.imageTex(media);
+    else if (media?.kind === 'video') {
+      const { src, rate } = clipSource(clip, local, media, ctx.modules);
+      const v = this.videoFor(clip, media);
+      if (mode === 'preview') {
+        const native = this.syncVideo(v, src, rate, playing);
+        const sound = native && clip.volume > 0 && media.hasAudio && !ctx.tracks.video[clip.track]?.muted && plainSpeed(clip, ctx.modules) !== null;
+        v.muted = !sound;
+        if (sound) v.volume = Math.min(1, clip.volume);
+      }
+      tex = this.videoTex(clip.id, v, clip.fit === 'blur', mode === 'export');
+    }
+    if (!tex) return;
+    this.drawTex(target, clip, local, tex, media, blend);
+  }
+
+  private missing: WebGLTexture | null = null;
+  /** 素材遺失時的警示圖樣（紅色斜紋 + 文字） */
+  private missingTex() {
+    if (this.missing) return this.missing;
+    const c = document.createElement('canvas');
+    c.width = 540;
+    c.height = 960;
+    const g = c.getContext('2d')!;
+    g.fillStyle = '#2a0f14';
+    g.fillRect(0, 0, 540, 960);
+    g.strokeStyle = '#ff3d6e55';
+    g.lineWidth = 26;
+    for (let i = -1000; i < 1600; i += 70) {
+      g.beginPath();
+      g.moveTo(i, 0);
+      g.lineTo(i - 960, 960);
+      g.stroke();
+    }
+    g.fillStyle = '#fff';
+    g.textAlign = 'center';
+    g.font = '700 54px system-ui, sans-serif';
+    g.fillText('⚠ 素材遺失', 270, 460);
+    g.font = '28px system-ui, sans-serif';
+    g.fillText('把素材拖到時間軸上的片段即可重新連結', 270, 520);
+    this.missing = this.upload('missing', c);
+    return this.missing;
+  }
+
+  private drawTex(target: Target, clip: Clip, local: number, tex: WebGLTexture, media: Media, blend: boolean) {
+    const xf = clipTransformAt(clip, Math.min(local, clip.duration));
+    const fit = clip.fit === 'cover' ? 0 : clip.fit === 'contain' ? 1 : 2;
+    this.pass(
+      target,
+      this.clipProg,
+      (p) => {
+        const gl = this.gl;
+        this.bindTex(p, 'u_tex', tex, 0);
+        gl.uniform1f(this.loc(p, 'u_srcAspect'), media.width / media.height);
+        gl.uniform4f(this.loc(p, 'u_xf'), xf.x, xf.y, Math.max(0.001, xf.scale), (xf.rotation * Math.PI) / 180);
+        gl.uniform1f(this.loc(p, 'u_opacity'), Math.min(1, Math.max(0, xf.opacity)));
+        gl.uniform1i(this.loc(p, 'u_fit'), fit);
+        gl.uniform1f(this.loc(p, 'u_flip'), clip.flipX ? 1 : 0);
+      },
+      blend,
+    );
+  }
+
+  private sample: WebGLTexture | null = null;
+  /** 轉場預覽的「下一段」示範畫面 */
+  private sampleTex() {
+    if (this.sample) return this.sample;
+    const c = document.createElement('canvas');
+    c.width = 540;
+    c.height = 960;
+    const g = c.getContext('2d')!;
+    const grad = g.createLinearGradient(0, 0, 540, 960);
+    grad.addColorStop(0, '#29d3c2');
+    grad.addColorStop(1, '#3a0ca3');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, 540, 960);
+    g.globalAlpha = 0.15;
+    g.fillStyle = '#fff';
+    for (let i = 0; i < 12; i++) g.fillRect(0, i * 80, 540, 30);
+    g.globalAlpha = 1;
+    g.textAlign = 'center';
+    g.font = '900 220px system-ui, sans-serif';
+    g.fillText('B', 270, 540);
+    g.font = '600 30px system-ui, sans-serif';
+    g.fillText('下一段（示意）', 270, 620);
+    this.sample = this.upload('sample', c);
+    return this.sample;
+  }
+
+  /** 預先編譯尚未編譯的特效 / 轉場（一次一個），避免第一次出現時卡頓 */
+  warmup(modules: Map<string, Module>) {
+    for (const m of modules.values()) {
+      if (m.kind === 'remap') continue;
+      const e = this.progs.get(m.id);
+      if (e && e.code === m.code) continue;
+      const g = this.moduleProg(m);
+      if (g) {
+        // 用 1×1 畫一次，強迫驅動程式真的完成編譯
+        const gl = this.gl;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, this.targets[1].fb);
+        gl.viewport(0, 0, 1, 1);
+        gl.useProgram(g.prog);
+        gl.bindVertexArray(this.vao);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  render(ctx: RenderCtx, t: number, mode: 'preview' | 'export', playing = false, extra?: { module: Module; progress: number; duration: number }) {
+    const [TA, TB, P0, P1] = this.targets;
+    const active = new Set<string>();
+    this.clear(P0, true);
+
+    // 影片軌：由下（軌 1）往上疊
+    ctx.videoTracks.forEach((clips, ti) => {
+      if (ctx.tracks.video[ti]?.hidden) return;
+      const fr = computeFrame(clips, t);
+      if (fr.kind === 'clip') {
+        active.add(fr.clip.id);
+        this.drawClip(P0, fr.clip, t, ctx, mode, playing, true);
+      } else if (fr.kind === 'transition') {
+        active.add(fr.A.id).add(fr.B.id);
+        this.clear(TA, false);
+        this.clear(TB, false);
+        this.drawClip(TA, fr.A, t, ctx, mode, playing, false);
+        this.drawClip(TB, fr.B, t, ctx, mode, playing, false);
+        const tr = fr.B.transitionIn!;
+        const m = ctx.modules.get(tr.moduleId);
+        const g = m ? this.moduleProg(m) : null;
+        if (g) {
+          this.pass(P0, g, (p) => {
+            this.bindTex(p, 'u_from', TA.tex, 0);
+            this.bindTex(p, 'u_to', TB.tex, 1);
+            this.setCommon(p, t, fr.progress * fr.d, fr.d, fr.progress);
+            this.setParams(p, tr.params);
+          }, true);
+        } else {
+          this.pass(P0, this.blit, (p) => this.bindTex(p, 'u_tex', fr.progress < 0.5 ? TA.tex : TB.tex, 0), true);
+        }
+      }
+    });
+
+    // 特效軌：依軌道順序疊加（ping-pong）
+    let cur = P0;
+    const fxs = ctx.effects
+      .filter((e) => t >= e.start && t < e.start + e.duration && !ctx.tracks.fx[e.track]?.hidden)
+      .sort((a, b) => a.track - b.track || a.start - b.start);
+    for (const fx of fxs) {
+      const m = ctx.modules.get(fx.moduleId);
+      const g = m ? this.moduleProg(m) : null;
+      if (!g) continue;
+      const out = cur === P0 ? P1 : P0;
+      const src = cur;
+      this.pass(out, g, (p) => {
+        this.bindTex(p, 'u_tex', src.tex, 0);
+        this.setCommon(p, t, t - fx.start, fx.duration, (t - fx.start) / fx.duration);
+        this.setParams(p, fx.params, fx.keys, t - fx.start);
+      });
+      cur = out;
+    }
+
+    // 素材庫預覽：把點選的特效 / 轉場疊在目前畫面上循環播放
+    if (extra) {
+      const g = this.moduleProg(extra.module);
+      if (g) {
+        const out = cur === P0 ? P1 : P0;
+        const src = cur;
+        if (extra.module.kind === 'effect') {
+          this.pass(out, g, (p) => {
+            this.bindTex(p, 'u_tex', src.tex, 0);
+            this.setCommon(p, t, extra.progress * extra.duration, extra.duration, extra.progress);
+            this.setParams(p, {});
+          });
+        } else {
+          this.clear(TB, true);
+          this.pass(TB, this.blit, (p) => this.bindTex(p, 'u_tex', this.sampleTex(), 0));
+          this.pass(out, g, (p) => {
+            this.bindTex(p, 'u_from', src.tex, 0);
+            this.bindTex(p, 'u_to', TB.tex, 1);
+            this.setCommon(p, t, extra.progress * extra.duration, extra.duration, extra.progress);
+            this.setParams(p, {});
+          });
+        }
+        cur = out;
+      }
+    }
+
+    this.pass(null, this.blit, (p) => this.bindTex(p, 'u_tex', cur.tex, 0));
+    if (mode === 'preview') this.manageVideos(ctx, t, active);
+  }
+
+  /** 暫停非作用中的影片、預先 seek 即將出現的片段、回收已刪除片段 */
+  private manageVideos(ctx: RenderCtx, t: number, active: Set<string>) {
+    const ids = new Set(ctx.clips.map((c) => c.id));
+    for (const [id, v] of this.videos) {
+      if (!ids.has(id)) {
+        v.pause();
+        v.removeAttribute('src');
+        v.load();
+        this.videos.delete(id);
+        const tex = this.textures.get('vid:' + id);
+        if (tex) this.gl.deleteTexture(tex);
+        this.textures.delete('vid:' + id);
+      }
+    }
+    for (const c of ctx.clips) {
+      if (active.has(c.id)) continue;
+      const media = ctx.media.get(c.mediaId);
+      if (!media || media.missing || media.kind !== 'video') continue;
+      const v = this.videoFor(c, media);
+      if (!v.paused) v.pause();
+      v.muted = true;
+      const ahead = c.start - t;
+      if (ahead > 0 && ahead < 1.5 && !v.seeking) {
+        const { src } = clipSource(c, 0, media, ctx.modules);
+        if (Math.abs(v.currentTime - src) > 0.01) v.currentTime = src;
+      }
+    }
+  }
+
+  /** 產生特效 / 轉場的預覽縮圖（畫在自己的 canvas 上） */
+  thumb(module: Module, progress: number, a: TexImageSource, b: TexImageSource, duration: number): boolean {
+    const g = this.moduleProg(module);
+    if (!g) return false;
+    const [, TB, P0, P1] = this.targets;
+    const ta = this.upload('thumbA', a);
+    this.pass(P0, this.blit, (p) => this.bindTex(p, 'u_tex', ta, 0));
+    if (module.kind === 'effect') {
+      this.pass(P1, g, (p) => {
+        this.bindTex(p, 'u_tex', P0.tex, 0);
+        this.setCommon(p, progress * duration, progress * duration, duration, progress);
+        this.setParams(p, {});
+      });
+    } else {
+      const tb = this.upload('thumbB', b);
+      this.pass(TB, this.blit, (p) => this.bindTex(p, 'u_tex', tb, 0));
+      this.pass(P1, g, (p) => {
+        this.bindTex(p, 'u_from', P0.tex, 0);
+        this.bindTex(p, 'u_to', TB.tex, 1);
+        this.setCommon(p, progress * duration, progress * duration, duration, progress);
+        this.setParams(p, {});
+      });
+    }
+    this.pass(null, this.blit, (p) => this.bindTex(p, 'u_tex', P1.tex, 0));
+    return true;
+  }
+
+  pauseAll() {
+    for (const v of this.videos.values()) {
+      v.pause();
+      v.muted = true;
+    }
+  }
+
+  /** 匯出用：精準 seek 到每個需要的影格，確定畫面就緒後才回傳 */
+  async prepareExact(ctx: RenderCtx, t: number) {
+    const list: [Clip, number][] = [];
+    for (const clips of ctx.videoTracks) {
+      const fr = computeFrame(clips, t);
+      if (fr.kind === 'clip') list.push([fr.clip, t - fr.clip.start]);
+      else if (fr.kind === 'transition') list.push([fr.A, t - fr.A.start], [fr.B, t - fr.B.start]);
+    }
+    for (const [c, local] of list) {
+      const media = ctx.media.get(c.mediaId);
+      if (!media || media.missing) continue;
+      if (media.kind === 'image') {
+        const img = this.image(media);
+        if (!img.complete) await img.decode().catch(() => {});
+        continue;
+      }
+      if (media.kind !== 'video') continue;
+      const v = this.videoFor(c, media);
+      v.pause();
+      if (v.readyState < 1) await waitEvent(v, 'loadedmetadata');
+      const { src } = clipSource(c, local, media, ctx.modules);
+      if (Math.abs(v.currentTime - src) > 1e-4 || v.readyState < 2) {
+        const done = waitEvent(v, 'seeked');
+        v.currentTime = src;
+        await done;
+      }
+    }
+  }
+}
+
+function waitEvent(el: HTMLElement, ev: string, timeout = 4000) {
+  return new Promise<void>((resolve) => {
+    const finish = () => {
+      el.removeEventListener(ev, finish);
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeout);
+    el.addEventListener(ev, finish);
+  });
+}
+
+// ───────────────────────── singleton ─────────────────────────
+
+let instance: Renderer | null = null;
+export const setRenderer = (r: Renderer | null) => (instance = r);
+export const getRenderer = () => instance;
+
+const ctxCache = { key: [] as unknown[], ctx: null as RenderCtx | null };
+export function makeCtx(s: { clips: Clip[]; effects: FxItem[]; modules: Module[]; media: Media[]; tracks: Tracks }): RenderCtx {
+  const key = [s.clips, s.effects, s.modules, s.media, s.tracks];
+  if (ctxCache.ctx && key.every((k, i) => k === ctxCache.key[i])) return ctxCache.ctx;
+  ctxCache.key = key;
+  const videoTracks = s.tracks.video.map((_, i) => sortClips(s.clips.filter((c) => c.track === i)));
+  ctxCache.ctx = {
+    clips: s.clips,
+    videoTracks,
+    effects: s.effects,
+    tracks: s.tracks,
+    modules: new Map(s.modules.map((m) => [m.id, m])),
+    media: new Map(s.media.map((m) => [m.id, m])),
+  };
+  return ctxCache.ctx;
+}
