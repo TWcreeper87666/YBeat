@@ -1,5 +1,7 @@
+import { $t } from '../i18n';
+import { Check } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { closeMenu, openMenu, useDrag, useMenu, useToast, type MenuItem } from './uiStore';
+import { closeMenu, openMenu, useConfirm, useDrag, useMenu, useToast, type MenuItem } from './uiStore';
 
 // ───────────── 右鍵 / 下拉選單 ─────────────
 
@@ -50,7 +52,7 @@ export function MenuHost() {
               it.action?.();
             }}
           >
-            <span className="mcheck">{it.checked ? '✓' : ''}</span>
+            <span className="mcheck">{it.checked ? <Check size={13} /> : ''}</span>
             <span className="mlabel">{it.label}</span>
             <kbd>{it.shortcut ?? ''}</kbd>
           </button>
@@ -102,11 +104,64 @@ export function DragGhost() {
   const drag = useDrag((s) => s.drag);
   if (!drag || drag.payload.kind === 'files') return null;
   const ok = !!drag.target && !(drag.target.kind === 'clip' && !drag.target.valid);
+  const color = drag.payload.kind === 'color' ? drag.payload.color : undefined;
   return (
     <div className={`drag-ghost ${ok ? 'ok' : ''}`} style={{ left: drag.x + 14, top: drag.y + 10 }}>
-      {drag.thumb && <div className="drag-thumb" style={{ backgroundImage: `url(${drag.thumb})` }} />}
+      {(drag.thumb || color) && <div className="drag-thumb" style={{ backgroundImage: drag.thumb ? `url(${drag.thumb})` : undefined, background: color }} />}
+      <div className="drag-info">
       <span>{drag.label}</span>
-      <em>{!drag.target ? '拖到時間軸上' : drag.target.kind === 'clip' ? (drag.target.action === 'relink' ? '重新連結素材' : drag.target.action === 'transition' ? '設為進場轉場' : '套用變速') : '放開以加入'}</em>
+      <em>
+        {!drag.target
+          ? $t('拖到時間軸上')
+          : drag.target.kind === 'effect'
+            ? $t('取代這個特效')
+            : drag.target.kind === 'clip' && drag.target.action === 'effect'
+              ? $t('加到這個片段的特效')
+            : drag.target.kind === 'clip'
+              ? drag.target.action === 'relink' ? $t('重新連結素材') : drag.target.action === 'transition' ? $t('設為進場轉場') : drag.target.action === 'transitionOut' ? $t('設為轉出（到透明）') : $t('套用變速')
+              : $t('放開以加入')}
+      </em>
+      </div>
+    </div>
+  );
+}
+
+// ───────────── 確認對話框 ─────────────
+
+export function ConfirmHost() {
+  const req = useConfirm((s) => s.req);
+  const [text, setText] = useState('');
+  useEffect(() => setText(req?.input ?? ''), [req]);
+  useEffect(() => {
+    if (!req) return;
+    const k = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') done(false);
+      else if (e.key === 'Enter') done(true);
+      // 輸入框要能打字；其他按鍵不要觸發編輯器快捷鍵
+      else if ((e.target as HTMLElement).tagName === 'INPUT') return;
+      e.stopPropagation();
+    };
+    window.addEventListener('keydown', k, true);
+    return () => window.removeEventListener('keydown', k, true);
+  });
+  if (!req) return null;
+  function done(v: boolean) {
+    useConfirm.setState({ req: null });
+    req!.resolve(v, text);
+  }
+  return (
+    <div className="overlay" style={{ zIndex: 300 }} onPointerDown={(e) => e.target === e.currentTarget && done(false)}>
+      <div className="dialog">
+        <h3>{req.title}</h3>
+        {req.message && <p className="muted">{req.message}</p>}
+        {req.input !== undefined && (
+          <input className="text-input" autoFocus value={text} onChange={(e) => setText(e.target.value)} onFocus={(e) => e.currentTarget.select()} />
+        )}
+        <div className="dialog-actions">
+          <button className="btn" onClick={() => done(false)}>{$t('取消')}</button>
+          <button className={`btn ${req.danger ? 'danger-fill' : 'primary'}`} autoFocus={req.input === undefined} onClick={() => done(true)}>{req.ok}</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -133,13 +188,13 @@ function textMenu(x: number, y: number) {
   const sel = document.getSelection()?.toString() ?? '';
   const exec = (cmd: string) => () => document.execCommand(cmd);
   openMenu(x, y, [
-    { label: '復原', shortcut: 'Ctrl+Z', action: exec('undo') },
-    { label: '重做', shortcut: 'Ctrl+Y', action: exec('redo') },
+    { label: $t('復原'), shortcut: 'Ctrl+Z', action: exec('undo') },
+    { label: $t('重做'), shortcut: 'Ctrl+Y', action: exec('redo') },
     { separator: true },
-    { label: '剪下', shortcut: 'Ctrl+X', action: sel ? exec('cut') : undefined },
-    { label: '複製', shortcut: 'Ctrl+C', action: sel ? exec('copy') : undefined },
+    { label: $t('剪下'), shortcut: 'Ctrl+X', action: sel ? exec('cut') : undefined },
+    { label: $t('複製'), shortcut: 'Ctrl+C', action: sel ? exec('copy') : undefined },
     {
-      label: '貼上',
+      label: $t('貼上'),
       shortcut: 'Ctrl+V',
       action: async () => {
         try {
@@ -151,7 +206,7 @@ function textMenu(x: number, y: number) {
       },
     },
     { separator: true },
-    { label: '全選', shortcut: 'Ctrl+A', action: exec('selectAll') },
+    { label: $t('全選'), shortcut: 'Ctrl+A', action: exec('selectAll') },
   ]);
 }
 

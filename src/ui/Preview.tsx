@@ -1,3 +1,5 @@
+import { $t, displayName } from '../i18n';
+import { Diamond, X } from 'lucide-react';
 import React, { useEffect, useRef, useState } from 'react';
 import { projectDuration, useStore, type Clip, type Media } from '../store';
 import { Renderer, computeFrame, makeCtx, setRenderer } from '../engine/renderer';
@@ -5,9 +7,12 @@ import { setRemapErrorReporter } from '../engine/remap';
 import { syncAudioPreview, stopAudioPreview } from '../engine/audio';
 import { parseDuration } from '../engine/params';
 import { clipTransformAt, fitSize, isAnimated, setPropsAt, type Transform } from '../engine/transform';
+import { textSize } from '../engine/text';
+import { MaskGizmos } from './MaskEditor';
 import { stopPreviewFx, useLayout, usePreviewFx } from './uiStore';
+import { hasSourcePanel } from './SourcePanel';
 
-const FRAME_ASPECT = 1080 / 1920;
+const frameAspect = () => useStore.getState().format.w / useStore.getState().format.h;
 const TRANSITION_PREVIEW = 0.8;
 
 export function Preview() {
@@ -44,12 +49,16 @@ export function Preview() {
           useStore.setState({ time: t });
           stopPreviewFx();
         }
+        // 輸出比例 / 預覽畫質
+        const sc = useLayout.getState().previewScale || 1;
+        r.setSize(st.format.w * sc, st.format.h * sc, st.format.h);
         const ctx = makeCtx(st);
         // 素材庫點選的特效 / 轉場：循環預覽
         let extra;
         const fx = usePreviewFx.getState().fx;
         const m = fx && ctx.modules.get(fx.moduleId);
-        if (fx && m) {
+        // 版面有「素材預覽」分頁時，試看顯示在那裡；沒有才疊在主預覽上
+        if (fx && m && !hasSourcePanel()) {
           const dur = m.kind === 'transition' ? TRANSITION_PREVIEW : parseDuration(m.code, 0.5);
           const el = ((now - fx.t0) / 1000) % (dur + 0.6);
           extra = { module: m, progress: Math.min(1, el / dur), duration: dur };
@@ -83,11 +92,12 @@ export function Preview() {
 function FxPreviewLabel() {
   const fx = usePreviewFx((s) => s.fx);
   const name = useStore((s) => (fx ? s.modules.find((m) => m.id === fx.moduleId)?.name : null));
-  if (!fx || !name) return null;
+  if (!fx || !name || hasSourcePanel()) return null;
+  const label = displayName(name);
   return (
     <div className="fx-preview-label">
-      預覽：{name}
-      <button onClick={stopPreviewFx} title="結束預覽 (Esc)">✕</button>
+      {$t('預覽：')}{label}
+      <button onClick={stopPreviewFx} title={$t('結束預覽 (Esc)')}><X size={12} /></button>
     </div>
   );
 }
@@ -96,9 +106,9 @@ function FxPreviewLabel() {
 
 interface Box { cx: number; cy: number; w: number; h: number; rot: number }
 
-function boxOf(clip: Clip, media: Media, local: number, W: number, H: number): Box & { xf: Transform } {
+function boxOf(clip: Clip, media: Media | undefined, local: number, W: number, H: number): Box & { xf: Transform } {
   const xf = clipTransformAt(clip, local);
-  const [sw, sh] = fitSize(clip.fit === 'cover', media.width / media.height, FRAME_ASPECT);
+  const [sw, sh] = clip.text ? textSize(clip.text, useStore.getState().format.h) : fitSize(clip.fit === 'cover', media!.width / media!.height, frameAspect());
   return { xf, cx: (0.5 + xf.x) * W, cy: (0.5 + xf.y) * H, w: sw * xf.scale * H, h: sh * xf.scale * H, rot: xf.rotation };
 }
 
@@ -166,8 +176,8 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
 
   const W = rect.width, H = rect.height;
   const local = clip ? time - clip.start : -1;
-  const visible = !!clip && !!media && media.kind !== 'audio' && local >= 0 && local < clip.duration;
-  const box = visible ? boxOf(clip!, media!, local, W, H) : null;
+  const visible = !!clip && (!!clip.text || (!!media && media.kind !== 'audio')) && local >= 0 && local < clip.duration;
+  const box = visible ? boxOf(clip!, media, local, W, H) : null;
 
   const pt = (ev: { clientX: number; clientY: number }) => {
     const r = layerRef.current!.getBoundingClientRect();
@@ -175,7 +185,7 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
   };
 
   /** 開始拖曳：依 mode 改位置 / 縮放 / 旋轉。按住 Shift = 吸附 */
-  const begin = (e: React.PointerEvent, c: Clip, m: Media, mode: 'move' | 'scale' | 'rotate') => {
+  const begin = (e: React.PointerEvent, c: Clip, m: Media | undefined, mode: 'move' | 'scale' | 'rotate') => {
     e.stopPropagation();
     e.preventDefault();
     stopPreviewFx();
@@ -227,9 +237,9 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
     for (let ti = ctx.videoTracks.length - 1; ti >= 0; ti--) {
       if (s.tracks.video[ti]?.hidden) continue;
       const fr = computeFrame(ctx.videoTracks[ti], s.time);
-      const c = fr.kind === 'clip' ? fr.clip : fr.kind === 'transition' ? (fr.progress < 0.5 ? fr.A : fr.B) : null;
-      const m = c && ctx.media.get(c.mediaId);
-      if (!c || !m) continue;
+      const c = fr.kind === 'clip' ? fr.clip : fr.kind === 'transition' ? (fr.progress < 0.5 ? fr.A ?? fr.B : fr.B ?? fr.A) : null;
+      const m = c ? ctx.media.get(c.mediaId) : undefined;
+      if (!c || (!m && !c.text)) continue;
       const l = Math.min(c.duration - 1e-3, Math.max(0, s.time - c.start));
       if (hit(boxOf(c, m, l, W, H), p.x, p.y)) {
         s.select({ type: 'clip', id: c.id });
@@ -270,17 +280,18 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
           {guides.y !== null && <line x1={0} y1={guides.y * H} x2={W} y2={guides.y * H} />}
         </svg>
       )}
-      {box && clip && media && (
+      <MaskGizmos W={W} H={H} />
+      {box && clip && (
         <div
           className="gizmo"
           style={{ left: box.cx - box.w / 2, top: box.cy - box.h / 2, width: box.w, height: box.h, transform: `rotate(${box.rot}deg)` }}
           onPointerDown={(e) => e.button === 0 && begin(e, clip, media, 'move')}
         >
-          {(['x', 'y', 'scale', 'rotation'] as const).some((p) => isAnimated(clip, p)) && <span className="gizmo-tag">◆ 關鍵影格</span>}
+          {(['x', 'y', 'scale', 'rotation'] as const).some((p) => isAnimated(clip, p)) && <span className="gizmo-tag"><Diamond size={10} fill="currentColor" /> {$t('關鍵影格')}</span>}
           {['tl', 'tr', 'bl', 'br'].map((k) => (
             <div key={k} className={`gh ${k}`} onPointerDown={(e) => begin(e, clip, media, 'scale')} />
           ))}
-          <div className="grot" onPointerDown={(e) => begin(e, clip, media, 'rotate')} title="拖曳旋轉（Shift = 15° 一格）" />
+          <div className="grot" onPointerDown={(e) => begin(e, clip, media, 'rotate')} title={$t('拖曳旋轉（Shift = 15° 一格）')} />
         </div>
       )}
     </div>

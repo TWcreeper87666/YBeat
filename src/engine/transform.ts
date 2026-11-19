@@ -1,3 +1,4 @@
+import { $t } from '../i18n';
 import { ease } from './remap';
 import { ANIM_PROPS, evalKeys, upsertKey, type AnimProp, type Keys } from './keyframes';
 
@@ -14,15 +15,15 @@ export const DEFAULT_TRANSFORM: Transform = { x: 0, y: 0, scale: 1, rotation: 0,
 /** 舊版「起點 → 終點」動態用的緩動名稱（只用於轉換舊專案） */
 export type EaseName = 'linear' | 'in' | 'out' | 'inOut' | 'outBack';
 export const EASES: Record<EaseName, { label: string; fn: (x: number) => number }> = {
-  linear: { label: '線性', fn: ease.linear },
-  in: { label: '漸快 (In)', fn: ease.inCubic },
-  out: { label: '漸慢 (Out)', fn: ease.outCubic },
-  inOut: { label: '緩入緩出', fn: ease.inOutCubic },
-  outBack: { label: '過衝回彈', fn: ease.outBack },
+  linear: { label: $t('線性'), fn: ease.linear },
+  in: { label: $t('漸快 (In)'), fn: ease.inCubic },
+  out: { label: $t('漸慢 (Out)'), fn: ease.outCubic },
+  inOut: { label: $t('緩入緩出'), fn: ease.inOutCubic },
+  outBack: { label: $t('過衝回彈'), fn: ease.outBack },
 };
 
 export type Fit = 'cover' | 'contain' | 'blur';
-export const FITS: Record<Fit, string> = { cover: '填滿（裁切）', contain: '完整顯示', blur: '完整顯示 + 模糊背景' };
+export const FITS: Record<Fit, string> = { cover: $t('填滿（裁切）'), contain: $t('完整顯示'), blur: $t('完整顯示 + 模糊背景') };
 
 interface Animatable { transform: Transform; keys?: Keys }
 

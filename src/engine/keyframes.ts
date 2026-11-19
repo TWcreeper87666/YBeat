@@ -1,3 +1,4 @@
+import { $t } from '../i18n';
 /** 關鍵影格：每個屬性一串 key，區段之間用 cubic-bezier 緩動（跟 CSS / AE 一樣的概念） */
 
 export type AnimProp = 'x' | 'y' | 'scale' | 'rotation' | 'opacity';
@@ -14,22 +15,22 @@ export interface Keyframe {
 export type Keys = Partial<Record<AnimProp, Keyframe[]>>;
 
 export const ANIM_PROPS: { prop: AnimProp; label: string; step: number; suffix?: string; min?: number; max?: number }[] = [
-  { prop: 'scale', label: '縮放', step: 0.01, min: 0 },
-  { prop: 'x', label: '位置 X', step: 0.005 },
-  { prop: 'y', label: '位置 Y', step: 0.005 },
-  { prop: 'rotation', label: '旋轉', step: 0.5, suffix: '°' },
-  { prop: 'opacity', label: '不透明度', step: 0.01, min: 0, max: 1 },
+  { prop: 'scale', label: $t('縮放'), step: 0.01, min: 0 },
+  { prop: 'x', label: $t('位置 X'), step: 0.005 },
+  { prop: 'y', label: $t('位置 Y'), step: 0.005 },
+  { prop: 'rotation', label: $t('旋轉'), step: 0.5, suffix: '°' },
+  { prop: 'opacity', label: $t('不透明度'), step: 0.01, min: 0, max: 1 },
 ];
 
 export const EASE_PRESETS: { id: string; label: string; ease: Ease }[] = [
-  { id: 'linear', label: '線性', ease: [0, 0, 1, 1] },
-  { id: 'inOut', label: '緩入緩出', ease: [0.42, 0, 0.58, 1] },
-  { id: 'in', label: '漸快 (Ease In)', ease: [0.42, 0, 1, 1] },
-  { id: 'out', label: '漸慢 (Ease Out)', ease: [0, 0, 0.58, 1] },
-  { id: 'expoOut', label: '急停 (Expo Out)', ease: [0.16, 1, 0.3, 1] },
-  { id: 'expoIn', label: '急衝 (Expo In)', ease: [0.7, 0, 0.84, 0] },
-  { id: 'back', label: '過衝回彈 (Back)', ease: [0.34, 1.56, 0.64, 1] },
-  { id: 'hold', label: '定格 (Hold)', ease: 'hold' },
+  { id: 'linear', label: $t('線性'), ease: [0, 0, 1, 1] },
+  { id: 'inOut', label: $t('緩入緩出'), ease: [0.42, 0, 0.58, 1] },
+  { id: 'in', label: $t('漸快 (Ease In)'), ease: [0.42, 0, 1, 1] },
+  { id: 'out', label: $t('漸慢 (Ease Out)'), ease: [0, 0, 0.58, 1] },
+  { id: 'expoOut', label: $t('急停 (Expo Out)'), ease: [0.16, 1, 0.3, 1] },
+  { id: 'expoIn', label: $t('急衝 (Expo In)'), ease: [0.7, 0, 0.84, 0] },
+  { id: 'back', label: $t('過衝回彈 (Back)'), ease: [0.34, 1.56, 0.64, 1] },
+  { id: 'hold', label: $t('定格 (Hold)'), ease: 'hold' },
 ];
 export const DEFAULT_EASE: Ease = [0.42, 0, 0.58, 1];
 

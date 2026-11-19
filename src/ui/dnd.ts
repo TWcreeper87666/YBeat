@@ -1,8 +1,11 @@
+import { $t, displayName } from '../i18n';
 import type React from 'react';
-import { useStore, mediaUsable, type TrackKind } from '../store';
+import { useStore, mediaUsable, spansOf, type TrackKind } from '../store';
 import { parseDuration } from '../engine/params';
-import { addMediaBlob } from '../engine/media';
-import { toast, useDrag, type DragPayload, type DragState, type DropTarget } from './uiStore';
+import { addMediaBlob, colorMedia } from '../engine/media';
+import { fitStart } from '../engine/overlap';
+import { TEXT_PRESETS } from '../engine/text';
+import { confirmDialog, toast, useDrag, useSnapLine, type DragPayload, type DragState, type DropTarget } from './uiStore';
 
 const SNAP_PX = 10;
 
@@ -24,9 +27,14 @@ function laneDuration(payload: DragPayload): { dur: number; label: string; accep
   }
   if (payload.kind === 'module' && payload.moduleKind === 'effect') {
     const m = s.modules.find((x) => x.id === payload.id);
-    return { dur: m ? parseDuration(m.code, 0.5) : 0.5, label: m?.name ?? '', accepts: (k) => k === 'fx' };
+    return { dur: m ? parseDuration(m.code, 0.5) : 0.5, label: m ? displayName(m.name) : '', accepts: (k) => k === 'fx' };
   }
-  if (payload.kind === 'files') return { dur: 2, label: `${payload.count} 個檔案`, accepts: (k) => k !== 'fx' };
+  if (payload.kind === 'color') return { dur: 2, label: payload.color, accepts: (k) => k === 'video' };
+  if (payload.kind === 'text') {
+    const p = TEXT_PRESETS.find((x) => x.id === payload.preset);
+    return { dur: p?.duration ?? 3, label: p?.name ?? '', accepts: (k) => k === 'video' };
+  }
+  if (payload.kind === 'files') return { dur: 2, label: $t('{0} 個檔案', payload.count), accepts: (k) => k !== 'fx' };
   return null;
 }
 
@@ -43,12 +51,24 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
   const clipEl = els.find((e) => e.dataset.key?.startsWith('clip:'));
   const clip = clipEl ? s.clips.find((c) => c.id === clipEl.dataset.key!.slice(5)) : undefined;
 
+  // 特效拖到時間軸上的特效片段 → 取代
+  if (payload.kind === 'module' && payload.moduleKind === 'effect') {
+    const fxEl = els.find((e) => e.dataset.key?.startsWith('effect:'));
+    const fx = fxEl ? s.effects.find((f) => f.id === fxEl.dataset.key!.slice(7)) : undefined;
+    if (fx) return { kind: 'effect', fxId: fx.id };
+    // 拖到影片 / 文字片段上：變成這個片段的片段特效
+    if (clip) return { kind: 'clip', clipId: clip.id, action: 'effect', valid: true };
+  }
+
   // 片段上的放置：轉場 / 變速 / 重新連結遺失素材
   if (payload.kind === 'module' && payload.moduleKind !== 'effect') {
     if (!clip) return null;
     if (payload.moduleKind === 'transition') {
-      const prev = s.clips.find((c) => c.track === clip.track && c.id !== clip.id && Math.abs(c.start + c.duration - clip.start) < 0.01);
-      return { kind: 'clip', clipId: clip.id, action: 'transition', valid: !!prev };
+      // 放在片段後段、而且後面沒有緊貼的片段 → 轉出（轉到透明）；其他 → 進場（前面沒片段就從透明轉入）
+      const next = s.clips.find((c) => c.track === clip.track && c.id !== clip.id && Math.abs(clip.start + clip.duration - c.start) < 0.01);
+      const r = clipEl!.getBoundingClientRect();
+      if (!next && (x - r.left) / r.width > 0.6) return { kind: 'clip', clipId: clip.id, action: 'transitionOut', valid: true };
+      return { kind: 'clip', clipId: clip.id, action: 'transition', valid: true };
     }
     const m = s.media.find((x) => x.id === clip.mediaId);
     return { kind: 'clip', clipId: clip.id, action: 'remap', valid: m?.kind === 'video' };
@@ -66,7 +86,10 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
   }
 
   const laneEl = els.find((e) => e.dataset.laneKind);
-  if (!laneEl) return null;
+  if (!laneEl) {
+    useSnapLine.setState({ t: null });
+    return null;
+  }
   const lane = laneEl.dataset.laneKind as TrackKind;
   const idx = Number(laneEl.dataset.laneIdx);
   const info = laneDuration(payload);
@@ -77,11 +100,16 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
   let time = Math.max(0, (x - laneEl.getBoundingClientRect().left) / pps);
   const list = lane === 'video' ? s.clips : lane === 'fx' ? s.effects : s.audios;
   const pts = [0, s.time];
-  for (const it of list) if (it.track === idx) pts.push(it.start, it.start + it.duration);
+  for (const it of list) if (it.track === idx) pts.push(it.start, it.start + it.duration, it.start - info.dur);
   let best = SNAP_PX / pps;
+  let snapped: number | null = null;
   for (const p of pts) {
-    if (Math.abs(p - time) < best) { best = Math.abs(p - time); time = p; }
+    if (p >= 0 && Math.abs(p - time) < best) { best = Math.abs(p - time); time = p; snapped = p; }
   }
+  if (!s.snap) snapped = null;
+  useSnapLine.setState({ t: snapped });
+  // 同一軌不能重疊：放到最近的空位
+  time = fitStart(spansOf(s), `${lane}:${idx}`, time, info.dur);
   return { kind: 'lane', lane, idx, time, duration: info.dur, label: info.label };
 }
 
@@ -92,15 +120,35 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
     if (files) await importMany(files);
     return;
   }
+  if (target.kind === 'effect') {
+    const fx = s.effects.find((f) => f.id === target.fxId);
+    if (!fx || payload.kind !== 'module' || fx.moduleId === payload.id) return;
+    const hasKeys = Object.entries(fx.keys ?? {}).some(([k, l]) => !k.startsWith('mask.') && l.length);
+    if (hasKeys) {
+      const ok = await confirmDialog({
+        title: $t('取代特效？'),
+        message: $t('這個特效有設定關鍵影格，換成新的特效後，參數與關鍵影格都會被清除（遮罩會保留）。'),
+        ok: $t('取代'),
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    useStore.getState().replaceEffect(fx.id, payload.id);
+    return;
+  }
   if (target.kind === 'clip') {
-    if (!target.valid && target.action !== 'transition') return toast('這裡不能放', 'error');
+    if (!target.valid) return toast($t('這裡不能放'), 'error');
     const clip = s.clips.find((c) => c.id === target.clipId);
     if (!clip) return;
     if (payload.kind === 'module') {
-      if (target.action === 'transition') {
-        s.setTransition(clip.id, payload.id);
-        if (!target.valid) toast('轉場已套用，但前面沒有緊貼的片段，所以暫時不會生效', 'error');
-      } else s.setRemap(clip.id, payload.id);
+      if (target.action === 'effect') {
+        s.addClipFx(clip.id, payload.id);
+        toast($t('已加到片段特效'));
+        return;
+      }
+      if (target.action === 'transition') s.setTransition(clip.id, payload.id, 'in');
+      else if (target.action === 'transitionOut') s.setTransition(clip.id, payload.id, 'out');
+      else s.setRemap(clip.id, payload.id);
       return;
     }
     // 重新連結
@@ -110,7 +158,7 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
     if (!newId) return;
     const old = s.media.find((m) => m.id === clip.mediaId);
     useStore.getState().relinkMedia(clip.mediaId, newId);
-    toast(`已重新連結${old ? `「${old.name}」` : ''}`);
+    toast($t('已重新連結{0}', old ? $t('「{0}」', old.name) : ''));
     return;
   }
   // 軌道
@@ -127,6 +175,11 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
   };
   if (payload.kind === 'media') place(payload.id, target.time);
   else if (payload.kind === 'module') s.addEffect(payload.id, target.time, target.idx);
+  else if (payload.kind === 'text') s.addText(payload.preset, target.time, target.idx);
+  else if (payload.kind === 'color') {
+    const m = await colorMedia(payload.color);
+    if (m) place(m.id, target.time);
+  }
   else if (files) {
     let t = target.time;
     for (const f of files) {
@@ -139,8 +192,8 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
 async function importMany(files: File[]) {
   let n = 0;
   for (const f of files) if (await addMediaBlob(f, f.name).catch(() => null)) n++;
-  if (n) toast(`已匯入 ${n} 個檔案`);
-  else toast('無法匯入這些檔案', 'error');
+  if (n) toast($t('已匯入 {0} 個檔案', n));
+  else toast($t('無法匯入這些檔案'), 'error');
 }
 
 /** 素材庫項目：按下後拖超過 4px 才開始拖曳；回傳 true 代表變成拖曳（外部應取消 click） */
@@ -148,6 +201,12 @@ export function startLibraryDrag(e: React.PointerEvent, payload: DragPayload, la
   if (e.button !== 0) return;
   const x0 = e.clientX, y0 = e.clientY;
   let started = false;
+  // 沒給縮圖：用項目本身的縮圖（模組 / 文字樣式）
+  if (!thumb) {
+    const bg = (e.currentTarget as HTMLElement).querySelector<HTMLElement>('.lib-thumb');
+    const m = bg && /url\("?(.*?)"?\)/.exec(getComputedStyle(bg).backgroundImage);
+    if (m) thumb = m[1];
+  }
   const move = (ev: PointerEvent) => {
     if (!started && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return;
     started = true;
@@ -162,6 +221,7 @@ export function startLibraryDrag(e: React.PointerEvent, payload: DragPayload, la
     window.removeEventListener('keydown', esc);
     const d = useDrag.getState().drag;
     useDrag.setState({ drag: null });
+    useSnapLine.setState({ t: null });
     document.body.classList.remove('drag-ok', 'drag-no');
     if (started && d) {
       suppressClick();
@@ -202,7 +262,7 @@ export function installFileDrop() {
     if (!hasFiles(e)) return;
     e.dataTransfer!.dropEffect = 'copy';
     const payload: DragPayload = { kind: 'files', count: e.dataTransfer!.items.length };
-    useDrag.setState({ drag: { payload, label: `匯入 ${payload.count} 個檔案`, x: e.clientX, y: e.clientY, target: computeTarget(payload, e.clientX, e.clientY) } });
+    useDrag.setState({ drag: { payload, label: $t('匯入 {0} 個檔案', payload.count), x: e.clientX, y: e.clientY, target: computeTarget(payload, e.clientX, e.clientY) } });
   });
   window.addEventListener('dragleave', (e) => {
     if (!hasFiles(e)) return;

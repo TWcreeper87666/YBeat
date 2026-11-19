@@ -1,3 +1,5 @@
+import { $t } from '../i18n';
+import { Minimize2, Pause, PictureInPicture2, Play, Repeat, SkipBack, SkipForward, StepBack, StepForward } from 'lucide-react';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { projectDuration, useStore } from '../store';
 import { Preview } from './Preview';
@@ -83,17 +85,17 @@ function Transport() {
         {hover !== null && <div className="scrub-tip" style={{ left: `${(hover / total) * 100}%` }}>{fmt(hover)}</div>}
       </div>
       <div className="transport-row">
-        <button className="tp" title="回到開頭 (Home)" onClick={() => S.setTime(0)}>⏮</button>
-        <button className="tp" title="上一格 (←)" onClick={step(-1 / 60)}>◂</button>
-        <button className="tp play" title="播放 / 暫停 (Space)" onClick={S.togglePlay}>{playing ? '❚❚' : '▶'}</button>
-        <button className="tp" title="下一格 (→)" onClick={step(1 / 60)}>▸</button>
-        <button className="tp" title="到結尾 (End)" onClick={() => S.setTime(dur)}>⏭</button>
+        <button className="tp" title={$t('回到開頭 (Home)')} onClick={() => S.setTime(0)}><SkipBack size={15} /></button>
+        <button className="tp" title={$t('上一格 (←)')} onClick={step(-1 / 60)}><StepBack size={15} /></button>
+        <button className="tp play" title={$t('播放 / 暫停 (Space)')} onClick={S.togglePlay}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
+        <button className="tp" title={$t('下一格 (→)')} onClick={step(1 / 60)}><StepForward size={15} /></button>
+        <button className="tp" title={$t('到結尾 (End)')} onClick={() => S.setTime(dur)}><SkipForward size={15} /></button>
         <span className="tp-time">{fmt(time)} <span className="muted">/ {fmt(dur)}</span></span>
         <span className="spacer" />
-        {loop && <button className="tp on" title="停止循環 (Esc)" onClick={() => S.setLoop(null)}>🔁</button>}
+        {loop && <button className="tp on" title={$t('停止循環 (Esc)')} onClick={() => S.setLoop(null)}><Repeat size={15} /></button>}
         <button
           className={`tp ${grid ? 'on' : ''}`}
-          title="輔助網格（右鍵設定格數）"
+          title={$t('輔助網格（右鍵設定格數）')}
           onClick={() => useLayout.getState().set({ grid: !grid })}
           onContextMenu={(e) => {
             e.preventDefault();
@@ -106,10 +108,10 @@ function Transport() {
         {gridPop && <GridPopover at={gridPop} close={() => setGridPop(null)} />}
         <button
           className="tp"
-          title={floating ? '停駐回主視窗' : '分離成浮動視窗'}
+          title={floating ? $t('停駐回主視窗') : $t('分離成浮動視窗')}
           onClick={() => useLayout.getState().set({ floating: !floating })}
         >
-          {floating ? '⇲' : '⧉'}
+          {floating ? <Minimize2 size={15} /> : <PictureInPicture2 size={15} />}
         </button>
       </div>
     </div>
@@ -138,16 +140,16 @@ function GridPopover({ at, close }: { at: { x: number; y: number }; close: () =>
   const presets: [number, number][] = [[3, 3], [4, 4], [2, 2], [6, 6], [8, 4], [12, 6]];
   return (
     <div ref={ref} className="popover" style={{ left: pos.x, top: pos.y }} onContextMenu={(e) => e.preventDefault()}>
-      <div className="pop-title">輔助網格</div>
-      <div className="pop-row"><span>列（橫線）</span><DragNumber value={L.gridRows} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridRows: Math.round(v), grid: true })} /></div>
-      <div className="pop-row"><span>欄（直線）</span><DragNumber value={L.gridCols} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridCols: Math.round(v), grid: true })} /></div>
+      <div className="pop-title">{$t('輔助網格')}</div>
+      <div className="pop-row"><span>{$t('列（橫線）')}</span><DragNumber value={L.gridRows} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridRows: Math.round(v), grid: true })} /></div>
+      <div className="pop-row"><span>{$t('欄（直線）')}</span><DragNumber value={L.gridCols} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridCols: Math.round(v), grid: true })} /></div>
       <div className="chips">
         {presets.map(([r, c]) => (
           <button key={`${r}x${c}`} className={L.gridRows === r && L.gridCols === c ? 'on' : ''} onClick={() => L.set({ gridRows: r, gridCols: c, grid: true })}>{c}×{r}</button>
         ))}
       </div>
-      <label className="check"><input type="checkbox" checked={L.gridCenter} onChange={(e) => L.set({ gridCenter: e.target.checked })} /> 中心十字</label>
-      <label className="check"><input type="checkbox" checked={L.gridSafe} onChange={(e) => L.set({ gridSafe: e.target.checked })} /> 短影音安全區</label>
+      <label className="check"><input type="checkbox" checked={L.gridCenter} onChange={(e) => L.set({ gridCenter: e.target.checked })} />{' '}{$t('中心十字')}</label>
+      <label className="check"><input type="checkbox" checked={L.gridSafe} onChange={(e) => L.set({ gridSafe: e.target.checked })} />{' '}{$t('短影音安全區')}</label>
     </div>
   );
 }
@@ -209,7 +211,7 @@ export function FloatingWindow({ title, children }: { title: string; children: R
     <div className="float-win" style={{ left: rect.x, top: rect.y, width: rect.w, height: rect.h }}>
       <div className="float-title" onPointerDown={(e) => drag(e, 'move')} onDoubleClick={() => set({ floating: false })}>
         <span>{title}</span>
-        <button title="停駐回主視窗" onPointerDown={(e) => e.stopPropagation()} onClick={() => set({ floating: false })}>⇲</button>
+        <button title={$t('停駐回主視窗')} onPointerDown={(e) => e.stopPropagation()} onClick={() => set({ floating: false })}><Minimize2 size={14} /></button>
       </div>
       <div className="float-body">{children}</div>
       <div className="rz r" onPointerDown={(e) => drag(e, 'r')} />
@@ -244,7 +246,7 @@ export function Splitter({
     <div
       className={`splitter ${dir} ${active ? 'active' : ''}`}
       onDoubleClick={onReset}
-      title="拖曳調整大小，雙擊重設"
+      title={$t('拖曳調整大小，雙擊重設')}
       onPointerDown={(e) => {
         if (e.button !== 0) return;
         e.preventDefault();

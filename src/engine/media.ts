@@ -1,3 +1,4 @@
+import { $t } from '../i18n';
 import { uid, useStore, type Media } from '../store';
 import { PEAKS_PER_SEC, computePeaks, getAudioBuffer } from './audio';
 import { deleteMediaBlob, saveMediaBlob } from './project';
@@ -6,7 +7,7 @@ import { toast } from '../ui/uiStore';
 function once(el: HTMLElement, ev: string) {
   return new Promise<void>((res, rej) => {
     el.addEventListener(ev, () => res(), { once: true });
-    el.addEventListener('error', () => rej(new Error('無法讀取檔案')), { once: true });
+    el.addEventListener('error', () => rej(new Error($t('無法讀取檔案'))), { once: true });
   });
 }
 
@@ -32,7 +33,7 @@ export async function importFile(file: Blob, name: string): Promise<Media | null
     const info = await audioInfo(url, 0);
     if (!info.hasAudio || !info.duration) {
       URL.revokeObjectURL(url);
-      throw new Error('無法解碼音訊');
+      throw new Error($t('無法解碼音訊'));
     }
     return { id: uid(), name, kind: 'audio', url, width: 0, height: 0, duration: info.duration, thumb: '', hasAudio: true, peaks: info.peaks, peaksPerSec: info.peaksPerSec };
   }
@@ -82,12 +83,12 @@ export async function importFiles(files: FileList | File[]) {
       if (await addMediaBlob(f, f.name)) ok++;
       else bad.push(f.name);
     } catch (e) {
-      console.warn('匯入失敗', f.name, e);
+      console.warn($t('匯入失敗'), f.name, e);
       bad.push(f.name);
     }
   }
-  if (ok) toast(`已匯入 ${ok} 個檔案`);
-  if (bad.length) toast(`無法匯入：${bad.join('、')}`, 'error');
+  if (ok) toast($t('已匯入 {0} 個檔案', ok));
+  if (bad.length) toast($t('無法匯入：{0}', bad.join($t('、'))), 'error');
 }
 
 /** 開啟檔案選擇視窗 */
@@ -110,12 +111,31 @@ export async function relinkWithPicker(oldId: string) {
   if (!file) return;
   try {
     const m = await addMediaBlob(file, file.name);
-    if (!m) return toast('無法讀取這個檔案', 'error');
+    if (!m) return toast($t('無法讀取這個檔案'), 'error');
     useStore.getState().relinkMedia(oldId, m.id);
-    toast(`已重新連結「${old?.name ?? ''}」→「${m.name}」`);
+    toast($t('已重新連結「{0}」→「{1}」', old?.name ?? '', m.name));
   } catch {
-    toast('無法讀取這個檔案', 'error');
+    toast($t('無法讀取這個檔案'), 'error');
   }
+}
+
+/** 色板素材的名稱 */
+export const colorName = (hex: string) => $t('色板 {0}', hex.toLowerCase());
+
+/** 純色素材（色板）：已經有同色的就直接用，沒有就產生一張 9:16 純色圖 */
+export async function colorMedia(hex: string): Promise<Media | null> {
+  const name = colorName(hex);
+  const hit = useStore.getState().media.find((m) => m.name === name && !m.missing);
+  if (hit) return hit;
+  const c = document.createElement('canvas');
+  c.width = 108;
+  c.height = 192;
+  const g = c.getContext('2d')!;
+  g.fillStyle = hex;
+  g.fillRect(0, 0, c.width, c.height);
+  const blob = await new Promise<Blob | null>((res) => c.toBlob(res, 'image/png'));
+  if (!blob) return null;
+  return addMediaBlob(blob, name);
 }
 
 /** 從素材庫移除：沒被使用就直接刪；被使用就變成「遺失」狀態，片段保留 */
@@ -128,7 +148,7 @@ export function removeMedia(id: string) {
   deleteMediaBlob(id);
   if (used) {
     useStore.setState({ media: s.media.map((x) => (x.id === id ? { ...x, url: '', thumb: x.kind === 'image' ? '' : x.thumb, missing: true } : x)) });
-    toast(`「${m.name}」已移除，使用中的片段標記為遺失`);
+    toast($t('「{0}」已移除，使用中的片段標記為遺失', m.name));
   } else {
     useStore.setState({ media: s.media.filter((x) => x.id !== id) });
   }

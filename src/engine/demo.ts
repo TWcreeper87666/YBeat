@@ -1,3 +1,4 @@
+import { $t } from '../i18n';
 import { makeClip, uid, useStore, type Clip, type FxItem, type Media } from '../store';
 import { addMediaBlob } from './media';
 import { newKey } from './keyframes';
@@ -51,7 +52,7 @@ function makeCard(i: number): Promise<Blob> {
 export async function loadDemo() {
   const media: Media[] = [];
   for (let i = 0; i < 6; i++) {
-    const m = await addMediaBlob(await makeCard(i), `示範卡 ${i + 1}.png`);
+    const m = await addMediaBlob(await makeCard(i), $t('示範卡 {0}.png', i + 1));
     if (m) media.push(m);
   }
   const trs = [null, 'tr-crashzoom', 'tr-whip', 'tr-spin', 'tr-diagonal', 'tr-iris'];

@@ -44,7 +44,7 @@ function apply(d: Doc) {
   const exists =
     !sel ||
     sel.type === 'module' ||
-    d.clips.some((c) => c.id === sel.id) ||
+    d.clips.some((c) => c.id === sel.id || `out:${c.id}` === sel.id) ||
     d.effects.some((c) => c.id === sel.id) ||
     d.audios.some((c) => c.id === sel.id);
   useStore.setState({ ...d, selection: exists ? sel : null });

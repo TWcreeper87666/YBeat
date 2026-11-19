@@ -1,3 +1,4 @@
+import { $t } from '../i18n';
 import type { Clip, Media, Module } from '../store';
 import { parseParams, resolveParams, type ParamValues } from './params';
 
@@ -36,7 +37,7 @@ export function getRemapFn(m: Module): RemapFn | null {
     let error: string | null = null;
     try {
       fn = new Function('ease', `"use strict";\n${m.code}\n;return typeof remap === 'function' ? remap : null;`)(ease);
-      if (!fn) error = '找不到 function remap(t, p, info)';
+      if (!fn) error = $t('找不到 function remap(t, p, info)');
     } catch (err) {
       error = String(err);
     }
@@ -71,7 +72,7 @@ export function clipSource(clip: Clip, local: number, media: Media, modules: Map
       const v = fn(t, p, info);
       return Number.isFinite(v) ? v : 0;
     } catch (err) {
-      report(m!.id, '執行錯誤：' + String(err));
+      report(m!.id, $t('執行錯誤：') + String(err));
       return t;
     }
   };

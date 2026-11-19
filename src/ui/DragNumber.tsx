@@ -1,3 +1,4 @@
+import { $t } from '../i18n';
 import React, { useEffect, useRef, useState } from 'react';
 import { openMenu } from './uiStore';
 
@@ -116,8 +117,8 @@ export function DragNumber({
         e.preventDefault();
         e.stopPropagation();
         openMenu(e.clientX, e.clientY, [
-          { label: '重設為預設值', action: def !== undefined ? () => onChange(def) : undefined },
-          { label: '複製數值', action: () => navigator.clipboard?.writeText(String(value)) },
+          { label: $t('重設為預設值'), action: def !== undefined ? () => onChange(def) : undefined },
+          { label: $t('複製數值'), action: () => navigator.clipboard?.writeText(String(value)) },
         ]);
       }}
     >

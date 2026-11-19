@@ -53,7 +53,7 @@ export function fadeGain(a: AudioClip, local: number) {
 
 const els = new Map<string, HTMLAudioElement>();
 
-export function syncAudioPreview(s: { audios: AudioClip[]; media: Media[]; tracks: Tracks }, t: number, playing: boolean) {
+export function syncAudioPreview(s: { audios: AudioClip[]; media: Media[]; tracks: Tracks; clips?: Clip[] }, t: number, playing: boolean) {
   const ids = new Set(s.audios.map((a) => a.id));
   for (const [id, el] of els) if (!ids.has(id)) { el.pause(); els.delete(id); }
   for (const a of s.audios) {
@@ -68,7 +68,7 @@ export function syncAudioPreview(s: { audios: AudioClip[]; media: Media[]; track
       els.set(a.id, el);
     }
     const local = t - a.start;
-    const active = playing && local >= 0 && local < a.duration && !s.tracks.audio[a.track]?.muted;
+    const active = playing && local >= 0 && local < a.duration && !audioMuted(s, a);
     if (!active) {
       if (!el.paused) el.pause();
       continue;
@@ -101,7 +101,7 @@ export async function mixdown(
 
   for (const a of s.audios) {
     const m = media.get(a.mediaId);
-    if (!m || m.missing || s.tracks.audio[a.track]?.muted || a.volume <= 0) continue;
+    if (!m || m.missing || audioMuted(s, a) || a.volume <= 0) continue;
     const buf = await getAudioBuffer(m.url);
     if (!buf) continue;
     any = true;
@@ -124,6 +124,7 @@ export async function mixdown(
   for (const c of s.clips) {
     const m = media.get(c.mediaId);
     if (!m || m.missing || m.kind !== 'video' || !m.hasAudio || c.volume <= 0 || s.tracks.video[c.track]?.muted) continue;
+    if (c.link && s.audios.some((a) => a.link === c.link)) continue; // 聲音由連結的音訊片段負責
     const speed = plainSpeed(c, modules);
     if (!speed) continue;
     const buf = await getAudioBuffer(m.url);
@@ -138,4 +139,11 @@ export async function mixdown(
     src.start(c.start, c.in, c.duration * speed);
   }
   return any ? ctx.startRendering() : null;
+}
+
+/** 音訊片段是否靜音：連結在影片上的音訊跟著影片軌的靜音，其他看音訊軌 */
+export function audioMuted(s: { tracks: Tracks; clips?: Clip[] }, a: AudioClip) {
+  const c = a.link ? s.clips?.find((x) => x.link === a.link) : undefined;
+  if (c) return !!s.tracks.video[c.track]?.muted;
+  return !!s.tracks.audio[a.track]?.muted;
 }

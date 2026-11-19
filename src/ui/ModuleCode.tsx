@@ -1,3 +1,5 @@
+import { $t } from '../i18n';
+import { ChevronDown, ChevronRight, CircleAlert } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
@@ -12,7 +14,7 @@ export function ModuleCode({ module, onFork, forceOpen }: { module: Module; onFo
   const error = useStore((s) => s.errors[module.id]);
   const users = useStore(
     (s) =>
-      s.clips.filter((c) => c.remap.moduleId === module.id || c.transitionIn?.moduleId === module.id).length +
+      s.clips.filter((c) => c.remap.moduleId === module.id || c.transitionIn?.moduleId === module.id || c.transitionOut?.moduleId === module.id).length +
       s.effects.filter((e) => e.moduleId === module.id).length,
   );
   const [text, setText] = useState(module.code);
@@ -69,19 +71,19 @@ export function ModuleCode({ module, onFork, forceOpen }: { module: Module; onFo
   return (
     <div className={`code-block ${open ? 'open' : ''}`}>
       <div className="code-head" onClick={() => !forceOpen && useLayout.getState().set({ codeOpen: !codeOpen })}>
-        {!forceOpen && <span className="caret">{open ? '▾' : '▸'}</span>}
+        {!forceOpen && <span className="caret">{open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</span>}
         <span className="lang">{'</>'} {module.kind === 'remap' ? 'JavaScript' : 'GLSL'}</span>
-        {error && <span className="err-dot" title={error}>● 錯誤</span>}
+        {error && <span className="err-dot" title={error}><CircleAlert size={12} /> {$t('錯誤')}</span>}
         <span className="spacer" />
-        {open && users > 1 && <span className="muted small">共用 {users} 處</span>}
+        {open && users > 1 && <span className="muted small">{$t('共用')}{' '}{users}{' '}{$t('處')}</span>}
         {open && onFork && (
-          <button className="link" title="複製成獨立模組，只套用到目前項目" onClick={(e) => { e.stopPropagation(); onFork(forkModule(module.id)); }}>
-            複製為新模組
+          <button className="link" title={$t('複製成獨立模組，只套用到目前項目')} onClick={(e) => { e.stopPropagation(); onFork(forkModule(module.id)); }}>
+            {$t('複製為新模組')}
           </button>
         )}
         {open && dirty && (
           <button className="link" onClick={(e) => { e.stopPropagation(); resetModule(module.id); }}>
-            重置
+            {$t('重置')}
           </button>
         )}
       </div>
@@ -96,7 +98,7 @@ export function ModuleCode({ module, onFork, forceOpen }: { module: Module; onFo
             className="cm"
             height={`${codeH}px`}
           />
-          <div className="code-resize" onPointerDown={resize} title="拖曳調整編輯器高度" />
+          <div className="code-resize" onPointerDown={resize} title={$t('拖曳調整編輯器高度')} />
           {error && <pre className="err">{error}</pre>}
         </>
       )}

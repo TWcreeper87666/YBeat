@@ -1,3 +1,4 @@
+import { $t } from '../i18n';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { projectDuration, useStore } from '../store';
 import { getRenderer, makeCtx } from './renderer';
@@ -35,19 +36,22 @@ async function pickAudioConfig() {
 /** 逐幀離線渲染 → WebCodecs 硬體編碼 → MP4（含混音，不會掉幀） */
 export async function exportMp4(fps: number): Promise<Blob> {
   const r = getRenderer();
-  if (!r) throw new Error('渲染器尚未就緒');
-  if (typeof VideoEncoder === 'undefined') throw new Error('此瀏覽器不支援 WebCodecs，請使用 Chrome / Edge');
+  if (!r) throw new Error($t('渲染器尚未就緒'));
+  if (typeof VideoEncoder === 'undefined') throw new Error($t('此瀏覽器不支援 WebCodecs，請使用 Chrome / Edge'));
 
   const st0 = useStore.getState();
   const dur = projectDuration(st0);
-  if (dur <= 0) throw new Error('時間軸是空的');
+  if (dur <= 0) throw new Error($t('時間軸是空的'));
   const total = Math.ceil(dur * fps);
   const ctx = makeCtx(st0);
 
-  const vConfig = await pickVideoConfig(r.w, r.h, fps);
-  if (!vConfig) throw new Error('找不到可用的 H.264 編碼設定');
+  const { w: FW, h: FH } = st0.format;
+  const vConfig = await pickVideoConfig(FW, FH, fps);
+  if (!vConfig) throw new Error($t('找不到可用的 H.264 編碼設定'));
 
   useStore.setState({ playing: false, exporting: { progress: 0, cancel: false } });
+  // 匯出一律用全解析度（預覽可能是縮小的）；匯出中預覽迴圈不會改大小
+  r.setSize(FW, FH);
   r.pauseAll();
   stopAudioPreview();
 
@@ -60,7 +64,7 @@ export async function exportMp4(fps: number): Promise<Blob> {
     const target = new ArrayBufferTarget();
     const muxer = new Muxer({
       target,
-      video: { codec: 'avc', width: r.w, height: r.h, frameRate: fps },
+      video: { codec: 'avc', width: FW, height: FH, frameRate: fps },
       audio: aPick ? { codec: aPick.mux, sampleRate: SAMPLE_RATE, numberOfChannels: 2 } : undefined,
       fastStart: 'in-memory',
       firstTimestampBehavior: 'offset',
@@ -88,7 +92,7 @@ export async function exportMp4(fps: number): Promise<Blob> {
     encoder = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: (e) => (encodeError = e) });
     encoder.configure(vConfig);
     for (let i = 0; i < total; i++) {
-      if (useStore.getState().exporting?.cancel) throw new Error('已取消');
+      if (useStore.getState().exporting?.cancel) throw new Error($t('已取消'));
       if (encodeError) throw encodeError;
       const t = i / fps;
       await r.prepareExact(ctx, t);

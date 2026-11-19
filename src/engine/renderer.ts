@@ -1,4 +1,9 @@
-import type { Clip, FxItem, Media, Module, Tracks } from '../store';
+import { $t } from '../i18n';
+import { audioSignal, type AudioSignal } from './audioReact';
+import { scrubFrame } from './scrubCache';
+import { fxLevel, type TransitionRef, type AudioClip, type AudioDrive, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
+import { maskAt, type Mask } from './mask';
+import { renderText, textKey } from './text';
 import { hexToRgb, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
 import { clipSource, plainSpeed } from './remap';
 import { clipTransformAt } from './transform';
@@ -6,26 +11,46 @@ import { evalKeys, type Keyframe } from './keyframes';
 
 export interface RenderCtx {
   clips: Clip[];
+  audios: AudioClip[];
   videoTracks: Clip[][]; // 依軌道分組、依開始時間排序
   effects: FxItem[];
   tracks: Tracks;
   modules: Map<string, Module>;
   media: Map<string, Media>;
+  /** 有連結音訊的連結 id（這些影片片段本身不出聲） */
+  linked: Set<string>;
 }
 
 export type FrameInfo =
   | { kind: 'empty' }
   | { kind: 'clip'; clip: Clip }
-  | { kind: 'transition'; A: Clip; B: Clip; progress: number; d: number };
+  /** A / B 為 null = 透明（片段開頭前面沒東西、或結尾後面沒東西） */
+  | { kind: 'transition'; A: Clip | null; B: Clip | null; tr: TransitionRef; progress: number; d: number };
 
 const ADJ_EPS = 0.01;
+export const adjacent = (a: Clip | undefined, b: Clip | undefined) => !!a && !!b && Math.abs(a.start + a.duration - b.start) <= ADJ_EPS;
 
-/** 轉場以剪接點為中心，長度不超過前後片段 */
-export function transitionWindow(A: Clip | undefined, B: Clip): { t0: number; d: number } | null {
-  if (!B.transitionIn || !A) return null;
-  if (Math.abs(A.start + A.duration - B.start) > ADJ_EPS) return null;
-  const d = Math.min(B.transitionIn.duration, A.duration, B.duration);
-  return { t0: B.start - d / 2, d };
+/**
+ * 轉場的時間範圍：
+ * - cut：前面有緊貼的片段 → 以剪接點為中心
+ * - head：前面沒有片段 → 從透明轉入，放在片段開頭
+ * - tail：片段的轉出（後面沒有緊貼的片段）→ 轉到透明，放在片段結尾
+ */
+export interface TrWindow { t0: number; d: number; mode: 'cut' | 'head' | 'tail'; max: number }
+export function transitionWindow(prev: Clip | undefined, c: Clip, side: 'in' | 'out' = 'in', next?: Clip): TrWindow | null {
+  if (side === 'out') {
+    if (!c.transitionOut || adjacent(c, next)) return null;
+    const d = Math.min(c.transitionOut.duration, c.duration);
+    return { t0: c.start + c.duration - d, d, mode: 'tail', max: c.duration };
+  }
+  if (!c.transitionIn) return null;
+  if (adjacent(prev, c)) {
+    const max = Math.min(prev!.duration, c.duration);
+    const d = Math.min(c.transitionIn.duration, max);
+    return { t0: c.start - d / 2, d, mode: 'cut', max };
+  }
+  const d = Math.min(c.transitionIn.duration, c.duration);
+  return { t0: c.start, d, mode: 'head', max: c.duration };
 }
 
 export function sortClips(clips: Clip[]) {
@@ -34,9 +59,14 @@ export function sortClips(clips: Clip[]) {
 
 /** 單一軌道在時間 t 的狀態（clips 需已排序） */
 export function computeFrame(sorted: Clip[], t: number): FrameInfo {
-  for (let i = 1; i < sorted.length; i++) {
-    const w = transitionWindow(sorted[i - 1], sorted[i]);
-    if (w && t >= w.t0 && t < w.t0 + w.d) return { kind: 'transition', A: sorted[i - 1], B: sorted[i], progress: (t - w.t0) / w.d, d: w.d };
+  for (let i = 0; i < sorted.length; i++) {
+    const c = sorted[i];
+    const w = transitionWindow(sorted[i - 1], c, 'in');
+    if (w && t >= w.t0 && t < w.t0 + w.d) {
+      return { kind: 'transition', A: w.mode === 'cut' ? sorted[i - 1] : null, B: c, tr: c.transitionIn!, progress: (t - w.t0) / w.d, d: w.d };
+    }
+    const o = transitionWindow(undefined, c, 'out', sorted[i + 1]);
+    if (o && t >= o.t0 && t < o.t0 + o.d) return { kind: 'transition', A: c, B: null, tr: c.transitionOut!, progress: (t - o.t0) / o.d, d: o.d };
   }
   for (let i = sorted.length - 1; i >= 0; i--) {
     const c = sorted[i];
@@ -61,6 +91,8 @@ uniform float u_time;
 uniform float u_local;
 uniform float u_duration;
 uniform float u_progress;
+uniform float u_level;   // 目前音量 0~1（音訊反應）
+uniform float u_beat;    // 節拍脈衝：打到拍 = 1，之後衰減
 `;
 
 export const GLSL_LIB = `
@@ -111,10 +143,12 @@ const CLIP_FS = `${HEAD}uniform sampler2D u_tex;
 uniform float u_srcAspect;
 uniform vec4 u_xf;       // x, y, scale, rotation(rad)
 uniform float u_opacity;
-uniform int u_fit;       // 0 cover, 1 contain, 2 contain + blur bg
+uniform int u_fit;       // 0 cover, 1 contain, 2 contain + blur bg, 3 原始大小（文字）
+uniform vec2 u_native;   // 原始大小（以畫面高度為 1）
 uniform float u_flip;
 #define ASPECT (u_resolution.x / u_resolution.y)
 vec2 fitSize(bool cover) {
+  if (u_fit == 3) return u_native;
   float A = ASPECT, S = u_srcAspect;
   bool wide = S > A;
   if (cover) return wide ? vec2(S, 1.0) : vec2(A, A / S);
@@ -131,7 +165,11 @@ void main() {
   vec2 aa = fwidth(uv) * 0.75;
   vec2 edge = smoothstep(vec2(0.0), aa, uv) * smoothstep(vec2(0.0), aa, 1.0 - uv);
   float inside = edge.x * edge.y;
-  if (inside > 0.0) col = vec4(texture(u_tex, vec2(uv.x, 1.0 - uv.y)).rgb, 1.0) * inside;
+  if (inside > 0.0) {
+    vec4 s = texture(u_tex, vec2(uv.x, 1.0 - uv.y));
+    // 文字有透明度（premultiplied）；一般素材當作不透明
+    col = (u_fit == 3 ? vec4(s.rgb * s.a, s.a) : vec4(s.rgb, 1.0)) * inside;
+  }
   if (u_fit == 2) {
     vec2 bu = (v_uv - 0.5) * vec2(ASPECT, 1.0) / fitSize(true) + 0.5;
     vec3 bg = vec3(0.0);
@@ -145,20 +183,54 @@ void main() {
 const BLIT_FS = `${HEAD}uniform sampler2D u_tex;
 void main() { outColor = texture(u_tex, v_uv); }`;
 
+/** 特效遮罩：mix(原畫面, 特效結果, 遮罩) */
+const MASK_FS = `${HEAD}uniform sampler2D u_src;
+uniform sampler2D u_fx;
+uniform int u_shape;     // 1 矩形, 2 橢圓
+uniform vec4 u_box;      // 中心 x, y（0 = 置中，y 向下）, 寬, 高（以畫面寬 / 高為 1）
+uniform float u_feather;
+uniform float u_rot;
+uniform float u_invert;
+#define ASPECT (u_resolution.x / u_resolution.y)
+void main() {
+  // 換成以畫面高度為單位的座標，才能正確旋轉
+  vec2 p = vec2(v_uv.x - 0.5 - u_box.x, 0.5 - v_uv.y - u_box.y);
+  p.x *= ASPECT;
+  float c = cos(u_rot), s = sin(u_rot);
+  p = vec2(c * p.x + s * p.y, -s * p.x + c * p.y);
+  vec2 half_ = max(vec2(1e-4), vec2(u_box.z * ASPECT, u_box.w) * 0.5);
+  float d;   // 到邊界的距離（外面為正，以畫面高度為單位）
+  if (u_shape == 2) {
+    float k = length(p / half_);
+    d = (k - 1.0) * min(half_.x, half_.y);
+  } else {
+    vec2 q = abs(p) - half_;
+    d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+  }
+  float f = max(u_feather, 0.0015);
+  float m = 1.0 - smoothstep(-f, f, d);
+  if (u_invert > 0.5) m = 1.0 - m;
+  outColor = mix(texture(u_src, v_uv), texture(u_fx, v_uv), m);
+}`;
+
 // ───────────────────────── Renderer ─────────────────────────
 
 interface Target { tex: WebGLTexture; fb: WebGLFramebuffer }
 interface Prog { prog: WebGLProgram; defs: ParamDef[]; locs: Map<string, WebGLUniformLocation | null> }
 
 export class Renderer {
-  readonly w: number;
-  readonly h: number;
+  /** 實際渲染大小（預覽可能縮小） */
+  w: number;
+  h: number;
+  /** 專案畫面高度（文字的 px 以它為準） */
+  frameH: number;
   readonly gl: WebGL2RenderingContext;
   private vao: WebGLVertexArrayObject;
   private vs: WebGLShader;
   private targets: Target[];
   private clipProg: Prog;
   private blit: Prog;
+  private maskProg: Prog;
   private progs = new Map<string, { code: string; good: Prog | null }>();
   private textures = new Map<string, WebGLTexture>();
   private images = new Map<string, HTMLImageElement>();
@@ -169,10 +241,11 @@ export class Renderer {
   constructor(public canvas: HTMLCanvasElement, size = { w: 1080, h: 1920 }) {
     this.w = size.w;
     this.h = size.h;
+    this.frameH = size.h;
     canvas.width = this.w;
     canvas.height = this.h;
     const gl = canvas.getContext('webgl2', { alpha: false, antialias: false, preserveDrawingBuffer: true, premultipliedAlpha: false });
-    if (!gl) throw new Error('此瀏覽器不支援 WebGL2');
+    if (!gl) throw new Error($t('此瀏覽器不支援 WebGL2'));
     this.gl = gl;
 
     this.vao = gl.createVertexArray()!;
@@ -187,9 +260,28 @@ export class Renderer {
     gl.shaderSource(this.vs, VS);
     gl.compileShader(this.vs);
 
-    this.targets = [0, 1, 2, 3].map(() => this.makeTarget());
+    this.targets = [0, 1, 2, 3, 4, 5, 6].map(() => this.makeTarget());
     this.clipProg = this.mustCompile(CLIP_FS);
     this.blit = this.mustCompile(BLIT_FS);
+    this.maskProg = this.mustCompile(MASK_FS);
+  }
+
+  /** 改變渲染大小（換輸出比例 / 預覽畫質 / 匯出） */
+  setSize(w: number, h: number, frameH = h) {
+    w = Math.max(2, Math.round(w));
+    h = Math.max(2, Math.round(h));
+    this.frameH = frameH;
+    if (w === this.w && h === this.h) return;
+    const gl = this.gl;
+    this.w = w;
+    this.h = h;
+    this.canvas.width = w;
+    this.canvas.height = h;
+    for (const t of this.targets) {
+      gl.deleteFramebuffer(t.fb);
+      gl.deleteTexture(t.tex);
+    }
+    this.targets = [0, 1, 2, 3, 4, 5, 6].map(() => this.makeTarget());
   }
 
   private makeTarget(): Target {
@@ -220,7 +312,7 @@ export class Renderer {
     gl.shaderSource(fs, fsSrc);
     gl.compileShader(fs);
     if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
-      const error = gl.getShaderInfoLog(fs) || '編譯失敗';
+      const error = gl.getShaderInfoLog(fs) || $t('編譯失敗');
       gl.deleteShader(fs);
       return { prog: null, error: error.trim() };
     }
@@ -231,7 +323,7 @@ export class Renderer {
     gl.linkProgram(prog);
     gl.deleteShader(fs);
     if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
-      const error = gl.getProgramInfoLog(prog) || '連結失敗';
+      const error = gl.getProgramInfoLog(prog) || $t('連結失敗');
       gl.deleteProgram(prog);
       return { prog: null, error: error.trim() };
     }
@@ -297,16 +389,27 @@ export class Renderer {
     gl.uniform1f(this.loc(p, 'u_local'), local);
     gl.uniform1f(this.loc(p, 'u_duration'), duration);
     gl.uniform1f(this.loc(p, 'u_progress'), Math.min(1, Math.max(0, progress)));
+    gl.uniform1f(this.loc(p, 'u_level'), this.sig.level);
+    gl.uniform1f(this.loc(p, 'u_beat'), this.sig.beat);
   }
 
-  private setParams(p: Prog, values: ParamValues, keys?: Record<string, Keyframe[]>, local = 0) {
+  /** 這一格的音訊訊號（render 開頭算一次） */
+  private sig: AudioSignal = { level: 0, beat: 0 };
+
+  private setParams(p: Prog, values: ParamValues, keys?: Record<string, Keyframe[]>, local = 0, drive?: Record<string, AudioDrive>) {
     const gl = this.gl;
     const v = resolveParams(p.defs, values);
     for (const d of p.defs) {
       const l = this.loc(p, d.name);
       if (!l) continue;
       const k = keys?.[d.name];
-      const x = k?.length && (d.type === 'float' || d.type === 'int') ? evalKeys(k, local) : v[d.name];
+      const dr = drive?.[d.name];
+      const x =
+        dr && (d.type === 'float' || d.type === 'int')
+          ? dr.min + (dr.max - dr.min) * (dr.source === 'beat' ? this.sig.beat : this.sig.level)
+          : k?.length && (d.type === 'float' || d.type === 'int')
+            ? evalKeys(k, local)
+            : v[d.name];
       if (d.type === 'float') gl.uniform1f(l, Number(x));
       else if (d.type === 'int') gl.uniform1i(l, Math.round(Number(x)));
       else if (d.type === 'bool') gl.uniform1i(l, x ? 1 : 0);
@@ -377,6 +480,11 @@ export class Renderer {
         };
         vv.requestVideoFrameCallback(mark);
       }
+      // 暫停時 seek（拖播放頭）不一定會觸發 rVFC：seek 完成 / 資料載入時也標記要重新上傳
+      const dirty = () => (vv._dirty = true);
+      v.addEventListener('seeked', dirty);
+      v.addEventListener('loadeddata', dirty);
+      v.addEventListener('canplay', dirty);
       this.videos.set(clip.id, v);
     }
     return v;
@@ -391,11 +499,21 @@ export class Renderer {
     if (v.readyState >= 2 && (force || !has || !hasRvfc || vv._dirty || this.mipState.get(key) !== mip)) {
       vv._dirty = false;
       this.mipState.set(key, mip);
+      this.texTime.set(key, v.currentTime);
       return this.upload(key, v, mip);
     }
     return has ?? null;
   }
   private mipState = new Map<string, boolean>();
+  /** 影片貼圖目前是素材的第幾秒 */
+  private texTime = new Map<string, number>();
+  private bitmaps = new Map<string, ImageBitmap>();
+  /** 拖播放頭時的快取影格貼圖 */
+  private bitmapTex(key: string, bm: ImageBitmap) {
+    if (this.bitmaps.get(key) === bm) return this.textures.get(key)!;
+    this.bitmaps.set(key, bm);
+    return this.upload(key, bm, false);
+  }
 
   /** 預覽用：能用原生播放就用（順暢、可帶原音），倒放 / 極端速度改用逐幀 seek。回傳是否為原生播放 */
   private syncVideo(v: HTMLVideoElement, src: number, rate: number, playing: boolean) {
@@ -418,9 +536,50 @@ export class Renderer {
     return false;
   }
 
+  /** 文字片段的貼圖（內容改了才重新上傳） */
+  private textTex(clip: Clip): { tex: WebGLTexture; w: number; h: number } {
+    const key = 'txt:' + clip.id;
+    const k = textKey(clip.text!);
+    const c = renderText(clip.text!);
+    let tex = this.textures.get(key);
+    if (!tex || this.textState.get(key) !== k) {
+      tex = this.upload(key, c, true);
+      this.textState.set(key, k);
+    }
+    return { tex, w: c.width, h: c.height };
+  }
+  private textState = new Map<string, string>();
+
   /** 把片段畫到 target；blend=true 時疊在現有內容上 */
   private drawClip(target: Target, clip: Clip, t: number, ctx: RenderCtx, mode: 'preview' | 'export', playing: boolean, blend: boolean) {
+    const fxs = (clip.effects ?? []).filter((f) => f.enabled !== false);
+    const progs = fxs.map((f) => {
+      const m = ctx.modules.get(f.moduleId);
+      return m && m.kind === 'effect' ? this.moduleProg(m) : null;
+    });
+    if (!progs.some(Boolean)) return this.drawClipRaw(target, clip, t, ctx, mode, playing, blend);
+    // 片段特效：片段自己畫在透明圖層上，依序套特效，最後才疊回去（只影響這個片段）
+    const [, , , , CA, CB, CM] = this.targets;
+    this.clear(CA, false);
+    this.drawClipRaw(CA, clip, t, ctx, mode, playing, false);
     const local = t - clip.start;
+    let cur = CA;
+    fxs.forEach((f, i) => {
+      const g = progs[i];
+      if (!g) return;
+      const out = cur === CA ? CB : CA;
+      this.runEffect(cur, out, CM, f, g, t, local, clip.duration);
+      cur = out;
+    });
+    this.pass(target, this.blit, (p) => this.bindTex(p, 'u_tex', cur.tex, 0), blend);
+  }
+
+  private drawClipRaw(target: Target, clip: Clip, t: number, ctx: RenderCtx, mode: 'preview' | 'export', playing: boolean, blend: boolean) {
+    const local = t - clip.start;
+    if (clip.text) {
+      const { tex, w, h } = this.textTex(clip);
+      return this.drawTex(target, clip, local, tex, { width: w, height: h } as Media, blend, [w / this.frameH, h / this.frameH]);
+    }
     const media = ctx.media.get(clip.mediaId);
     let tex: WebGLTexture | null = null;
     if (!media || media.missing) {
@@ -434,11 +593,19 @@ export class Renderer {
       const v = this.videoFor(clip, media);
       if (mode === 'preview') {
         const native = this.syncVideo(v, src, rate, playing);
-        const sound = native && clip.volume > 0 && media.hasAudio && !ctx.tracks.video[clip.track]?.muted && plainSpeed(clip, ctx.modules) !== null;
+        const sound = native && !(clip.link && ctx.linked.has(clip.link)) && clip.volume > 0 && media.hasAudio && !ctx.tracks.video[clip.track]?.muted && plainSpeed(clip, ctx.modules) !== null;
         v.muted = !sound;
         if (sound) v.volume = Math.min(1, clip.volume);
       }
       tex = this.videoTex(clip.id, v, clip.fit === 'blur', mode === 'export');
+      // 暫停中拖播放頭：精準的 seek 還沒完成（長 GOP 影片很慢）就先用快取的小張影格
+      if (mode === 'preview' && !playing) {
+        const shown = this.texTime.get('vid:' + clip.id);
+        if (shown === undefined || Math.abs(shown - src) > 0.1) {
+          const bm = scrubFrame(media, src);
+          if (bm) tex = this.bitmapTex('scrub:' + clip.id, bm);
+        }
+      }
     }
     if (!tex) return;
     this.drawTex(target, clip, local, tex, media, blend);
@@ -465,16 +632,16 @@ export class Renderer {
     g.fillStyle = '#fff';
     g.textAlign = 'center';
     g.font = '700 54px system-ui, sans-serif';
-    g.fillText('⚠ 素材遺失', 270, 460);
+    g.fillText($t('素材遺失'), 270, 460);
     g.font = '28px system-ui, sans-serif';
-    g.fillText('把素材拖到時間軸上的片段即可重新連結', 270, 520);
+    g.fillText($t('把素材拖到時間軸上的片段即可重新連結'), 270, 520);
     this.missing = this.upload('missing', c);
     return this.missing;
   }
 
-  private drawTex(target: Target, clip: Clip, local: number, tex: WebGLTexture, media: Media, blend: boolean) {
+  private drawTex(target: Target, clip: Clip, local: number, tex: WebGLTexture, media: Media, blend: boolean, native?: [number, number]) {
     const xf = clipTransformAt(clip, Math.min(local, clip.duration));
-    const fit = clip.fit === 'cover' ? 0 : clip.fit === 'contain' ? 1 : 2;
+    const fit = native ? 3 : clip.fit === 'cover' ? 0 : clip.fit === 'contain' ? 1 : 2;
     this.pass(
       target,
       this.clipProg,
@@ -485,6 +652,7 @@ export class Renderer {
         gl.uniform4f(this.loc(p, 'u_xf'), xf.x, xf.y, Math.max(0.001, xf.scale), (xf.rotation * Math.PI) / 180);
         gl.uniform1f(this.loc(p, 'u_opacity'), Math.min(1, Math.max(0, xf.opacity)));
         gl.uniform1i(this.loc(p, 'u_fit'), fit);
+        gl.uniform2f(this.loc(p, 'u_native'), native?.[0] ?? 1, native?.[1] ?? 1);
         gl.uniform1f(this.loc(p, 'u_flip'), clip.flipX ? 1 : 0);
       },
       blend,
@@ -512,7 +680,7 @@ export class Renderer {
     g.font = '900 220px system-ui, sans-serif';
     g.fillText('B', 270, 540);
     g.font = '600 30px system-ui, sans-serif';
-    g.fillText('下一段（示意）', 270, 620);
+    g.fillText($t('下一段（示意）'), 270, 620);
     this.sample = this.upload('sample', c);
     return this.sample;
   }
@@ -538,25 +706,93 @@ export class Renderer {
     return false;
   }
 
+  /** 套用一個特效（有遮罩時只作用在遮罩範圍），回傳新的目前畫面 */
+  private applyFx(cur: Target, fx: FxItem, g: Prog, t: number): Target {
+    const [TA, , P0, P1] = this.targets;
+    const out = cur === P0 ? P1 : P0;
+    this.runEffect(cur, out, TA, fx, g, t, t - fx.start, fx.duration);
+    return out;
+  }
+
+  /** src → out 套一個特效；有遮罩時先畫到 tmp 再依遮罩混合 */
+  private runEffect(
+    src: Target,
+    out: Target,
+    tmp: Target,
+    fx: { params: ParamValues; keys?: Record<string, Keyframe[]>; mask?: Mask; audio?: Record<string, AudioDrive> },
+    g: Prog,
+    t: number,
+    local: number,
+    duration: number,
+  ) {
+    const mask = maskAt(fx.mask, fx.keys, local);
+    const dst = mask ? tmp : out;
+    this.pass(dst, g, (p) => {
+      this.bindTex(p, 'u_tex', src.tex, 0);
+      this.setCommon(p, t, local, duration, local / duration);
+      this.setParams(p, fx.params, fx.keys, local, fx.audio);
+    });
+    if (mask) this.maskPass(out, src, tmp, mask);
+  }
+
+  private maskPass(out: Target, src: Target, fxTex: Target, m: Mask) {
+    this.pass(out, this.maskProg, (p) => {
+      const gl = this.gl;
+      this.bindTex(p, 'u_src', src.tex, 0);
+      this.bindTex(p, 'u_fx', fxTex.tex, 1);
+      gl.uniform1i(this.loc(p, 'u_shape'), m.shape === 'ellipse' ? 2 : 1);
+      gl.uniform4f(this.loc(p, 'u_box'), m.x, m.y, Math.max(0, m.w), Math.max(0, m.h));
+      gl.uniform1f(this.loc(p, 'u_feather'), Math.max(0, m.feather));
+      gl.uniform1f(this.loc(p, 'u_rot'), (m.rotation * Math.PI) / 180);
+      gl.uniform1f(this.loc(p, 'u_invert'), m.invert ? 1 : 0);
+    });
+  }
+
   render(ctx: RenderCtx, t: number, mode: 'preview' | 'export', playing = false, extra?: { module: Module; progress: number; duration: number }) {
     const [TA, TB, P0, P1] = this.targets;
     const active = new Set<string>();
     this.clear(P0, true);
+    let cur = P0;
+    this.sig = audioSignal(ctx, t);
 
-    // 影片軌：由下（軌 1）往上疊
+    // 作用中的特效，依所在層（下面有幾條影片軌）分組
+    const fxByLevel = new Map<number, FxItem[]>();
+    for (const e of ctx.effects) {
+      if (t < e.start || t >= e.start + e.duration || ctx.tracks.fx[e.track]?.hidden) continue;
+      const lv = fxLevel(ctx.tracks, e.track);
+      if (!fxByLevel.has(lv)) fxByLevel.set(lv, []);
+      fxByLevel.get(lv)!.push(e);
+    }
+    const runFx = (lv: number) => {
+      const list = (fxByLevel.get(lv) ?? []).sort((a, b) => a.track - b.track || a.start - b.start);
+      for (const fx of list) {
+        const m = ctx.modules.get(fx.moduleId);
+        const g = m ? this.moduleProg(m) : null;
+        if (g) cur = this.applyFx(cur, fx, g, t);
+      }
+    };
+
+    // 影片軌由下（軌 1）往上疊；特效軌插在影片軌之間，只影響它下面已經疊好的畫面（調整圖層）
     ctx.videoTracks.forEach((clips, ti) => {
+      runFx(ti);
       if (ctx.tracks.video[ti]?.hidden) return;
+      const P0 = cur;
       const fr = computeFrame(clips, t);
       if (fr.kind === 'clip') {
         active.add(fr.clip.id);
         this.drawClip(P0, fr.clip, t, ctx, mode, playing, true);
       } else if (fr.kind === 'transition') {
-        active.add(fr.A.id).add(fr.B.id);
         this.clear(TA, false);
         this.clear(TB, false);
-        this.drawClip(TA, fr.A, t, ctx, mode, playing, false);
-        this.drawClip(TB, fr.B, t, ctx, mode, playing, false);
-        const tr = fr.B.transitionIn!;
+        if (fr.A) {
+          active.add(fr.A.id);
+          this.drawClip(TA, fr.A, t, ctx, mode, playing, false);
+        }
+        if (fr.B) {
+          active.add(fr.B.id);
+          this.drawClip(TB, fr.B, t, ctx, mode, playing, false);
+        }
+        const tr = fr.tr;
         const m = ctx.modules.get(tr.moduleId);
         const g = m ? this.moduleProg(m) : null;
         if (g) {
@@ -572,24 +808,8 @@ export class Renderer {
       }
     });
 
-    // 特效軌：依軌道順序疊加（ping-pong）
-    let cur = P0;
-    const fxs = ctx.effects
-      .filter((e) => t >= e.start && t < e.start + e.duration && !ctx.tracks.fx[e.track]?.hidden)
-      .sort((a, b) => a.track - b.track || a.start - b.start);
-    for (const fx of fxs) {
-      const m = ctx.modules.get(fx.moduleId);
-      const g = m ? this.moduleProg(m) : null;
-      if (!g) continue;
-      const out = cur === P0 ? P1 : P0;
-      const src = cur;
-      this.pass(out, g, (p) => {
-        this.bindTex(p, 'u_tex', src.tex, 0);
-        this.setCommon(p, t, t - fx.start, fx.duration, (t - fx.start) / fx.duration);
-        this.setParams(p, fx.params, fx.keys, t - fx.start);
-      });
-      cur = out;
-    }
+    // 最上層的特效（在所有影片軌上方）
+    runFx(ctx.videoTracks.length);
 
     // 素材庫預覽：把點選的特效 / 轉場疊在目前畫面上循環播放
     if (extra) {
@@ -624,6 +844,13 @@ export class Renderer {
   /** 暫停非作用中的影片、預先 seek 即將出現的片段、回收已刪除片段 */
   private manageVideos(ctx: RenderCtx, t: number, active: Set<string>) {
     const ids = new Set(ctx.clips.map((c) => c.id));
+    for (const key of [...this.textState.keys()]) {
+      if (ids.has(key.slice(4))) continue;
+      this.textState.delete(key);
+      const tex = this.textures.get(key);
+      if (tex) this.gl.deleteTexture(tex);
+      this.textures.delete(key);
+    }
     for (const [id, v] of this.videos) {
       if (!ids.has(id)) {
         v.pause();
@@ -690,7 +917,7 @@ export class Renderer {
     for (const clips of ctx.videoTracks) {
       const fr = computeFrame(clips, t);
       if (fr.kind === 'clip') list.push([fr.clip, t - fr.clip.start]);
-      else if (fr.kind === 'transition') list.push([fr.A, t - fr.A.start], [fr.B, t - fr.B.start]);
+      else if (fr.kind === 'transition') for (const c of [fr.A, fr.B]) if (c) list.push([c, t - c.start]);
     }
     for (const [c, local] of list) {
       const media = ctx.media.get(c.mediaId);
@@ -733,18 +960,20 @@ export const setRenderer = (r: Renderer | null) => (instance = r);
 export const getRenderer = () => instance;
 
 const ctxCache = { key: [] as unknown[], ctx: null as RenderCtx | null };
-export function makeCtx(s: { clips: Clip[]; effects: FxItem[]; modules: Module[]; media: Media[]; tracks: Tracks }): RenderCtx {
-  const key = [s.clips, s.effects, s.modules, s.media, s.tracks];
+export function makeCtx(s: { clips: Clip[]; effects: FxItem[]; modules: Module[]; media: Media[]; tracks: Tracks; audios?: AudioClip[] }): RenderCtx {
+  const key = [s.clips, s.effects, s.modules, s.media, s.tracks, s.audios];
   if (ctxCache.ctx && key.every((k, i) => k === ctxCache.key[i])) return ctxCache.ctx;
   ctxCache.key = key;
   const videoTracks = s.tracks.video.map((_, i) => sortClips(s.clips.filter((c) => c.track === i)));
   ctxCache.ctx = {
     clips: s.clips,
+    audios: s.audios ?? [],
     videoTracks,
     effects: s.effects,
     tracks: s.tracks,
     modules: new Map(s.modules.map((m) => [m.id, m])),
     media: new Map(s.media.map((m) => [m.id, m])),
+    linked: new Set((s.audios ?? []).map((a) => a.link).filter((x): x is string => !!x)),
   };
   return ctxCache.ctx;
 }

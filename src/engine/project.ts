@@ -1,5 +1,6 @@
+import { $t } from '../i18n';
 import { create } from 'zustand';
-import { DEFAULT_TRACKS, makeAudio, makeClip, useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
+import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, makeClip, useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
 import { resetHistory } from './history';
 
 /** 專案自動存檔：素材檔案（Blob）與時間軸存在 IndexedDB，重新整理不會遺失 */
@@ -29,7 +30,7 @@ async function run<T>(store: string, mode: IDBTransactionMode, fn: (os: IDBObjec
   });
 }
 
-export const saveMediaBlob = (id: string, blob: Blob) => run('media', 'readwrite', (os) => os.put(blob, id)).catch((e) => console.warn('素材存檔失敗', e));
+export const saveMediaBlob = (id: string, blob: Blob) => run('media', 'readwrite', (os) => os.put(blob, id)).catch((e) => console.warn($t('素材存檔失敗'), e));
 export const deleteMediaBlob = (id: string) => run('media', 'readwrite', (os) => os.delete(id)).catch(() => {});
 const loadMediaBlob = (id: string) => run<Blob | undefined>('media', 'readonly', (os) => os.get(id));
 
@@ -39,6 +40,7 @@ interface Saved {
   effects: FxItem[];
   audios: AudioClip[];
   tracks: Tracks;
+  format?: Format;
 }
 
 /** 存檔狀態（顯示在標題列） */
@@ -57,12 +59,13 @@ async function save() {
     effects: s.effects,
     audios: s.audios,
     tracks: s.tracks,
+    format: s.format,
   };
   try {
     await run('project', 'readwrite', (os) => os.put(data, 'current'));
     useSaveState.setState({ state: 'saved', at: Date.now() });
   } catch (e) {
-    console.warn('專案存檔失敗', e);
+    console.warn($t('專案存檔失敗'), e);
     useSaveState.setState({ state: 'dirty' });
   }
 }
@@ -77,7 +80,7 @@ function startAutosave() {
   if (started) return;
   started = true;
   useStore.subscribe((s, p) => {
-    if (s.media === p.media && s.clips === p.clips && s.effects === p.effects && s.audios === p.audios && s.tracks === p.tracks) return;
+    if (s.media === p.media && s.clips === p.clips && s.effects === p.effects && s.audios === p.audios && s.tracks === p.tracks && s.format === p.format) return;
     useSaveState.setState({ state: 'dirty' });
     clearTimeout(saveTimer);
     saveTimer = window.setTimeout(save, 600);
@@ -102,10 +105,10 @@ export async function restoreProject() {
       // 片段引用了完全不存在的素材 → 補一筆遺失紀錄，才能在素材庫看到並重新連結
       const known = new Set(media.map((m) => m.id));
       for (const c of [...(data.clips ?? []), ...(data.audios ?? [])]) {
-        if (known.has(c.mediaId)) continue;
+        if ((c as Clip).text || known.has(c.mediaId)) continue;
         known.add(c.mediaId);
         const isAudio = (data.audios ?? []).some((a) => a.mediaId === c.mediaId);
-        media.push({ id: c.mediaId, name: '未知素材', kind: isAudio ? 'audio' : 'video', url: '', width: 1080, height: 1920, duration: c.duration, thumb: '', hasAudio: isAudio, missing: true });
+        media.push({ id: c.mediaId, name: $t('未知素材'), kind: isAudio ? 'audio' : 'video', url: '', width: 1080, height: 1920, duration: c.duration, thumb: '', hasAudio: isAudio, missing: true });
       }
       useStore.setState({
         media,
@@ -113,10 +116,11 @@ export async function restoreProject() {
         effects: data.effects ?? [],
         audios: (data.audios ?? []).map((a) => makeAudio(a)),
         tracks: data.tracks ?? DEFAULT_TRACKS,
+        format: data.format ?? DEFAULT_FORMAT,
       });
     }
   } catch (e) {
-    console.warn('讀取專案失敗', e);
+    console.warn($t('讀取專案失敗'), e);
   }
   resetHistory();
   startAutosave();
@@ -124,7 +128,7 @@ export async function restoreProject() {
 
 export async function newProject() {
   useStore.setState({
-    media: [], clips: [], effects: [], audios: [], tracks: DEFAULT_TRACKS,
+    media: [], clips: [], effects: [], audios: [], tracks: DEFAULT_TRACKS, format: DEFAULT_FORMAT,
     selection: null, selected: [], time: 0, playing: false, loop: null,
   });
   resetHistory();

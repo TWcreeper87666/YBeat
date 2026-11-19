@@ -1,3 +1,4 @@
+import { $t } from '../i18n';
 import { create } from 'zustand';
 import type { Module } from '../modules/builtin';
 import { Renderer } from './renderer';
@@ -108,7 +109,7 @@ function process() {
       if (renderer.thumb(m, prog, samples![0], samples![1], dur)) url = canvas!.toDataURL('image/jpeg', 0.85);
     }
   } catch (e) {
-    console.warn('縮圖失敗', m.name, e);
+    console.warn($t('縮圖失敗'), m.name, e);
   }
   if (url) useThumbs.setState((s) => ({ map: { ...s.map, [key]: url } }));
   schedule();

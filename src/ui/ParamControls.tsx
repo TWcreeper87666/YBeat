@@ -1,9 +1,10 @@
+import { $t } from '../i18n';
 import type { ParamDef, ParamValue, ParamValues } from '../engine/params';
 import { DragNumber } from './DragNumber';
 
 /** 由程式碼中的 // @param 註解自動產生的調整 UI */
 export function ParamControls({ defs, values, onChange }: { defs: ParamDef[]; values: ParamValues; onChange: (v: ParamValues) => void }) {
-  if (defs.length === 0) return <div className="muted small">這個模組沒有宣告 @param 參數。</div>;
+  if (defs.length === 0) return <div className="muted small">{$t('這個模組沒有宣告 @param 參數。')}</div>;
   const set = (name: string, v: ParamValue) => onChange({ ...values, [name]: v });
   return (
     <div className="params">
@@ -12,8 +13,8 @@ export function ParamControls({ defs, values, onChange }: { defs: ParamDef[]; va
         const modified = values[d.name] !== undefined && values[d.name] !== d.def;
         return (
           <div className="param" key={d.name}>
-            <label title={`${d.name}（右鍵數值可重設）`} className={modified ? 'modified' : ''}>
-              {d.label}
+            <label title={$t('{0}（右鍵數值可重設）', d.name)} className={modified ? 'modified' : ''}>
+              {$t(d.label)}
             </label>
             {(d.type === 'float' || d.type === 'int') && (
               <DragNumber

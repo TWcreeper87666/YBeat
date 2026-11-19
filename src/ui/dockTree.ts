@@ -1,6 +1,6 @@
 /** 版面樹（純函式，不依賴 React，方便測試） */
 
-export type PanelId = 'media' | 'transition' | 'effect' | 'remap' | 'inspector' | 'preview' | 'timeline';
+export type PanelId = 'media' | 'source' | 'text' | 'transition' | 'effect' | 'remap' | 'inspector' | 'preview' | 'timeline';
 export interface TabsNode { type: 'tabs'; id: string; tabs: PanelId[]; active: PanelId }
 export interface SplitNode { type: 'split'; id: string; dir: 'row' | 'col'; children: DockNode[]; sizes: number[] }
 export type DockNode = TabsNode | SplitNode;

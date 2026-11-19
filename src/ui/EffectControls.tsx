@@ -1,13 +1,16 @@
-import React, { useLayoutEffect, useRef, useState } from 'react';
-import { useStore, type Clip, type FxItem } from '../store';
+import { $t } from '../i18n';
+import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useStore, type Clip, type ClipFx, type FxItem } from '../store';
 import {
   ANIM_PROPS, EASE_PRESETS, easeId, evalKeys, keyAt, newKey, sortKeys, upsertKey,
   type AnimProp, type Bez, type Ease, type Keyframe,
 } from '../engine/keyframes';
 import { clipTransformAt } from '../engine/transform';
 import { parseParams, resolveParams } from '../engine/params';
+import { DEFAULT_MASK, MASK_PROPS, maskKey } from '../engine/mask';
 import { DragNumber } from './DragNumber';
-import { openMenu, useKeySel, useLayout } from './uiStore';
+import { openMenu, useKeySel, useLayout, type KeyRef } from './uiStore';
+import { ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Timer } from 'lucide-react';
 
 // ───────────────────────── 資料介面 ─────────────────────────
 
@@ -44,6 +47,17 @@ export function clipHost(clipId: string): Host | null {
     setKeys(ch, list, base) {
       const cur = useStore.getState().clips.find((x) => x.id === clipId);
       if (!cur) return;
+      const cf = parseCfx(ch);
+      if (cf) {
+        const f = cur.effects?.find((x) => x.id === cf.fxId);
+        if (!f) return;
+        const keys = { ...(f.keys ?? {}) };
+        if (list?.length) keys[cf.ch] = sortKeys(list);
+        else delete keys[cf.ch];
+        const patch: Partial<ClipFx> = { keys };
+        if (!list?.length && base !== undefined) Object.assign(patch, fxBasePatch(f, cf.ch, base));
+        return useStore.getState().updateClipFx(clipId, f.id, patch);
+      }
       const keys = { ...cur.keys };
       if (list?.length) keys[ch as AnimProp] = sortKeys(list);
       else delete keys[ch as AnimProp];
@@ -53,7 +67,14 @@ export function clipHost(clipId: string): Host | null {
     },
     setBase(ch, v) {
       const cur = useStore.getState().clips.find((x) => x.id === clipId);
-      if (cur) useStore.getState().updateClip(clipId, { transform: { ...cur.transform, [ch]: v } });
+      if (!cur) return;
+      const cf = parseCfx(ch);
+      if (cf) {
+        const f = cur.effects?.find((x) => x.id === cf.fxId);
+        if (f) useStore.getState().updateClipFx(clipId, f.id, fxBasePatch(f, cf.ch, v));
+        return;
+      }
+      useStore.getState().updateClip(clipId, { transform: { ...cur.transform, [ch]: v } });
     },
   };
 }
@@ -72,14 +93,31 @@ export function fxHost(fxId: string): Host | null {
       if (list?.length) keys[ch] = sortKeys(list);
       else delete keys[ch];
       const patch: Partial<FxItem> = { keys };
-      if (!list?.length && base !== undefined) patch.params = { ...cur.params, [ch]: base };
+      if (!list?.length && base !== undefined) Object.assign(patch, fxBasePatch(cur, ch, base));
       useStore.getState().updateEffect(fxId, patch);
     },
     setBase(ch, v) {
       const cur = useStore.getState().effects.find((x) => x.id === fxId);
-      if (cur) useStore.getState().updateEffect(fxId, { params: { ...cur.params, [ch]: v } });
+      if (cur) useStore.getState().updateEffect(fxId, fxBasePatch(cur, ch, v));
     },
   };
+}
+
+/** 特效的固定值：一般參數存在 params，遮罩（mask.x…）存在 mask */
+function fxBasePatch<T extends { params: FxItem['params']; mask?: FxItem['mask'] }>(f: T, ch: string, v: number): Partial<T> {
+  if (ch.startsWith('mask.')) return { mask: { ...DEFAULT_MASK, ...f.mask, [ch.slice(5)]: v } } as Partial<T>;
+  return { params: { ...f.params, [ch]: v } } as Partial<T>;
+}
+
+/** 特效遮罩的動畫屬性 */
+export function maskChannels(f: FxItem, local: number): Channel[] {
+  const m = { ...DEFAULT_MASK, ...f.mask };
+  return MASK_PROPS.map(({ prop, label, step, suffix, display, min, max }) => {
+    const keys = f.keys?.[maskKey(prop)] ?? [];
+    const fmt = useStore.getState().format;
+    const disp = prop === 'x' ? fmt.w : prop === 'y' ? fmt.h : display;
+    return { id: maskKey(prop), label, value: keys.length ? evalKeys(keys, local) : m[prop], keys, def: DEFAULT_MASK[prop], step, suffix, display: disp, min, max };
+  });
 }
 
 function hostFor(owner: string) {
@@ -87,10 +125,28 @@ function hostFor(owner: string) {
   return type === 'clip' ? clipHost(id) : type === 'effect' ? fxHost(id) : null;
 }
 
+/** 片段特效的 channel id：`cfx:<特效 id>:<參數 / mask.x>` */
+export const cfxCh = (fxId: string, ch: string) => `cfx:${fxId}:${ch}`;
+function parseCfx(ch: string): { fxId: string; ch: string } | null {
+  if (!ch.startsWith('cfx:')) return null;
+  const i = ch.indexOf(':', 4);
+  return { fxId: ch.slice(4, i), ch: ch.slice(i + 1) };
+}
+
+/** 給 channel 加上片段特效的前綴 */
+export function cfxChannels(fxId: string, chs: Channel[]): Channel[] {
+  return chs.map((c) => ({ ...c, id: cfxCh(fxId, c.id) }));
+}
+
 function currentKeys(owner: string, ch: string): Keyframe[] {
   const s = useStore.getState();
   const [type, id] = [owner.slice(0, owner.indexOf(':')), owner.slice(owner.indexOf(':') + 1)];
-  if (type === 'clip') return s.clips.find((c) => c.id === id)?.keys[ch as AnimProp] ?? [];
+  if (type === 'clip') {
+    const c = s.clips.find((x) => x.id === id);
+    const cf = parseCfx(ch);
+    if (cf) return c?.effects?.find((f) => f.id === cf.fxId)?.keys?.[cf.ch] ?? [];
+    return c?.keys[ch as AnimProp] ?? [];
+  }
   return s.effects.find((f) => f.id === id)?.keys?.[ch] ?? [];
 }
 
@@ -108,7 +164,7 @@ export function clipChannels(c: Clip, local: number): Channel[] {
     max,
     // 位置用像素顯示（畫面 1080×1920），縮放 / 不透明度用 %
     suffix: prop === 'scale' || prop === 'opacity' ? '%' : prop === 'x' || prop === 'y' ? ' px' : suffix,
-    display: prop === 'scale' || prop === 'opacity' ? 100 : prop === 'x' ? 1080 : prop === 'y' ? 1920 : 1,
+    display: prop === 'scale' || prop === 'opacity' ? 100 : prop === 'x' ? useStore.getState().format.w : prop === 'y' ? useStore.getState().format.h : 1,
   }));
 }
 
@@ -122,7 +178,7 @@ export function fxChannels(f: FxItem, code: string, local: number): Channel[] {
       const keys = f.keys?.[d.name] ?? [];
       return {
         id: d.name,
-        label: d.label,
+        label: $t(d.label),
         value: keys.length ? evalKeys(keys, local) : Number(base[d.name]),
         keys,
         def: Number(d.def),
@@ -137,20 +193,6 @@ function niceStep(x: number) {
   const p = Math.pow(10, Math.floor(Math.log10(Math.max(x, 1e-6))));
   const n = x / p;
   return (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10) * p;
-}
-
-/** Delete 鍵：刪除選取的關鍵影格 */
-export function deleteSelectedKey(): boolean {
-  const sel = useKeySel.getState().sel;
-  if (!sel) return false;
-  const host = hostFor(sel.owner);
-  const list = currentKeys(sel.owner, sel.ch);
-  const k = list.find((x) => x.id === sel.id);
-  if (!host || !k) return false;
-  const rest = list.filter((x) => x !== k);
-  host.setKeys(sel.ch, rest, rest.length ? undefined : k.v);
-  useKeySel.setState({ sel: null });
-  return true;
 }
 
 /** 緩動作用的區段：選取的 key → 下一個；如果是最後一個，就用前一段 */
@@ -178,6 +220,137 @@ function listen(onMove: (ev: PointerEvent) => void, onUp?: () => void) {
   window.addEventListener('pointerup', up);
 }
 
+// ───────────────────────── 關鍵影格選取 / 編輯（跟時間軸一樣：多選、框選、整組移動、快捷鍵） ─────────────────────────
+
+/** 選取關鍵影格；primary 為主選取 */
+function selectKeys(owner: string, keys: KeyRef[], primary?: KeyRef) {
+  const p = primary ?? keys[keys.length - 1];
+  useKeySel.setState({ owner, keys, sel: p ? { owner, ...p } : null, focus: true });
+}
+const clearKeys = () => useKeySel.setState({ owner: null, keys: [], sel: null });
+const sameKey = (a: KeyRef, b: KeyRef) => a.ch === b.ch && a.id === b.id;
+
+/** 目前屬性面板顯示的對象（片段 / 特效） */
+function currentHost(): Host | null {
+  const s = useStore.getState().selection;
+  if (!s) return null;
+  return s.type === 'clip' ? clipHost(s.id) : s.type === 'effect' ? fxHost(s.id) : null;
+}
+
+/** 快捷鍵要不要作用在關鍵影格上 */
+export const keysFocused = () => useKeySel.getState().focus && !!currentHost();
+
+// 點到屬性面板以外的地方 → 快捷鍵回到時間軸
+if (typeof window !== 'undefined') {
+  window.addEventListener(
+    'pointerdown',
+    (e) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest?.('.ec .ec-right, .ec .ec-graph')) useKeySel.setState({ focus: false });
+    },
+    true,
+  );
+}
+
+/** Delete 鍵：刪除選取的關鍵影格 */
+export function deleteSelectedKey(): boolean {
+  const { owner, keys } = useKeySel.getState();
+  if (!owner || !keys.length) return false;
+  const host = hostFor(owner);
+  if (!host) return false;
+  let done = false;
+  for (const ch of new Set(keys.map((k) => k.ch))) {
+    const list = currentKeys(owner, ch);
+    const rest = list.filter((x) => !keys.some((k) => k.ch === ch && k.id === x.id));
+    if (rest.length === list.length) continue;
+    const last = list.find((x) => !rest.includes(x))!;
+    host.setKeys(ch, rest, rest.length ? undefined : last.v);
+    done = true;
+  }
+  clearKeys();
+  return done;
+}
+
+let keyClipboard: { ch: string; t: number; v: number; ease: Ease }[] = [];
+
+export function copyKeys(): boolean {
+  const { owner, keys } = useKeySel.getState();
+  if (!owner || !keys.length) return false;
+  const list = keys
+    .map((k) => ({ ch: k.ch, key: currentKeys(owner, k.ch).find((x) => x.id === k.id) }))
+    .filter((x): x is { ch: string; key: Keyframe } => !!x.key);
+  if (!list.length) return false;
+  const t0 = Math.min(...list.map((x) => x.key.t));
+  keyClipboard = list.map((x) => ({ ch: x.ch, t: x.key.t - t0, v: x.key.v, ease: x.key.ease }));
+  return true;
+}
+
+/** 貼上到播放頭（同名屬性） */
+export function pasteKeys(): boolean {
+  const host = currentHost();
+  if (!host || !keyClipboard.length) return false;
+  const lc = Math.min(host.duration, Math.max(0, useStore.getState().time - host.start));
+  const added: KeyRef[] = [];
+  for (const ch of new Set(keyClipboard.map((k) => k.ch))) {
+    let list = currentKeys(host.owner, ch);
+    for (const k of keyClipboard.filter((x) => x.ch === ch)) {
+      const t = Math.min(host.duration, lc + k.t);
+      list = upsertKey(list, t, k.v).map((x) => (Math.abs(x.t - t) < 1 / 120 ? { ...x, ease: k.ease } : x));
+      const hit = keyAt(list, t);
+      if (hit) added.push({ ch, id: hit.id });
+    }
+    host.setKeys(ch, list);
+  }
+  selectKeys(host.owner, added);
+  return true;
+}
+
+export function selectAllKeys(): boolean {
+  const host = currentHost();
+  if (!host) return false;
+  const s = useStore.getState();
+  const sel = s.selection!;
+  const keys: KeyRef[] = [];
+  if (sel.type === 'clip') {
+    const c = s.clips.find((x) => x.id === sel.id);
+    for (const [ch, l] of Object.entries(c?.keys ?? {})) for (const k of l ?? []) keys.push({ ch, id: k.id });
+    for (const f of c?.effects ?? []) for (const [ch, l] of Object.entries(f.keys ?? {})) for (const k of l) keys.push({ ch: cfxCh(f.id, ch), id: k.id });
+  } else {
+    const f = s.effects.find((x) => x.id === sel.id);
+    for (const [ch, l] of Object.entries(f?.keys ?? {})) for (const k of l) keys.push({ ch, id: k.id });
+  }
+  selectKeys(host.owner, keys);
+  return true;
+}
+
+/** 選取的關鍵影格整組平移 dt（秒），不會超出片段範圍 */
+function moveKeys(owner: string, keys: KeyRef[], orig: Map<string, Keyframe[]>, dt: number) {
+  const host = hostFor(owner);
+  if (!host) return;
+  for (const [ch, list] of orig) {
+    host.setKeys(ch, list.map((x) => (keys.some((k) => k.ch === ch && k.id === x.id) ? { ...x, t: x.t + dt } : x)));
+  }
+}
+
+function snapshot(owner: string, keys: KeyRef[]) {
+  const orig = new Map<string, Keyframe[]>();
+  for (const ch of new Set(keys.map((k) => k.ch))) orig.set(ch, currentKeys(owner, ch));
+  const ts: number[] = [];
+  for (const [ch, l] of orig) for (const x of l) if (keys.some((k) => k.ch === ch && k.id === x.id)) ts.push(x.t);
+  return { orig, min: Math.min(...ts), max: Math.max(...ts) };
+}
+
+/** Alt+← / →：選取的關鍵影格移動一格 */
+export function nudgeKeys(dt: number): boolean {
+  const { owner, keys } = useKeySel.getState();
+  const host = owner ? hostFor(owner) : null;
+  if (!owner || !host || !keys.length) return false;
+  const { orig, min, max } = snapshot(owner, keys);
+  const d = Math.max(-min, Math.min(host.duration - max, dt));
+  moveKeys(owner, keys, orig, d);
+  return true;
+}
+
 // ───────────────────────── 效果控制面板 ─────────────────────────
 
 export interface Section {
@@ -189,14 +362,20 @@ export interface Section {
   /** 放在區塊最下面（例如程式碼） */
   footer?: React.ReactNode;
   onReset?: () => void;
+  /** 標題列右邊的按鈕（片段特效：開關 / 上下移 / 移除） */
+  actions?: React.ReactNode;
+  /** 標題前面的小標籤 */
+  badge?: React.ReactNode;
+  dim?: boolean;
 }
 
-export function EffectControls({ host, sections, title }: { host: Host; sections: Section[]; title?: React.ReactNode }) {
+export function EffectControls({ host, sections, title, extra }: { host: Host; sections: Section[]; title?: React.ReactNode; extra?: React.ReactNode }) {
   const time = useStore((s) => s.time);
   const split = useLayout((s) => s.ecSplit);
   const collapsed = useLayout((s) => s.ecCollapsed);
-  const sel = useKeySel((s) => s.sel);
+  const ksel = useKeySel();
   const [open, setOpen] = useState<Record<string, boolean>>({});
+  const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
   const tableRef = useRef<HTMLDivElement>(null);
   const S = useStore.getState();
@@ -204,19 +383,65 @@ export function EffectControls({ host, sections, title }: { host: Host; sections
   const local = time - host.start;
   const inside = local >= -1e-6 && local <= dur + 1e-6;
   const lc = Math.min(dur, Math.max(0, local));
-  const mySel = sel && sel.owner === host.owner ? sel : null;
+  const mine = ksel.owner === host.owner;
+  const isSel = (ch: string, id: string) => mine && ksel.keys.some((k) => k.ch === ch && k.id === id);
+  const primary = mine ? ksel.sel : null;
 
   const seek = (l: number) => S.setTime(host.start + Math.min(dur, Math.max(0, l)));
   const localAt = (clientX: number) => {
     const r = rulerRef.current!.getBoundingClientRect();
     return Math.min(dur, Math.max(0, ((clientX - r.left) / r.width) * dur));
   };
+  /** 只有上方的尺規可以拖播放頭 */
   const scrub = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
-    useKeySel.setState({ sel: null });
     seek(localAt(e.clientX));
     listen((ev) => seek(localAt(ev.clientX)));
+  };
+
+  /** 關鍵影格區的空白處：框選（Shift / Ctrl 加選），單擊空白 = 取消選取 */
+  const startMarquee = (e: React.PointerEvent) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    useKeySel.setState({ focus: true });
+    const additive = e.shiftKey || e.ctrlKey || e.metaKey;
+    const base = additive && mine ? ksel.keys : [];
+    const x0 = e.clientX, y0 = e.clientY;
+    let moved = false;
+    listen(
+      (ev) => {
+        if (!moved && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return;
+        moved = true;
+        const r = { x0, y0, x1: ev.clientX, y1: ev.clientY };
+        setMarquee(r);
+        const L = Math.min(r.x0, r.x1), R = Math.max(r.x0, r.x1), T = Math.min(r.y0, r.y1), B = Math.max(r.y0, r.y1);
+        const hits: KeyRef[] = [...base];
+        tableRef.current!.querySelectorAll<HTMLElement>('.ec-key[data-ch]').forEach((el) => {
+          const b = el.getBoundingClientRect();
+          const cx = (b.left + b.right) / 2, cy = (b.top + b.bottom) / 2;
+          const ref = { ch: el.dataset.ch!, id: el.dataset.id! };
+          if (cx >= L && cx <= R && cy >= T && cy <= B && !hits.some((h) => sameKey(h, ref))) hits.push(ref);
+        });
+        selectKeys(host.owner, hits);
+      },
+      () => {
+        setMarquee(null);
+        if (!moved && !additive) clearKeys();
+        useKeySel.setState({ focus: true });
+      },
+    );
+  };
+
+  /** 雙擊屬性的時間軸：在那裡加關鍵影格（數值 = 那個時間點目前的值） */
+  const addKeyAt = (e: React.MouseEvent, ch: Channel) => {
+    const t = localAt(e.clientX);
+    const list = currentKeys(host.owner, ch.id);
+    const v = list.length ? evalKeys(list, t) : ch.value;
+    const next = upsertKey(list, t, v);
+    host.setKeys(ch.id, next);
+    const hit = keyAt(next, t);
+    if (hit) selectKeys(host.owner, [{ ch: ch.id, id: hit.id }]);
   };
 
   const setValue = (ch: Channel, v: number) => {
@@ -244,39 +469,75 @@ export function EffectControls({ host, sections, title }: { host: Host; sections
     if (k) seek(k.t);
   };
 
+  /** 點關鍵影格：Ctrl 切換、Shift 加選；拖曳 = 選取的整組一起移動（吸附播放頭與其他關鍵影格） */
   const dragKey = (e: React.PointerEvent, ch: Channel, k: Keyframe) => {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    useKeySel.setState({ sel: { owner: host.owner, ch: ch.id, id: k.id } });
+    const me = { ch: ch.id, id: k.id };
+    const cur = mine ? ksel.keys : [];
+    const already = cur.some((x) => sameKey(x, me));
+    if (e.ctrlKey || e.metaKey) {
+      return selectKeys(host.owner, already ? cur.filter((x) => !sameKey(x, me)) : [...cur, me], already ? undefined : me);
+    }
+    const group = e.shiftKey ? (already ? cur : [...cur, me]) : already ? cur : [me];
+    selectKeys(host.owner, group, me);
+    const { orig, min, max } = snapshot(host.owner, group);
     const r = rulerRef.current!.getBoundingClientRect();
+    const pxPerSec = r.width / dur;
+    // 吸附點：播放頭、其他沒選到的關鍵影格
+    const pts = [lc, 0, dur];
+    for (const c of sections.flatMap((s) => s.channels ?? [])) for (const x of c.keys) if (!group.some((g) => g.ch === c.id && g.id === x.id)) pts.push(x.t);
+    const x0 = e.clientX;
     let moved = false;
     listen(
       (ev) => {
+        if (!moved && Math.abs(ev.clientX - x0) < 3) return;
         moved = true;
-        let t = localAt(ev.clientX);
-        if (Math.abs(t - lc) * (r.width / dur) < 6) t = lc;
-        host.setKeys(ch.id, currentKeys(host.owner, ch.id).map((x) => (x.id === k.id ? { ...x, t } : x)));
+        let t = k.t + (ev.clientX - x0) / pxPerSec;
+        for (const p of pts) if (Math.abs(p - t) * pxPerSec < 6) { t = p; break; }
+        const dt = Math.max(-min, Math.min(dur - max, t - k.t));
+        moveKeys(host.owner, group, orig, dt);
       },
-      () => void moved,
+      () => {
+        if (!moved && already && !e.shiftKey && cur.length > 1) selectKeys(host.owner, [me]);
+      },
     );
   };
 
   const keyMenu = (e: React.MouseEvent, ch: Channel, k: Keyframe) => {
     e.preventDefault();
     e.stopPropagation();
-    useKeySel.setState({ sel: { owner: host.owner, ch: ch.id, id: k.id } });
+    const me = { ch: ch.id, id: k.id };
+    if (!isSel(ch.id, k.id)) selectKeys(host.owner, [me]);
+    else selectKeys(host.owner, ksel.keys, me);
+    const n = useKeySel.getState().keys.length;
     const list = currentKeys(host.owner, ch.id);
     const seg = targetSegment(list, k.id, lc);
-    const cur = seg >= 0 ? easeId(list[seg].ease) : '';
+    const curE = seg >= 0 ? easeId(list[seg].ease) : '';
     const isLast = list.indexOf(list.find((x) => x.id === k.id)!) === list.length - 1;
     openMenu(e.clientX, e.clientY, [
       ...(seg >= 0
-        ? [{ label: isLast ? '（套用到前一段）' : '（套用到下一段）', action: undefined }, ...EASE_PRESETS.map((p) => ({ label: p.label, checked: cur === p.id, action: () => setSegmentEase(host, ch.id, seg, p.ease) }))]
-        : [{ label: '需要兩個以上的關鍵影格才能設定緩動', action: undefined }]),
+        ? [{ label: isLast ? $t('（套用到前一段）') : $t('（套用到下一段）'), action: undefined }, ...EASE_PRESETS.map((p) => ({ label: p.label, checked: curE === p.id, action: () => setSegmentEase(host, ch.id, seg, p.ease) }))]
+        : [{ label: $t('需要兩個以上的關鍵影格才能設定緩動'), action: undefined }]),
       { separator: true },
-      { label: '播放頭移到這裡', action: () => seek(k.t) },
-      { label: '刪除關鍵影格', shortcut: 'Del', danger: true, action: deleteSelectedKey },
+      { label: $t('播放頭移到這裡'), action: () => seek(k.t) },
+      { label: n > 1 ? $t('複製 {0} 個關鍵影格', n) : $t('複製'), shortcut: 'Ctrl+C', action: copyKeys },
+      { label: $t('貼上到播放頭'), shortcut: 'Ctrl+V', action: keyClipboard.length ? pasteKeys : undefined },
+      { label: n > 1 ? $t('刪除 {0} 個關鍵影格', n) : $t('刪除關鍵影格'), shortcut: 'Del', danger: true, action: deleteSelectedKey },
+    ]);
+  };
+
+  const laneMenu = (e: React.MouseEvent, ch?: Channel) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const t = localAt(e.clientX);
+    openMenu(e.clientX, e.clientY, [
+      { label: $t('在這裡加入關鍵影格'), action: ch ? () => addKeyAt(e, ch) : undefined },
+      { label: $t('播放頭移到這裡'), action: () => seek(t) },
+      { separator: true },
+      { label: $t('全選關鍵影格'), shortcut: 'Ctrl+A', action: selectAllKeys },
+      { label: $t('貼上到播放頭'), shortcut: 'Ctrl+V', action: keyClipboard.length ? pasteKeys : undefined },
     ]);
   };
 
@@ -293,14 +554,14 @@ export function EffectControls({ host, sections, title }: { host: Host; sections
 
   return (
     <div className="ec" ref={tableRef} style={{ '--ec-left': `${split * 100}%` } as React.CSSProperties}>
-      {/* 表頭：名稱 + 片段內時間尺規 */}
+      {/* 表頭：名稱 + 片段內時間尺規（只有這裡可以拖播放頭） */}
       <div className="ec-row ec-header">
         <div className="ec-left">
           {title}
           <span className="ec-time">{inside ? `${lc.toFixed(2)}s` : '—'}</span>
-          <div className="ec-split" onPointerDown={dragSplit} title="拖曳調整左右寬度" />
+          <div className="ec-split" onPointerDown={dragSplit} title={$t('拖曳調整左右寬度')} />
         </div>
-        <div className="ec-right ec-ruler" ref={rulerRef} onPointerDown={scrub}>
+        <div className="ec-right ec-ruler" ref={rulerRef} onPointerDown={scrub} title={$t('拖曳移動播放頭')}>
           {ticks.map((t) => <span key={t} className="ec-tick" style={{ left: pct(t) }}>{fmtT(t, dur)}</span>)}
         </div>
       </div>
@@ -311,18 +572,20 @@ export function EffectControls({ host, sections, title }: { host: Host; sections
           <React.Fragment key={sec.id}>
             <div className="ec-row ec-section">
               <div className="ec-left" onClick={() => toggleSection(sec.id)}>
-                <span className="twirl">{isCol ? '▸' : '▾'}</span>
-                <span className="ec-sec-title">{sec.title}</span>
-                {sec.onReset && <button className="ec-icon" title="重設這個區塊" onClick={(e) => { e.stopPropagation(); sec.onReset!(); }}>↺</button>}
+                <span className="twirl">{isCol ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span>
+                {sec.badge}
+                <span className={`ec-sec-title ${sec.dim ? 'dim' : ''}`}>{sec.title}</span>
+                {sec.actions && <span className="ec-actions" onClick={(e) => e.stopPropagation()}>{sec.actions}</span>}
+                {sec.onReset && <button className="ec-icon" title={$t('重設這個區塊')} onClick={(e) => { e.stopPropagation(); sec.onReset!(); }}><RotateCcw size={13} /></button>}
               </div>
-              <div className="ec-right" onPointerDown={scrub} />
+              <div className="ec-right" onPointerDown={startMarquee} onContextMenu={(e) => laneMenu(e)} />
             </div>
             {!isCol && (
               <>
                 {sec.rows?.map((r) => (
                   <div key={r.label} className="ec-row">
                     <div className="ec-left ec-plain"><span className="ec-label">{r.label}</span><div className="ec-node">{r.node}</div></div>
-                    <div className="ec-right ec-dim" onPointerDown={scrub} />
+                    <div className="ec-right ec-dim" onPointerDown={startMarquee} onContextMenu={(e) => laneMenu(e)} />
                   </div>
                 ))}
                 {sec.channels?.map((ch) => {
@@ -334,37 +597,50 @@ export function EffectControls({ host, sections, title }: { host: Host; sections
                     <React.Fragment key={ch.id}>
                       <div className={`ec-row ${animated ? 'anim' : ''}`}>
                         <div className="ec-left">
-                          <span className="twirl small" onClick={() => setOpen({ ...open, [rowKey]: !isOpen })} title="展開曲線">{isOpen ? '▾' : '▸'}</span>
-                          <button className={`ec-watch ${animated ? 'on' : ''}`} title={animated ? '關閉動畫（移除所有關鍵影格）' : '開啟動畫（在播放頭加關鍵影格）'} onClick={() => toggleAnim(ch)}>⏱</button>
-                          <span className="ec-label" title={ch.label}>{ch.label}</span>
+                          <span className="twirl small" onClick={() => setOpen({ ...open, [rowKey]: !isOpen })} title={$t('展開曲線')}>
+                            {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                          </span>
+                          <button className={`ec-watch ${animated ? 'on' : ''}`} title={animated ? $t('關閉動畫（移除所有關鍵影格）') : $t('開啟動畫（在播放頭加關鍵影格）')} onClick={() => toggleAnim(ch)}>
+                            <Timer size={13} />
+                          </button>
+                          <span className="ec-label" title={$t('{0}（右鍵數值可重設）', ch.label)}>{ch.label}</span>
                           <DragNumber variant="text" value={ch.value} step={ch.step} min={ch.min} max={ch.max} suffix={ch.suffix} display={ch.display} def={ch.def} onChange={(v) => setValue(ch, v)} />
                           <span className="ec-nav">
                             {animated && (
                               <>
-                                <button onClick={() => jump(ch, -1)} title="上一個關鍵影格">◂</button>
-                                <button className={here ? 'on' : ''} onClick={() => toggleKeyHere(ch)} title={here ? '移除關鍵影格' : '加入關鍵影格'}>{here ? '◆' : '◇'}</button>
-                                <button onClick={() => jump(ch, 1)} title="下一個關鍵影格">▸</button>
+                                <button onClick={() => jump(ch, -1)} title={$t('上一個關鍵影格')}><ChevronLeft size={13} /></button>
+                                <button className={here ? 'on' : ''} onClick={() => toggleKeyHere(ch)} title={here ? $t('移除關鍵影格') : $t('加入關鍵影格')}>
+                                  <Diamond size={11} fill={here ? 'currentColor' : 'none'} />
+                                </button>
+                                <button onClick={() => jump(ch, 1)} title={$t('下一個關鍵影格')}><ChevronRight size={13} /></button>
                               </>
                             )}
                           </span>
-                          <button className="ec-icon" title="重設" onClick={() => setValue(ch, ch.def)}>↺</button>
                         </div>
-                        <div className="ec-right ec-lane" onPointerDown={scrub}>
+                        <div
+                          className="ec-right ec-lane"
+                          onPointerDown={startMarquee}
+                          onDoubleClick={(e) => e.target === e.currentTarget && addKeyAt(e, ch)}
+                          onContextMenu={(e) => laneMenu(e, ch)}
+                          title={$t('拖曳框選、雙擊加入關鍵影格')}
+                        >
                           {ch.keys.length > 1 && <div className="ec-span" style={{ left: pct(ch.keys[0].t), width: pct(ch.keys[ch.keys.length - 1].t - ch.keys[0].t) }} />}
                           {ch.keys.map((k) => (
                             <div
                               key={k.id}
-                              className={`ec-key ${mySel?.id === k.id ? 'sel' : ''} ${k.ease === 'hold' ? 'hold' : ''}`}
+                              data-ch={ch.id}
+                              data-id={k.id}
+                              className={`ec-key ${isSel(ch.id, k.id) ? 'sel' : ''} ${k.ease === 'hold' ? 'hold' : ''}`}
                               style={{ left: pct(k.t) }}
-                              title={`${k.t.toFixed(2)}s（拖曳移動、右鍵緩動）`}
+                              title={$t('{0}s（拖曳移動、右鍵緩動）', k.t.toFixed(2))}
                               onPointerDown={(e) => dragKey(e, ch, k)}
-                              onDoubleClick={() => seek(k.t)}
+                              onDoubleClick={(e) => { e.stopPropagation(); seek(k.t); }}
                               onContextMenu={(e) => keyMenu(e, ch, k)}
                             />
                           ))}
                         </div>
                       </div>
-                      {isOpen && <GraphRow host={host} ch={ch} lc={lc} selId={mySel?.ch === ch.id ? mySel.id : undefined} />}
+                      {isOpen && <GraphRow host={host} ch={ch} lc={lc} selId={primary?.ch === ch.id ? primary.id : undefined} />}
                     </React.Fragment>
                   );
                 })}
@@ -375,8 +651,21 @@ export function EffectControls({ host, sections, title }: { host: Host; sections
         );
       })}
 
+      {extra}
       {/* 播放頭（蓋住右側所有列） */}
       {inside && <div className="ec-playhead" style={{ left: `calc(var(--ec-left) + (100% - var(--ec-left)) * ${lc / dur})` }} />}
+      {marquee && (
+        <div
+          className="marquee"
+          style={{
+            position: 'fixed',
+            left: Math.min(marquee.x0, marquee.x1),
+            top: Math.min(marquee.y0, marquee.y1),
+            width: Math.abs(marquee.x1 - marquee.x0),
+            height: Math.abs(marquee.y1 - marquee.y0),
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -415,9 +704,10 @@ function GraphRow({ host, ch, lc, selId }: { host: Host; ch: Channel; lc: number
     return () => ro.disconnect();
   }, []);
 
-  let range = frozen.current;
-  if (!range) {
-    const vals = keys.length ? keys.map((k) => k.v) : [ch.value];
+  // 曲線的數值範圍與取樣點只有 key / 大小改變時才重算（播放中每格只動播放頭）
+  const flatV = keys.length ? 0 : ch.value;
+  const auto = useMemo(() => {
+    const vals = keys.length ? keys.map((k) => k.v) : [flatV];
     if (keys.length > 1) for (let i = 0; i <= 60; i++) vals.push(evalKeys(keys, (i / 60) * dur));
     let mn = Math.min(...vals), mx = Math.max(...vals);
     if (mx - mn < 1e-6) {
@@ -426,8 +716,9 @@ function GraphRow({ host, ch, lc, selId }: { host: Host; ch: Channel; lc: number
       mx += p;
     }
     const p = (mx - mn) * 0.15;
-    range = { min: mn - p, max: mx + p };
-  }
+    return { min: mn - p, max: mx + p };
+  }, [keys, dur, flatV, ch.step]);
+  const range = frozen.current ?? auto;
   const { min, max } = range;
   const X = (t: number) => (t / dur) * W;
   const Y = (v: number) => PAD + (1 - (v - min) / (max - min)) * (GH - PAD * 2);
@@ -441,13 +732,29 @@ function GraphRow({ host, ch, lc, selId }: { host: Host; ch: Channel; lc: number
   const dt = a && b ? b.t - a.t : 0;
   const ez = a && a.ease !== 'hold' && Math.abs(dv) > 1e-9 ? (a.ease as Bez) : null;
 
-  // 曲線每次重算（改緩動會立刻反映）
-  const pts: string[] = [];
-  if (keys.length) for (let i = 0; i <= 200; i++) { const t = (i / 200) * dur; pts.push(`${X(t).toFixed(1)},${Y(evalKeys(keys, t)).toFixed(1)}`); }
-  else pts.push(`0,${Y(ch.value)}`, `${W},${Y(ch.value)}`);
+  // 曲線：取樣點數跟寬度成正比（每 2px 一點），只在 key / 範圍 / 寬度改變時重算
+  const pts = useMemo(() => {
+    const out: string[] = [];
+    if (!keys.length) return `0,${Y(flatV)} ${W},${Y(flatV)}`;
+    const n = Math.max(24, Math.min(400, Math.round(W / 2)));
+    for (let i = 0; i <= n; i++) {
+      const t = (i / n) * dur;
+      out.push(`${X(t).toFixed(1)},${Y(evalKeys(keys, t)).toFixed(1)}`);
+    }
+    return out.join(' ');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keys, dur, W, min, max, flatV]);
   // 目前作用中的區段另外加亮
-  const segPts: string[] = [];
-  if (a && b) for (let i = 0; i <= 60; i++) { const t = a.t + (i / 60) * dt; segPts.push(`${X(t).toFixed(1)},${Y(evalKeys(keys, t)).toFixed(1)}`); }
+  const segPts = useMemo(() => {
+    if (!a || !b) return '';
+    const out: string[] = [];
+    for (let i = 0; i <= 60; i++) {
+      const t = a.t + (i / 60) * (b.t - a.t);
+      out.push(`${X(t).toFixed(1)},${Y(evalKeys(keys, t)).toFixed(1)}`);
+    }
+    return out.join(' ');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keys, a, b, dur, W, min, max]);
 
   const pt = (e: { clientX: number; clientY: number }) => {
     const r = wrapRef.current!.querySelector('svg')!.getBoundingClientRect();
@@ -457,7 +764,7 @@ function GraphRow({ host, ch, lc, selId }: { host: Host; ch: Channel; lc: number
   const dragPoint = (e: React.PointerEvent, k: Keyframe) => {
     e.preventDefault();
     e.stopPropagation();
-    useKeySel.setState({ sel: { owner: host.owner, ch: ch.id, id: k.id } });
+    useKeySel.setState({ owner: host.owner, keys: [{ ch: ch.id, id: k.id }], sel: { owner: host.owner, ch: ch.id, id: k.id }, focus: true });
     frozen.current = range;
     const p0 = pt(e);
     listen(
@@ -495,10 +802,10 @@ function GraphRow({ host, ch, lc, selId }: { host: Host; ch: Channel; lc: number
   /** 點曲線：選取那一段；雙擊：在那裡加關鍵影格 */
   const onDown = (e: React.PointerEvent) => {
     const t = T(pt(e).x);
-    if (keys.length < 2) return useKeySel.setState({ sel: null });
+    if (keys.length < 2) return useKeySel.setState({ owner: null, keys: [], sel: null });
     let i = keys.findIndex((k, j) => j < keys.length - 1 && t >= k.t && t < keys[j + 1].t);
     if (i < 0) i = t < keys[0].t ? 0 : keys.length - 2;
-    useKeySel.setState({ sel: { owner: host.owner, ch: ch.id, id: keys[i].id } });
+    useKeySel.setState({ owner: host.owner, keys: [{ ch: ch.id, id: keys[i].id }], sel: { owner: host.owner, ch: ch.id, id: keys[i].id }, focus: true });
   };
   const onDbl = (e: React.MouseEvent) => {
     const t = T(pt(e).x);
@@ -513,23 +820,23 @@ function GraphRow({ host, ch, lc, selId }: { host: Host; ch: Channel; lc: number
       <div className="ec-left ec-graph-side">
         {a && b ? (
           <>
-            <div className="muted small">區段 {a.t.toFixed(2)}s → {b.t.toFixed(2)}s</div>
+            <div className="muted small">{$t('區段')}{' '}{a.t.toFixed(2)}s → {b.t.toFixed(2)}s</div>
             <select className="select wide" value={curEase} onChange={(e) => { const p = EASE_PRESETS.find((x) => x.id === e.target.value); if (p) setSegmentEase(host, ch.id, seg, p.ease); }}>
-              {curEase === 'custom' && <option value="custom">自訂曲線</option>}
+              {curEase === 'custom' && <option value="custom">{$t('自訂曲線')}</option>}
               {EASE_PRESETS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
             </select>
             <EasePresetsMini current={curEase} onPick={(e) => setSegmentEase(host, ch.id, seg, e)} />
           </>
         ) : (
-          <div className="muted small">{keys.length ? '再加一個關鍵影格就能調緩動' : '按 ⏱ 開啟動畫，或雙擊曲線加關鍵影格'}</div>
+          <div className="muted small">{keys.length ? $t('再加一個關鍵影格就能調緩動') : $t('按左側的碼錶開啟動畫，或雙擊曲線加關鍵影格')}</div>
         )}
         <div className="ec-range muted small">{(max * mul).toFixed(1)} / {(min * mul).toFixed(1)}</div>
       </div>
       <div className="ec-right ec-graph" ref={wrapRef}>
         <svg width={W} height={GH} onPointerDown={onDown} onDoubleClick={onDbl}>
           {[0.25, 0.5, 0.75].map((f) => <line key={f} className="cg-grid" x1={0} x2={W} y1={PAD + f * (GH - PAD * 2)} y2={PAD + f * (GH - PAD * 2)} />)}
-          <polyline className={`cg-curve ${keys.length ? '' : 'flat'}`} points={pts.join(' ')} />
-          {segPts.length > 0 && <polyline className="cg-seg" points={segPts.join(' ')} />}
+          <polyline className={`cg-curve ${keys.length ? '' : 'flat'}`} points={pts} />
+          {segPts && <polyline className="cg-seg" points={segPts} />}
           <line className="cg-playhead" x1={X(lc)} x2={X(lc)} y1={0} y2={GH} />
           {ez && a && (
             <g className="cg-handles">

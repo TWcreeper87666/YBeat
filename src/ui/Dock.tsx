@@ -1,3 +1,5 @@
+import { $t } from '../i18n';
+import { Minimize2 } from 'lucide-react';
 import React, { useRef } from 'react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
@@ -12,23 +14,25 @@ import {
 export type { PanelId };
 
 export const PANELS: { id: PanelId; title: string }[] = [
-  { id: 'media', title: '素材' },
-  { id: 'transition', title: '轉場' },
-  { id: 'effect', title: '特效' },
-  { id: 'remap', title: '變速' },
-  { id: 'inspector', title: '屬性' },
-  { id: 'preview', title: '預覽' },
-  { id: 'timeline', title: '時間軸' },
+  { id: 'media', title: $t('素材') },
+  { id: 'text', title: $t('文字') },
+  { id: 'transition', title: $t('轉場') },
+  { id: 'effect', title: $t('特效') },
+  { id: 'remap', title: $t('變速') },
+  { id: 'inspector', title: $t('屬性') },
+  { id: 'preview', title: $t('預覽') },
+  { id: 'source', title: $t('素材預覽') },
+  { id: 'timeline', title: $t('時間軸') },
 ];
 const TITLE = Object.fromEntries(PANELS.map((p) => [p.id, p.title])) as Record<PanelId, string>;
-const LIB: PanelId[] = ['media', 'transition', 'effect', 'remap'];
+const LIB: PanelId[] = ['media', 'text', 'transition', 'effect', 'remap'];
 
 /** 內建版面 */
 export const PRESETS: { id: string; name: string; build: () => DockNode }[] = [
-  { id: 'edit', name: '剪輯', build: () => C([R([T(LIB), T(['inspector']), T(['preview'])], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
-  { id: 'right', name: '預覽在右', build: () => R([C([R([T(LIB), T(['inspector'])], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview'])], [0.72, 0.28]) },
-  { id: 'code', name: '寫程式', build: () => R([C([R([T(LIB), T(['inspector'])], [0.3, 0.7]), T(['timeline'])], [0.68, 0.32]), T(['preview'])], [0.74, 0.26]) },
-  { id: 'timeline', name: '大時間軸', build: () => C([R([T([...LIB, 'inspector']), T(['preview'])], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
+  { id: 'edit', name: $t('剪輯'), build: () => C([R([T(LIB), T(['inspector']), T(['preview', 'source'], 'preview')], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
+  { id: 'right', name: $t('預覽在右'), build: () => R([C([R([T(LIB), T(['inspector'])], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview', 'source'], 'preview')], [0.72, 0.28]) },
+  { id: 'code', name: $t('寫程式'), build: () => R([C([R([T(LIB), T(['inspector'])], [0.3, 0.7]), T(['timeline'])], [0.68, 0.32]), T(['preview', 'source'], 'preview')], [0.74, 0.26]) },
+  { id: 'timeline', name: $t('大時間軸'), build: () => C([R([T([...LIB, 'inspector']), T(['preview', 'source'], 'preview')], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
 ];
 
 interface Custom { id: string; name: string; layout: DockNode }
@@ -94,7 +98,30 @@ export const useDock = create<DockState>()(
         else get().applyPreset(cur);
       },
     }),
-    { name: 'beatsync-dock-v2', partialize: (s) => ({ layout: s.layout, current: s.current, customs: s.customs }) },
+    {
+      name: 'beatsync-dock-v2',
+      partialize: (s) => ({ layout: s.layout, current: s.current, customs: s.customs }),
+      // 舊版存的版面沒有「文字」分頁：加在「素材」旁邊
+      merge: (persisted, current) => {
+        const p = (persisted ?? {}) as Partial<DockState>;
+        const addText = (l: DockNode | null | undefined) =>
+          l && !panelsIn(l).includes('text')
+            ? mapTabs(l, (t) => (t.tabs.includes('media') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'media' ? ['media', 'text'] : [x])) as PanelId[] } : t))
+            : l;
+        // 「素材預覽」加在「預覽」旁邊
+        const addSource = (l: DockNode | null | undefined) =>
+          l && !panelsIn(l).includes('source')
+            ? mapTabs(l, (t) => (t.tabs.includes('preview') ? { ...t, tabs: [...t.tabs, 'source'] as PanelId[] } : t))
+            : l;
+        const fix = (l: DockNode | null | undefined) => addSource(addText(l));
+        return {
+          ...current,
+          ...p,
+          layout: p.layout === undefined ? current.layout : fix(p.layout) ?? null,
+          customs: (p.customs ?? current.customs).map((c) => ({ ...c, layout: fix(c.layout)! })),
+        };
+      },
+    },
   ),
 );
 
@@ -113,11 +140,11 @@ export function layoutMenuItems(onSaveAs: () => void): MenuItem[] {
     ...(d.customs.length ? [{ separator: true } as MenuItem] : []),
     ...d.customs.map((c) => ({ label: c.name, checked: cur === c.id, action: () => d.applyCustom(c.id) })),
     { separator: true },
-    { label: '另存目前版面…', action: onSaveAs },
-    { label: '更新目前的自訂版面', action: isCustom ? () => d.overwriteCustom(cur) : undefined },
-    { label: '刪除目前的自訂版面', danger: true, action: isCustom ? () => d.deleteCustom(cur) : undefined },
+    { label: $t('另存目前版面…'), action: onSaveAs },
+    { label: $t('更新目前的自訂版面'), action: isCustom ? () => d.overwriteCustom(cur) : undefined },
+    { label: $t('刪除目前的自訂版面'), danger: true, action: isCustom ? () => d.deleteCustom(cur) : undefined },
     { separator: true },
-    { label: '重設為目前版面的原始樣子', action: d.resetCurrent },
+    { label: $t('重設為目前版面的原始樣子'), action: d.resetCurrent },
   ];
 }
 
@@ -223,8 +250,8 @@ export function DockRoot({ hosts }: { hosts: Record<PanelId, HTMLElement> }) {
           <NodeView node={layout} hosts={hosts} />
         ) : (
           <div className="dock-empty">
-            <p>所有面板都關掉了</p>
-            <button className="btn" onClick={() => useDock.getState().applyPreset('edit')}>恢復預設版面</button>
+            <p>{$t('所有面板都關掉了')}</p>
+            <button className="btn" onClick={() => useDock.getState().applyPreset('edit')}>{$t('恢復預設版面')}</button>
           </div>
         )}
         {rootSide && <div className={`dock-drop root ${rootSide}`} />}
@@ -293,12 +320,12 @@ function Group({ node, hosts }: { node: TabsNode; hosts: Record<PanelId, HTMLEle
     e.stopPropagation();
     const d = useDock.getState();
     const items: MenuItem[] = [
-      { label: '關閉', shortcut: '中鍵', action: () => d.closePanel(p) },
-      { label: '關閉其他分頁', action: node.tabs.length > 1 ? () => node.tabs.filter((x) => x !== p).forEach((x) => d.closePanel(x)) : undefined },
+      { label: $t('關閉'), shortcut: $t('中鍵'), action: () => d.closePanel(p) },
+      { label: $t('關閉其他分頁'), action: node.tabs.length > 1 ? () => node.tabs.filter((x) => x !== p).forEach((x) => d.closePanel(x)) : undefined },
       { separator: true },
-      { label: maximized ? '還原' : '最大化', shortcut: '雙擊', action: () => d.toggleMax(node.id) },
+      { label: maximized ? $t('還原') : $t('最大化'), shortcut: $t('雙擊'), action: () => d.toggleMax(node.id) },
     ];
-    if (p === 'preview') items.push({ label: floating ? '停駐預覽' : '分離成浮動視窗', action: () => useLayout.getState().set({ floating: !floating }) });
+    if (p === 'preview') items.push({ label: floating ? $t('停駐預覽') : $t('分離成浮動視窗'), action: () => useLayout.getState().set({ floating: !floating }) });
     openMenu(e.clientX, e.clientY, items);
   };
 
@@ -320,13 +347,13 @@ function Group({ node, hosts }: { node: TabsNode; hosts: Record<PanelId, HTMLEle
           </React.Fragment>
         ))}
         {insertAt === node.tabs.length && <div className="dock-insert" />}
-        {maximized && <button className="dock-restore" onClick={() => useDock.getState().toggleMax(node.id)} title="還原">⤡ 還原</button>}
+        {maximized && <button className="dock-restore" onClick={() => useDock.getState().toggleMax(node.id)} title={$t('還原')}><Minimize2 size={12} /> {$t('還原')}</button>}
       </div>
       <div className="dock-body">
         {active === 'preview' && floating ? (
           <div className="dock-placeholder">
-            <p className="muted">預覽目前是浮動視窗</p>
-            <button className="btn" onClick={() => useLayout.getState().set({ floating: false })}>停駐回這裡</button>
+            <p className="muted">{$t('預覽目前是浮動視窗')}</p>
+            <button className="btn" onClick={() => useLayout.getState().set({ floating: false })}>{$t('停駐回這裡')}</button>
           </div>
         ) : (
           <Slot key={active} host={hosts[active]} />
