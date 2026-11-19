@@ -6,6 +6,8 @@ export interface Module {
   name: string;
   code: string;
   builtin?: boolean;
+  /** 內建模組的版本：改了內建程式碼就 +1，舊存檔裡的同 id 程式碼會被新版取代 */
+  rev?: number;
 }
 
 // ───────────────────────── 特效（GLSL）─────────────────────────

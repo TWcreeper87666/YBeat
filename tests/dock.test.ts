@@ -1,4 +1,4 @@
-import { C, R, T, findGroup, movePanel, panelsIn, showPanel, removePanel, type DockNode, type PanelId } from '../src/ui/dockTree';
+import { C, R, T, findGroup, moveGroup, movePanel, panelsIn, showPanel, removePanel, type DockNode, type PanelId } from '../src/ui/dockTree';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -7,6 +7,7 @@ const ok = (cond: boolean, msg: string) => {
 };
 const LIB: PanelId[] = ['media', 'transition', 'effect', 'remap'];
 const edit = () => C([R([T(LIB), T(['inspector']), T(['preview'])], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]);
+const mapActive = (l: DockNode, p: PanelId): DockNode => (l.type === 'tabs' ? (l.tabs.includes(p) ? { ...l, active: p } : l) : { ...l, children: l.children.map((c) => mapActive(c, p)) });
 const groupOf = (l: DockNode | null, p: PanelId) => findGroup(l, (g) => g.tabs.includes(p))!;
 const sum = (n: DockNode): boolean => n.type === 'tabs' || (Math.abs(n.sizes.reduce((a, b) => a + b, 0) - 1) < 1e-6 && n.children.every(sum));
 const show = (n: DockNode | null): string => (!n ? 'null' : n.type === 'tabs' ? `[${n.tabs.join(',')}]` : `${n.dir}(${n.children.map(show).join(' | ')})`);
@@ -92,6 +93,22 @@ const show = (n: DockNode | null): string => (!n ? 'null' : n.type === 'tabs' ? 
   ok(!panelsIn(l).includes('inspector'), '屬性已關閉');
   const back = showPanel(l, 'inspector');
   ok(panelsIn(back).includes('inspector'), '屬性重新打開');
+}
+
+// 整組移動：素材庫群組拖到時間軸右邊，分頁與作用中分頁都保留
+{
+  const l = mapActive(edit(), 'effect');
+  const g = groupOf(l, 'media');
+  const out = moveGroup(l, g.id, { kind: 'group', group: groupOf(l, 'timeline').id, zone: 'right' })!;
+  console.log('   ', show(out));
+  ok(groupOf(out, 'media').tabs.join() === LIB.join(), '整組分頁一起移動、順序不變');
+  ok(groupOf(out, 'media').active === 'effect', '作用中分頁不變');
+  ok(show(out).includes('row([timeline] | [media,transition,effect,remap])'), '放在時間軸右邊');
+  ok(sum(out), '比例總和 = 1');
+  const self = moveGroup(l, g.id, { kind: 'group', group: g.id, zone: 'left' });
+  ok(self === l, '拖到自己身上不動');
+  const merged = moveGroup(l, g.id, { kind: 'tabs', group: groupOf(l, 'inspector').id, index: 0 })!;
+  ok(groupOf(merged, 'inspector').tabs.join() === [...LIB, 'inspector'].join(), '整組插入到別的分頁列');
 }
 
 console.log(fails ? `\n${fails} 項失敗` : '\n全部通過');

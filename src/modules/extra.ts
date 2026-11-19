@@ -397,10 +397,13 @@ vec4 transition(vec2 uv) {
 const zoomBlurTr = `// 縮放模糊轉場（拉遠 → 推近）
 // @param strength: float = 0.6 (0..2) "縮放量"
 // @param blur: float = 0.5 (0..1) "模糊"
+// @param cx: float = 0.5 (0..1) "中心 X"
+// @param cy: float = 0.5 (0..1) "中心 Y"
 vec4 radialS(sampler2D s, vec2 uv, float z, float b) {
-  vec2 base = zoomUV(uv, z, vec2(0.5));
+  vec2 c = vec2(cx, cy);
+  vec2 base = zoomUV(uv, z, c);
   vec4 acc = vec4(0.0);
-  for (int i = 0; i < 14; i++) acc += texture(s, mirrorUV(mix(base, vec2(0.5), float(i) / 13.0 * b)));
+  for (int i = 0; i < 14; i++) acc += texture(s, mirrorUV(mix(base, c, float(i) / 13.0 * b)));
   return acc / 14.0;
 }
 vec4 transition(vec2 uv) {
@@ -410,7 +413,121 @@ vec4 transition(vec2 uv) {
 }
 `;
 
-const mk = (id: string, kind: ModuleKind, name: string, code: string): Module => ({ id, kind, name, code, builtin: true });
+const chromaKey = `// 去背（色鍵）：把指定顏色變透明。建議拖到片段上當片段特效
+// @param key: color = #00ff00 "去背顏色"
+// @param similarity: float = 0.4 (0..1) "相似度"
+// @param smoothness: float = 0.08 (0..0.5) "邊緣柔化"
+// @param spill: float = 0.5 (0..1) "溢色抑制"
+vec2 chroma(vec3 c) { return vec2(-0.169 * c.r - 0.331 * c.g + 0.5 * c.b, 0.5 * c.r - 0.419 * c.g - 0.081 * c.b); }
+vec4 effect(vec2 uv) {
+  vec4 s = tex(uv);
+  if (s.a <= 0.0) return s;
+  vec3 c = s.rgb / s.a; // 輸入是 premultiplied
+  float d = distance(chroma(c), chroma(key)) * 2.0;
+  float a = smoothstep(similarity * 0.5, similarity * 0.5 + smoothness, d);
+  // 溢色：邊緣殘留的去背顏色往灰階拉
+  float sp = pow(clamp(1.0 - d / max(similarity + smoothness, 1e-3), 0.0, 1.0), 1.5) * spill;
+  float luma = dot(c, vec3(0.299, 0.587, 0.114));
+  c = mix(c, vec3(luma), sp);
+  float outA = s.a * a;
+  return vec4(c * outA, outA);
+}
+`;
+
+const scaleIn = `// 縮放推入：新畫面從小放大蓋上來
+// @param from: float = 0.3 (0..1) "起始大小"
+// @param cx: float = 0.5 (0..1) "中心 X"
+// @param cy: float = 0.5 (0..1) "中心 Y"
+vec4 transition(vec2 uv) {
+  float p = easeOutBack(clamp(progress, 0.0, 1.0));
+  float z = mix(from, 1.0, p);
+  vec2 q = zoomUV(uv, z, vec2(cx, cy));
+  vec4 b = getFrom(zoomUV(uv, 1.0 + progress * 0.15, vec2(cx, cy))) * (1.0 - progress * 0.4);
+  if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0) return b;
+  vec4 t = getTo(q) * smoothstep(0.0, 0.25, progress);
+  return t + b * (1.0 - t.a);
+}
+`;
+
+const scaleOut = `// 縮放推出：舊畫面縮小飛走，露出新畫面
+// @param to: float = 0.2 (0..1) "結束大小"
+// @param spin: float = 0 (-2..2) "旋轉圈數"
+// @param cx: float = 0.5 (0..1) "中心 X"
+// @param cy: float = 0.5 (0..1) "中心 Y"
+vec4 transition(vec2 uv) {
+  float p = easeInOutCubic(clamp(progress, 0.0, 1.0));
+  vec2 c = vec2(cx, cy);
+  vec2 q = rotateUV(zoomUV(uv, mix(1.0, to, p), c), -spin * 2.0 * PI * p, c);
+  vec4 b = getTo(zoomUV(uv, mix(0.85, 1.0, p), c));
+  if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0) return b;
+  vec4 f = getFrom(q) * (1.0 - smoothstep(0.75, 1.0, progress));
+  return f + b * (1.0 - f.a);
+}
+`;
+
+const pushTr = `// 推移：新畫面把舊畫面推出去（帶一點動態模糊）
+// @param dir: int = 0 (0..3) "方向（0 左 1 右 2 上 3 下）"
+// @param blur: float = 0.4 (0..1) "模糊"
+vec4 transition(vec2 uv) {
+  float p = easeInOutCubic(clamp(progress, 0.0, 1.0));
+  vec2 d = dir == 0 ? vec2(-1.0, 0.0) : dir == 1 ? vec2(1.0, 0.0) : dir == 2 ? vec2(0.0, 1.0) : vec2(0.0, -1.0);
+  float sp = sin(progress * PI) * blur * 0.08;
+  vec4 acc = vec4(0.0);
+  for (int i = 0; i < 8; i++) {
+    vec2 o = uv - d * p + d * sp * (float(i) / 7.0 - 0.5);
+    vec2 f = o;
+    vec2 t = o + d;
+    bool inF = f.x >= 0.0 && f.x <= 1.0 && f.y >= 0.0 && f.y <= 1.0;
+    acc += inF ? getFrom(f) : getTo(clamp(t, 0.0, 1.0));
+  }
+  return acc / 8.0;
+}
+`;
+
+const flipTr = `// 翻轉：像卡片一樣水平翻面
+// @param depth: float = 0.4 (0..1) "透視"
+vec4 transition(vec2 uv) {
+  float p = easeInOutCubic(clamp(progress, 0.0, 1.0));
+  float a = p * PI;
+  float w = abs(cos(a));
+  if (w < 1e-3) return vec4(0.0);
+  float x = (uv.x - 0.5) / w;
+  float side = p < 0.5 ? 1.0 : -1.0;
+  // 簡單透視：靠近的一側比較高
+  float persp = 1.0 + depth * sin(a) * x * side;
+  float y = (uv.y - 0.5) / persp + 0.5;
+  vec2 q = vec2(x + 0.5, y);
+  if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0) return vec4(0.0);
+  vec4 c = p < 0.5 ? getFrom(q) : getTo(vec2(q.x, q.y));
+  return c * (0.6 + 0.4 * w);
+}
+`;
+
+const rewindTr = `// 倒帶：VHS 倒帶感的抖動條紋與色偏
+// @param amount: float = 0.6 (0..1) "強度"
+vec4 transition(vec2 uv) {
+  float k = sin(progress * PI) * amount;
+  float band = floor(uv.y * 40.0);
+  float jitter = (rand(vec2(band, floor(progress * 30.0))) - 0.5) * 0.12 * k;
+  float roll = fract(uv.y + progress * 3.0 * k);
+  vec2 q = vec2(uv.x + jitter, mix(uv.y, roll, k * 0.35));
+  vec4 a = progress < 0.5 ? getFrom(q) : getTo(q);
+  vec4 r = progress < 0.5 ? getFrom(q + vec2(0.012 * k, 0.0)) : getTo(q + vec2(0.012 * k, 0.0));
+  vec4 b = progress < 0.5 ? getFrom(q - vec2(0.012 * k, 0.0)) : getTo(q - vec2(0.012 * k, 0.0));
+  vec4 c = vec4(r.r, a.g, b.b, a.a);
+  float line = step(0.97, fract(uv.y * 120.0 + progress * 50.0)) * k * 0.3;
+  return c + vec4(vec3(line), 0.0) * c.a;
+}
+`;
+
+/** 片段遮罩：特效本身輸出透明，渲染時遮罩會自動反轉 → 只保留遮罩範圍內的畫面 */
+export const CLIP_MASK_ID = 'fx-clipmask';
+const clipMask = `// 片段遮罩：只保留遮罩範圍內的畫面（遮罩外變透明）
+// 在屬性面板的「遮罩」設定形狀、位置、羽化；反轉 = 挖掉遮罩範圍
+vec4 effect(vec2 uv) { return vec4(0.0); }
+`;
+
+const mk = (id: string, kind: ModuleKind, name: string, code: string, rev?: number): Module => ({ id, kind, name, code, builtin: true, ...(rev ? { rev } : {}) });
 
 export const EXTRA_MODULES: Module[] = [
   mk('fx-shakeblur', 'effect', '模糊晃動 Shake Blur', shakeBlur),
@@ -433,9 +550,16 @@ export const EXTRA_MODULES: Module[] = [
   mk('fx-lightleak', 'effect', '漏光 Light Leak', lightLeak),
   mk('fx-grain', 'effect', '底片顆粒 Grain', grainFx),
   mk('fx-outline', 'effect', '描邊 Outline', outline),
+  mk('fx-chromakey', 'effect', '去背 Chroma Key', chromaKey),
+  mk(CLIP_MASK_ID, 'effect', '片段遮罩 Clip Mask', clipMask),
   mk('tr-pixelate', 'transition', '像素化 Pixelate', pixelTr),
   mk('tr-glitch', 'transition', '故障 Glitch', glitchTr),
   mk('tr-stretch', 'transition', '拉伸 Stretch', stretch),
   mk('tr-clock', 'transition', '時鐘擦除 Radial', clockWipe),
-  mk('tr-zoomblur', 'transition', '縮放模糊 Zoom Blur', zoomBlurTr),
+  mk('tr-zoomblur', 'transition', '縮放模糊 Zoom Blur', zoomBlurTr, 2),
+  mk('tr-scalein', 'transition', '縮放推入 Scale In', scaleIn),
+  mk('tr-scaleout', 'transition', '縮放推出 Scale Out', scaleOut),
+  mk('tr-push', 'transition', '推移 Push', pushTr),
+  mk('tr-flip', 'transition', '翻轉 Flip', flipTr),
+  mk('tr-rewind', 'transition', '倒帶 Rewind', rewindTr),
 ];

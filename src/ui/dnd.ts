@@ -20,7 +20,7 @@ function laneDuration(payload: DragPayload): { dur: number; label: string; accep
     if (!mediaUsable(m)) return null;
     if (m.kind === 'audio') return { dur: m.duration, label: m.name, accepts: (k) => k === 'audio' };
     return {
-      dur: m.kind === 'video' ? Math.min(m.duration, 6) : 2,
+      dur: m.kind === 'video' ? m.duration : 2,
       label: m.name,
       accepts: (k) => k === 'video' || (k === 'audio' && m.hasAudio),
     };
@@ -50,6 +50,22 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
   const s = useStore.getState();
   const clipEl = els.find((e) => e.dataset.key?.startsWith('clip:'));
   const clip = clipEl ? s.clips.find((c) => c.id === clipEl.dataset.key!.slice(5)) : undefined;
+
+  // 拖到「屬性」面板：套用到目前選取的項目（特效 → 片段特效 / 取代特效軌上的特效；轉場 → 進場；變速 → 時間重映射）
+  const insp = els.find((e) => e.classList?.contains('panel-inspector'));
+  document.querySelector('.panel-inspector')?.classList.toggle('drop-here', false);
+  if (insp && payload.kind === 'module') {
+    const sel = s.selection;
+    let t: DropTarget = null;
+    if (sel?.type === 'clip' && s.clips.some((c) => c.id === sel.id)) {
+      const c = s.clips.find((x) => x.id === sel.id)!;
+      const m = s.media.find((x) => x.id === c.mediaId);
+      const action = payload.moduleKind === 'effect' ? 'effect' : payload.moduleKind === 'transition' ? 'transition' : 'remap';
+      t = { kind: 'clip', clipId: c.id, action, valid: action !== 'remap' || m?.kind === 'video' };
+    } else if (sel?.type === 'effect' && payload.moduleKind === 'effect') t = { kind: 'effect', fxId: sel.id };
+    insp.classList.toggle('drop-here', !!t);
+    return t;
+  }
 
   // 特效拖到時間軸上的特效片段 → 取代
   if (payload.kind === 'module' && payload.moduleKind === 'effect') {
@@ -223,6 +239,7 @@ export function startLibraryDrag(e: React.PointerEvent, payload: DragPayload, la
     useDrag.setState({ drag: null });
     useSnapLine.setState({ t: null });
     document.body.classList.remove('drag-ok', 'drag-no');
+    document.querySelector('.panel-inspector')?.classList.remove('drop-here');
     if (started && d) {
       suppressClick();
       applyDrop(payload, d.target);

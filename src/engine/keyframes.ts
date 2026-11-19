@@ -1,7 +1,7 @@
 import { $t } from '../i18n';
 /** 關鍵影格：每個屬性一串 key，區段之間用 cubic-bezier 緩動（跟 CSS / AE 一樣的概念） */
 
-export type AnimProp = 'x' | 'y' | 'scale' | 'rotation' | 'opacity';
+export type AnimProp = 'x' | 'y' | 'scaleX' | 'scaleY' | 'rotation' | 'opacity';
 export type Bez = [number, number, number, number];
 export type Ease = Bez | 'hold';
 export interface Keyframe {
@@ -15,7 +15,9 @@ export interface Keyframe {
 export type Keys = Partial<Record<AnimProp, Keyframe[]>>;
 
 export const ANIM_PROPS: { prop: AnimProp; label: string; step: number; suffix?: string; min?: number; max?: number }[] = [
-  { prop: 'scale', label: $t('縮放'), step: 0.01, min: 0 },
+  // 縮放可以是負數（= 翻轉）
+  { prop: 'scaleX', label: $t('縮放 X'), step: 0.01 },
+  { prop: 'scaleY', label: $t('縮放 Y'), step: 0.01 },
   { prop: 'x', label: $t('位置 X'), step: 0.005 },
   { prop: 'y', label: $t('位置 Y'), step: 0.005 },
   { prop: 'rotation', label: $t('旋轉'), step: 0.5, suffix: '°' },

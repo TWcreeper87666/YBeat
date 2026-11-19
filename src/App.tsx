@@ -17,12 +17,13 @@ import { loadDemo } from './engine/demo';
 import { undo, redo, useHistory } from './engine/history';
 import { newProject, saveNow, useSaveState } from './engine/project';
 import { importFiles, pickFiles } from './engine/media';
+import { EditorWindow, openEditorWindow, useEditorWindow } from './ui/EditorWindow';
 
 const FPS = 60;
 
 // ───────────── 對話框 ─────────────
 
-type Dialog = 'export' | 'shortcuts' | 'about' | 'new' | 'demo' | 'saveLayout' | 'settings' | null;
+type Dialog = 'export' | 'shortcuts' | 'tutorial' | 'about' | 'new' | 'demo' | 'saveLayout' | 'settings' | null;
 let setDialogGlobal: (d: Dialog) => void = () => {};
 const openDialog = (d: Dialog) => setDialogGlobal(d);
 
@@ -72,6 +73,8 @@ const SHORTCUTS: [string, string][] = [
   ['Ctrl+D', $t('再製')],
   ['Delete', $t('刪除')],
   ['Shift+Delete', $t('波紋刪除')],
+  ['Enter', $t('在編輯視窗中編輯選取的片段 / 特效')],
+  ['Alt+Delete', $t('波紋刪除，所有軌道一起往前推')],
   ['Alt+← / →', $t('選取的項目移動一格（Shift = 10 格）')],
   ['Ctrl+A', $t('全選')],
   ['Esc', $t('取消選取 / 停止循環')],
@@ -88,6 +91,102 @@ const SHORTCUTS: [string, string][] = [
   ['F1', $t('快捷鍵一覽')],
   [$t('數值欄'), $t('左右拖曳改值（Shift 微調、Ctrl 對齊）；單擊輸入，可輸入算式')],
 ];
+
+/** 說明 → 使用教學：介面上不放教學文字，統一寫在這裡 */
+const TUTORIAL: { title: string; items: string[] }[] = [
+  {
+    title: $t('基本流程'),
+    items: [
+      $t('從「素材」匯入影片、圖片、音樂（也可以直接把檔案拖進視窗），再拖到時間軸。'),
+      $t('在時間軸選取片段，到「屬性」調整位置、大小、速度、聲音與特效。'),
+      $t('按右上角「匯出影片」輸出 MP4。'),
+    ],
+  },
+  {
+    title: $t('素材、色板與文字'),
+    items: [
+      $t('單擊素材在「素材預覽」打開，可以設定入點 / 出點後按「插入片段」。'),
+      $t('色板是純色背景素材：拖到影片軌，或選好顏色後按「加到結尾」。'),
+      $t('文字樣式拖到影片軌，或按文字分頁右上角的 ＋ 加在播放頭；選取後在「屬性」修改內容與樣式。'),
+    ],
+  },
+  {
+    title: $t('特效、轉場、變速'),
+    items: [
+      $t('在素材庫單擊模組可以試看（顯示在「素材預覽」），拖曳到時間軸套用，右鍵有更多套用方式。'),
+      $t('特效拖到特效軌 = 調整圖層（作用在它下面的影片軌）；拖到影片 / 文字片段上 = 只作用在那個片段的片段特效。'),
+      $t('也可以直接拖到「屬性」面板，套用到目前選取的片段；或用屬性面板最下面的「＋ 加入片段特效」選單。'),
+      $t('轉場拖到兩個片段的剪接點、片段開頭或片段結尾；變速模組拖到影片片段上。'),
+    ],
+  },
+  {
+    title: $t('編輯視窗'),
+    items: [
+      $t('在時間軸上雙擊片段或特效（或選取後按 Enter、右鍵選單）打開編輯視窗，專心編輯這一個片段：直接在預覽上拖變換框與遮罩、同時看關鍵影格。'),
+      $t('視窗裡的預覽只播這個片段（進度條與時間從片段開頭算，播到結尾會回到開頭循環）。'),
+      $t('橫式輸出（例如 16:9）時預覽在上、屬性在下，關鍵影格時間軸會很寬；直式輸出（例如 9:16）時屬性在左、預覽在右。右上角可以固定其中一種，中間的分隔線可以拖曳調整大小（雙擊恢復）。'),
+      $t('在視窗的預覽上滾動滑鼠滾輪會縮放整個輸出畫面（以滑鼠位置為中心）；拖曳畫面外的空白處或按住中鍵拖曳可以平移，點右下角的百分比或雙擊空白處回到符合視窗。'),
+      $t('按「完成」或 Esc 關閉，屬性和預覽會回到原本的位置。'),
+    ],
+  },
+  {
+    title: $t('變換（位置、縮放、旋轉）'),
+    items: [
+      $t('在預覽上拖曳片段移動；拖四個角等比縮放，拖上下左右四個邊只拉一個方向，拖上方圓點旋轉。'),
+      $t('按住 Shift：移動時吸附到中線與邊緣；縮放時框的邊吸附到畫面四邊、中線（開了輔助網格也會吸網格線）；旋轉時每 15° 一格。'),
+      $t('縮放分成 X / Y，負數就是翻轉（把邊的把手拉過中心也會翻轉）。屬性「運動」右邊的鎖鏈是等比例：鎖上時改其中一個，另一個依比例跟著變，各自保留正負號。'),
+    ],
+  },
+  {
+    title: $t('遮罩'),
+    items: [
+      $t('每個特效都有遮罩，限制它只作用在某個區域；片段本身也可以加「矩形遮罩 / 橢圓遮罩」，只保留遮罩內的畫面。'),
+      $t('特效軌的遮罩直接在預覽上拖；片段特效的遮罩按「在預覽中編輯」會打開編輯視窗。'),
+      $t('在預覽畫面上拖曳遮罩框：框內移動、把手縮放（Shift 等比）、上方圓點旋轉、右側菱形羽化。'),
+    ],
+  },
+  {
+    title: $t('聲音'),
+    items: [
+      $t('有聲音的影片會自動帶一段連結的音訊（畫在影片片段下半部）；右鍵「取消影音連結」可以分開成獨立的音訊片段。'),
+      $t('變速時預設保持音調（人聲不會變尖）；在「屬性 → 聲音」關掉「保持音調」就會像錄音帶一樣音調跟著變。'),
+    ],
+  },
+  {
+    title: $t('時間軸與軌道'),
+    items: [
+      $t('同一條軌道上的項目不會重疊；拖曳、拉長時會吸附到其他片段的頭尾（N 開關磁吸）。'),
+      $t('軌道標籤可以拖到任何位置調整順序，下緣拖曳調整高度，右鍵有更多選項。'),
+      $t('沒有選取任何東西時按 Delete，會移除選中軌道上播放頭所在的空白；Alt+Delete 刪除時所有軌道一起往前推。'),
+    ],
+  },
+  {
+    title: $t('關鍵影格與音訊反應'),
+    items: [
+      $t('屬性左側的碼錶開啟動畫，◇ 在播放頭加關鍵影格；右側可以框選、拖曳關鍵影格，展開曲線可以調緩動。'),
+      $t('任一數值參數可以設定「跟著音量 / 跟著節拍」，音量與節拍來自整個專案正在播放的聲音。'),
+      $t('自己寫 GLSL 時也可以直接用 u_level（音量 0~1）與 u_beat（節拍脈衝）。'),
+    ],
+  },
+];
+
+function TutorialDialog({ close }: { close: () => void }) {
+  return (
+    <div className="dialog wide tutorial">
+      <h3>{$t('使用教學')}</h3>
+      <div className="tutorial-body">
+        {TUTORIAL.map((sec) => (
+          <section key={sec.title}>
+            <h4>{sec.title}</h4>
+            <ul>{sec.items.map((it) => <li key={it}>{it}</li>)}</ul>
+          </section>
+        ))}
+        <p className="muted small">{$t('所有快捷鍵請看「說明 → 快捷鍵一覽」（F1）。')}</p>
+      </div>
+      <div className="dialog-actions"><button className="btn primary" onClick={close}>{$t('關閉')}</button></div>
+    </div>
+  );
+}
 
 function ShortcutsDialog({ close }: { close: () => void }) {
   return (
@@ -207,6 +306,7 @@ function Dialogs() {
     <div className="overlay" onPointerDown={(e) => e.target === e.currentTarget && close()}>
       {d === 'export' && <ExportDialog close={close} />}
       {d === 'shortcuts' && <ShortcutsDialog close={close} />}
+      {d === 'tutorial' && <TutorialDialog close={close} />}
       {d === 'new' && <NewDialog close={close} />}
       {d === 'saveLayout' && <SaveLayoutDialog close={close} />}
       {d === 'demo' && (
@@ -294,6 +394,7 @@ function menus(): { label: string; items: () => MenuItem[] }[] {
           { label: $t('再製'), shortcut: 'Ctrl+D', action: has ? s.duplicate : undefined },
           { label: $t('刪除'), shortcut: 'Del', action: s.selection ? () => s.removeSelection() : undefined },
           { label: $t('波紋刪除'), shortcut: 'Shift+Del', action: has ? () => s.removeSelection(true) : undefined },
+          { label: $t('波紋刪除（所有軌道）'), shortcut: 'Alt+Del', action: has ? () => s.removeSelection('all') : undefined },
           { separator: true },
           { label: $t('在播放頭分割'), shortcut: 'S', action: s.split },
           { label: $t('修剪開頭到播放頭'), shortcut: 'Q', action: () => s.trim('start') },
@@ -327,6 +428,7 @@ function menus(): { label: string; items: () => MenuItem[] }[] {
     {
       label: $t('說明'),
       items: () => [
+        { label: $t('使用教學'), action: () => openDialog('tutorial') },
         { label: $t('快捷鍵一覽'), shortcut: 'F1', action: () => openDialog('shortcuts') },
         { label: $t('關於'), action: () => openDialog('about') },
       ],
@@ -366,11 +468,25 @@ function selRange(): { a: number; b: number } | null {
   return { a: Math.min(...items.map((x) => x.start)), b: Math.max(...items.map((x) => x.start + x.duration)) };
 }
 
+/** 時間軸捲到看得到播放頭（時間沒變也要捲，例如已經在 0 秒時按 Home） */
+const revealPlayhead = () => requestAnimationFrame(() => window.dispatchEvent(new Event('timeline-reveal-playhead')));
+
 function onKey(e: KeyboardEvent) {
   const el = e.target as HTMLElement;
   if (el instanceof Element && el.closest('input, textarea, select, .cm-editor, [contenteditable]')) return;
   const s = useStore.getState();
   const mod = e.ctrlKey || e.metaKey;
+  // 對話框開著（例如使用教學）時，Ctrl+C / A 交給瀏覽器（複製 / 全選文字），不要動到時間軸
+  if (mod && (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'a') && document.querySelector('.dialog')) {
+    if (e.key.toLowerCase() === 'a') {
+      const body = document.querySelector('.dialog .tutorial-body');
+      if (body) {
+        e.preventDefault();
+        getSelection()?.selectAllChildren(body);
+      }
+    }
+    return;
+  }
   const k = e.key.toLowerCase();
   const frame = 1 / FPS;
   // 滑鼠在素材預覽上：Space / I / O 給素材預覽
@@ -410,15 +526,16 @@ function onKey(e: KeyboardEvent) {
   }
   switch (e.key) {
     case ' ': e.preventDefault(); s.togglePlay(); break;
-    case 'Delete': case 'Backspace': e.preventDefault(); s.removeSelection(e.shiftKey); break;
-    case 'Home': { const r = selRange(); s.setTime(r ? r.a : 0); break; }
-    case 'End': { const r = selRange(); s.setTime(r ? r.b - 1 / FPS : projectDuration(s)); break; }
+    case 'Delete': case 'Backspace': e.preventDefault(); s.removeSelection(e.altKey ? 'all' : e.shiftKey); break;
+    case 'Home': { e.preventDefault(); const r = selRange(); s.setTime(r ? r.a : 0); revealPlayhead(); break; }
+    case 'End': { e.preventDefault(); const r = selRange(); s.setTime(r ? r.b - 1 / FPS : projectDuration(s)); revealPlayhead(); break; }
     case 'ArrowLeft': e.preventDefault(); s.setTime(s.time - (e.shiftKey ? 1 : frame)); break;
     case 'ArrowRight': e.preventDefault(); s.setTime(s.time + (e.shiftKey ? 1 : frame)); break;
     case 'ArrowUp': { e.preventDefault(); const p = editPoints().filter((t) => t < s.time - 1e-3); if (p.length) s.setTime(p[p.length - 1]); break; }
     case 'ArrowDown': { e.preventDefault(); const p = editPoints().find((t) => t > s.time + 1e-3); if (p !== undefined) s.setTime(p); break; }
     case 'Escape': stopPreviewFx(); s.setLoop(null); s.select(null); break;
     case 'F1': e.preventDefault(); openDialog('shortcuts'); break;
+    case 'Enter': if (s.selection?.type === 'clip' || s.selection?.type === 'effect') { e.preventDefault(); openEditorWindow(); } break;
     case '=': case '+': s.setPps(s.pps * 1.25); break;
     case '-': s.setPps(s.pps / 1.25); break;
     case '\\': window.dispatchEvent(new Event('timeline-fit')); break;
@@ -435,6 +552,7 @@ function onKey(e: KeyboardEvent) {
 export default function App() {
   const L = useLayout();
   // 每個面板一個固定的 DOM 節點；移動分頁時只搬節點，元件不會重建（預覽的 WebGL 不會重置）
+  const editorOpen = useEditorWindow((s) => s.open);
   const hosts = useMemo(() => {
     const h = {} as Record<PanelId, HTMLElement>;
     for (const p of PANELS) {
@@ -485,11 +603,12 @@ export default function App() {
 
       <DockRoot hosts={hosts} />
 
-      {L.floating && (
+      {L.floating && !editorOpen && (
         <FloatingWindow title={$t('預覽')}>
           <Slot host={hosts.preview} />
         </FloatingWindow>
       )}
+      <EditorWindow hosts={hosts} />
       {createPortal(<MediaPanel />, hosts.media)}
       {createPortal(<TextPanel />, hosts.text)}
       {createPortal(<SourcePanel />, hosts.source)}

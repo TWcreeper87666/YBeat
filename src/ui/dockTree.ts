@@ -93,24 +93,24 @@ export function removePanel(node: DockNode | null, panel: PanelId): DockNode | n
   return normalize({ ...node, children: kids, sizes: norm(sizes) });
 }
 
-function insertIntoGroup(node: DockNode, groupId: string, panel: PanelId, zone: 'center' | Side, index?: number): DockNode {
+function insertIntoGroup(node: DockNode, groupId: string, panels: PanelId[], active: PanelId, zone: 'center' | Side, index?: number): DockNode {
   if (node.type === 'tabs') {
     if (node.id !== groupId) return node;
     if (zone === 'center') {
-      const tabs = node.tabs.filter((t) => t !== panel);
+      const tabs = node.tabs.filter((t) => !panels.includes(t));
       const i = index === undefined ? tabs.length : Math.max(0, Math.min(tabs.length, index));
-      tabs.splice(i, 0, panel);
-      return { ...node, tabs, active: panel };
+      tabs.splice(i, 0, ...panels);
+      return { ...node, tabs, active };
     }
-    const fresh = T([panel]);
-    return { type: 'split', id: nid(), dir: dirOf(zone), children: isFirst(zone) ? [fresh, node] : [node, fresh], sizes: isFirst(zone) ? [0.5, 0.5] : [0.5, 0.5] };
+    const fresh = T([...panels], active);
+    return { type: 'split', id: nid(), dir: dirOf(zone), children: isFirst(zone) ? [fresh, node] : [node, fresh], sizes: [0.5, 0.5] };
   }
-  return { ...node, children: node.children.map((c) => insertIntoGroup(c, groupId, panel, zone, index)) };
+  return { ...node, children: node.children.map((c) => insertIntoGroup(c, groupId, panels, active, zone, index)) };
 }
 
 /** 放到整個版面的邊緣（佔滿整高 / 整寬） */
-function insertAtRoot(node: DockNode, panel: PanelId, side: Side): DockNode {
-  const fresh = T([panel]);
+function insertAtRoot(node: DockNode, panels: PanelId[], active: PanelId, side: Side): DockNode {
+  const fresh = T([...panels], active);
   const dir = dirOf(side);
   const NEW = 0.28;
   if (node.type === 'split' && node.dir === dir) {
@@ -140,10 +140,25 @@ export function movePanel(layout: DockNode | null, panel: PanelId, from: string,
   const removed = removePanel(layout, panel);
   if (!removed) return T([panel]);
   let out: DockNode;
-  if (target.kind === 'root') out = insertAtRoot(removed, panel, target.side);
-  else if (!findGroup(removed, (g) => g.id === target.group)) out = insertAtRoot(removed, panel, 'right');
-  else if (target.kind === 'tabs') out = insertIntoGroup(removed, target.group, panel, 'center', target.index);
-  else out = insertIntoGroup(removed, target.group, panel, target.zone);
+  if (target.kind === 'root') out = insertAtRoot(removed, [panel], panel, target.side);
+  else if (!findGroup(removed, (g) => g.id === target.group)) out = insertAtRoot(removed, [panel], panel, 'right');
+  else if (target.kind === 'tabs') out = insertIntoGroup(removed, target.group, [panel], panel, 'center', target.index);
+  else out = insertIntoGroup(removed, target.group, [panel], panel, target.zone);
+  return normalize(out);
+}
+
+/** 整個群組（所有分頁）一起移到目標；拖到自己身上不動 */
+export function moveGroup(layout: DockNode | null, from: string, target: DropTarget): DockNode | null {
+  const src = findGroup(layout, (g) => g.id === from);
+  if (!src || (target.kind !== 'root' && target.group === from)) return layout;
+  let removed: DockNode | null = layout;
+  for (const p of src.tabs) removed = removePanel(removed, p);
+  if (!removed) return layout; // 只有這一個群組，移動沒有意義
+  let out: DockNode;
+  if (target.kind === 'root') out = insertAtRoot(removed, src.tabs, src.active, target.side);
+  else if (!findGroup(removed, (g) => g.id === target.group)) return layout;
+  else if (target.kind === 'tabs') out = insertIntoGroup(removed, target.group, src.tabs, src.active, 'center', target.index);
+  else out = insertIntoGroup(removed, target.group, src.tabs, src.active, target.zone);
   return normalize(out);
 }
 
@@ -153,5 +168,5 @@ export function showPanel(layout: DockNode | null, panel: PanelId): DockNode {
   if (g) return mapTabs(layout, (t) => (t.id === g.id ? { ...t, active: panel } : t))!;
   if (!layout) return T([panel]);
   const target = findGroup(layout, (t) => t.tabs.includes('inspector')) ?? findGroup(layout, () => true)!;
-  return insertIntoGroup(layout, target.id, panel, 'center');
+  return insertIntoGroup(layout, target.id, [panel], panel, 'center');
 }

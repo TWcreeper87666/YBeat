@@ -1,11 +1,12 @@
+import { openEditorWindow } from './EditorWindow';
 import { $t, displayName } from '../i18n';
 import { ArrowLeftRight, ArrowRightLeft, CircleDashed, Eye, EyeOff, FastForward, Film, Gauge, Magnet, Minus, MoveHorizontal, Music, Plus, Redo2, Replace, Scissors, Sparkles, TriangleAlert, Undo2, Volume2, VolumeX, Group, Link2, ArrowRightFromLine, ArrowRightToLine } from 'lucide-react';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { create } from 'zustand';
 import {
   trSelId, type TrScope, type TrSide,
   attachedAudioIds, linkedAudioOf,
-  KIND_OF, LIST, TRACK_H, fxLevel, itemSpeed, keyOf, laneOf, mediaUsable, parseKey, projectDuration, spansOf, stretchPatch, useStore, visualRows, displayRows,
+  KIND_OF, LIST, TRACK_H, fxLevel, itemSpeed, keyOf, laneOf, mediaUsable, parseKey, projectDuration, spansOf, stretchPatch, useStore, displayRows,
   type AnyItem, type AudioClip, type Clip, type FxItem, type ItemType, type Media, type TrackKind, type Tracks,
 } from '../store';
 import { sortClips, transitionWindow, makeCtx, type TrWindow } from '../engine/renderer';
@@ -19,6 +20,8 @@ import { useDock } from './Dock';
 
 const SNAP_PX = 8;
 const LABEL_W = 116;
+/** 時間軸預設長度（秒）；專案比這個長才依專案長度延伸 */
+const MIN_LEN = 60;
 const NAMES: Record<TrackKind, string> = { fx: $t('特效'), video: $t('影片'), audio: $t('音訊') };
 const ICONS: Record<TrackKind, React.ReactNode> = { fx: <Sparkles size={13} />, video: <Film size={13} />, audio: <Music size={13} /> };
 
@@ -167,6 +170,13 @@ function clipMaxDur(c: Clip): number {
 }
 
 /** 點擊 / 拖曳時間軸項目：處理 Ctrl / Shift 選取，以及整組移動（可跨軌） */
+/** 雙擊片段 / 特效：選取並打開編輯視窗 */
+function openItemEditor(type: 'clip' | 'effect', id: string) {
+  const s = useStore.getState();
+  if (s.selection?.type !== type || s.selection.id !== id) s.select({ type, id });
+  openEditorWindow();
+}
+
 function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
   if (e.button !== 0) return;
   e.stopPropagation();
@@ -191,7 +201,10 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
   const pts = snapPoints(new Set(st.selected)).slice(0);
   pts.splice(1, 1);
   const others = spansOf(st, new Set(st.selected));
-  useStore.getState().setTime(it.start);
+  // 點未選中的片段：播放頭已經在片段裡就不動；點已選中的片段 → 回到片段開頭
+  // 點片段不會移動播放頭；拖曳時，播放頭原本在片段裡才跟著片段一起移動（看到的還是同一格）
+  const inside = st.time >= it.start - 1e-6 && st.time < it.start + it.duration;
+  const head = st.time;
   const minStart = Math.min(...group.map((g) => g.it.start));
   const kind = KIND_OF[type];
   const x0 = e.clientX, y0 = e.clientY;
@@ -234,7 +247,7 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
         patches[keyOf(g.type, g.it.id)] = p;
       }
       useStore.getState().patchItems(patches);
-      useStore.getState().setTime(it.start + fdt);
+      if (inside) useStore.getState().setTime(head + fdt);
     },
     () => {
       showSnap(null);
@@ -337,6 +350,8 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
   if (!S.selected.includes(keyOf(type, it.id))) S.select({ type, id: it.id });
   const n = useStore.getState().selected.length;
   const items: MenuItem[] = [
+    // 編輯視窗：屬性 + 預覽的對話框（影片 / 文字片段、特效軌的特效）
+    ...(type !== 'audio' ? [{ label: $t('在編輯視窗中編輯…'), shortcut: $t('雙擊'), action: () => openItemEditor(type, it.id) }, { separator: true } as MenuItem] : []),
     { label: $t('在播放頭分割'), shortcut: 'S', action: S.split },
     { label: $t('修剪開頭到播放頭'), shortcut: 'Q', action: () => S.trim('start') },
     { label: $t('修剪結尾到播放頭'), shortcut: 'W', action: () => S.trim('end') },
@@ -374,6 +389,7 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
     { separator: true },
     { label: $t('刪除'), shortcut: 'Del', action: () => S.removeSelection() },
     { label: $t('波紋刪除'), shortcut: 'Shift+Del', action: () => S.removeSelection(true), danger: true },
+    { label: $t('波紋刪除（所有軌道）'), shortcut: 'Alt+Del', action: () => S.removeSelection('all'), danger: true },
   );
   openMenu(e.clientX, e.clientY, items);
 }
@@ -528,6 +544,7 @@ const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel,
       }}
       title={ok ? undefined : $t('素材遺失：把素材拖到這裡、或右鍵「重新連結素材…」')}
       onPointerDown={(e) => itemPointerDown(e, 'clip', c)}
+      onDoubleClick={() => openItemEditor('clip', c.id)}
       onContextMenu={(e) => itemMenu(e, 'clip', c, m)}
     >
       <div className="handle l" onPointerDown={(e) => resizeItem(e, 'clip', c, 'l', m?.kind === 'video')} />
@@ -541,7 +558,7 @@ const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel,
       {drop === 'effect' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段特效')}</span>}
       {Math.abs(sp - 1) > 1e-3 && <span className="badge">{+sp.toFixed(2)}×</span>}
       <OpBadge k={key} />
-      {ok && !isText && m!.hasAudio && m!.kind === 'video' && (la ? la.volume === 0 : c.volume === 0) && <span className="badge"><VolumeX size={10} /></span>}
+      {ok && !isText && m!.hasAudio && m!.kind === 'video' && (la ? la.volume === 0 : c.volume === 0 && !c.audioSplit) && <span className="badge"><VolumeX size={10} /></span>}
       {la && (
         <div className="av-strip" title={$t('連結的音訊（右鍵「取消影音連結」可以分開成獨立的音訊片段）')}>
           {ok && <Waveform media={m!} inT={la.in} dur={la.duration * (la.rate ?? 1)} width={Math.max(4, c.duration * pps)} />}
@@ -590,6 +607,7 @@ const FxView = React.memo(function FxView({ f, pps, sel, name, drop, masked }: {
       className={`fxitem ${sel ? 'sel' : ''} ${drop ? 'drop-hint replace' : ''} ${opCls}`}
       style={{ left: f.start * pps, width: Math.max(4, f.duration * pps) }}
       onPointerDown={(e) => itemPointerDown(e, 'effect', f)}
+      onDoubleClick={() => openItemEditor('effect', f.id)}
       onContextMenu={(e) => itemMenu(e, 'effect', f)}
     >
       <div className="handle l" onPointerDown={(e) => resizeItem(e, 'effect', f, 'l', false)} />
@@ -637,15 +655,17 @@ const AudioView = React.memo(function AudioView({ a, m, pps, sel }: { a: AudioCl
 
 const rowH = (tracks: Tracks, kind: TrackKind, idx: number) => tracks[kind][idx]?.height ?? TRACK_H[kind];
 
-/** 特效軌往上 / 下移動一層（跨過一條影片軌，或跟同層的特效軌交換） */
-function moveFxRow(idx: number, dir: -1 | 1) {
+/** 軌道在畫面上往上 / 下移一格（任何種類的軌道都可以互相交錯）；to = 'top' / 'bottom' 直接移到最上 / 最下 */
+function moveRow(kind: TrackKind, idx: number, to: -1 | 1 | 'top' | 'bottom') {
   const S = useStore.getState();
-  const rows = visualRows(S.tracks);
-  const i = rows.findIndex((r) => r.kind === 'fx' && r.idx === idx);
-  const nb = rows[i + (dir < 0 ? -1 : 1)]; // dir -1 = 往上（畫面上方）
-  if (!nb) return;
-  if (nb.kind === 'video') S.setFxLevel(idx, dir < 0 ? nb.idx + 1 : nb.idx);
-  else S.moveTrack('fx', idx, nb.idx);
+  const rows = displayRows(S.tracks, S.upperAt);
+  const i = rows.findIndex((r) => r.kind === kind && r.idx === idx);
+  if (i < 0) return;
+  const rest = rows.filter((_, j) => j !== i);
+  const at = to === 'top' ? 0 : to === 'bottom' ? rest.length : Math.max(0, Math.min(rest.length, i + to));
+  if (at === i) return;
+  rest.splice(at, 0, rows[i]);
+  S.reorderTracks(rest);
 }
 
 function fxLevelLabel(tracks: Tracks, idx: number) {
@@ -657,7 +677,7 @@ function fxLevelLabel(tracks: Tracks, idx: number) {
 
 // ───────────────────────── 時間軸 ─────────────────────────
 
-type TrackDrag = { kind: TrackKind; from: number; over: { kind: TrackKind; idx: number; edge: 'top' | 'bottom' | 'mid' } | null };
+type TrackDrag = { kind: TrackKind; from: number; over: { kind: TrackKind; idx: number; edge: 'top' | 'bottom' } | null };
 
 export function Timeline() {
   const clips = useStore((s) => s.clips);
@@ -683,8 +703,23 @@ export function Timeline() {
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
-  const [viewEnd, setViewEnd] = useState(20);
-  const end = Math.max(projectDuration({ clips, effects, audios }) + 8, viewEnd);
+  const hbarRef = useRef<HTMLDivElement>(null);
+  /** 看得到的時間軸寬度（秒）與垂直捲軸寬度（自訂水平捲軸要扣掉） */
+  const [view, setView] = useState({ w: 800, sbw: 0 });
+  // 時間軸長度：預設 MIN_LEN 秒；專案更長就是專案長度再多 10%（不會無限往右延伸）；至少填滿看得到的寬度
+  const dur = projectDuration({ clips, effects, audios });
+  const end = Math.max(MIN_LEN, dur * 1.1 + 2, view.w / pps);
+  /** 縮放時要固定在畫面上同一個位置的時間點（滑鼠 / 播放頭 / 畫面中間） */
+  const zoomAnchor = useRef<{ t: number; off: number } | null>(null);
+  // 縮放後、畫面繪製前就把捲動位置對好：不會先閃一幀錯的位置
+  useLayoutEffect(() => {
+    const el = scrollRef.current;
+    const a = zoomAnchor.current;
+    zoomAnchor.current = null;
+    if (!el || !a) return;
+    el.scrollLeft = Math.max(0, a.t * pps - a.off);
+    if (hbarRef.current) hbarRef.current.scrollLeft = el.scrollLeft;
+  }, [pps]);
   const selSet = new Set(selected);
 
   const timeAt = (clientX: number) => Math.max(0, (clientX - innerRef.current!.getBoundingClientRect().left - LABEL_W) / pps);
@@ -708,39 +743,68 @@ export function Timeline() {
   useEffect(() => {
     const el = scrollRef.current!;
     const onWheel = (e: WheelEvent) => {
-      if (!e.ctrlKey) return;
+      // 水平捲動（Shift + 滾輪、觸控板左右滑）：時間軸本身的水平捲軸藏起來了，自己處理
+      if (!e.ctrlKey) {
+        const dx = e.shiftKey ? e.deltaY || e.deltaX : Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : 0;
+        if (dx) {
+          e.preventDefault();
+          el.scrollLeft += dx;
+        }
+        return;
+      }
       e.preventDefault();
       const s = useStore.getState();
       const rect = el.getBoundingClientRect();
       const off = e.clientX - rect.left - LABEL_W;
-      const tAt = (el.scrollLeft + off) / s.pps;
       const np = Math.min(800, Math.max(5, s.pps * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+      if (np === s.pps) return;
+      zoomAnchor.current = { t: (el.scrollLeft + off) / s.pps, off }; // 滑鼠底下的時間點不動
       s.setPps(np);
-      requestAnimationFrame(() => (el.scrollLeft = tAt * np - off));
     };
     el.addEventListener('wheel', onWheel, { passive: false });
-    // 看得到的範圍（再多一點）都畫出時間軸，往右捲會一直延伸
+    // 時間軸至少填滿看得到的寬度；自訂水平捲軸跟時間軸同步
     const updView = () => {
-      const pps = useStore.getState().pps;
-      setViewEnd(Math.ceil((el.scrollLeft + el.clientWidth - LABEL_W) / pps + 400 / pps));
+      const w = el.clientWidth - LABEL_W;
+      const sbw = el.offsetWidth - el.clientWidth;
+      setView((v) => (v.w === w && v.sbw === sbw ? v : { w, sbw }));
     };
     updView();
-    el.addEventListener('scroll', updView, { passive: true });
+    const syncBar = () => {
+      const bar = hbarRef.current;
+      if (bar && Math.abs(bar.scrollLeft - el.scrollLeft) > 0.5) bar.scrollLeft = el.scrollLeft;
+    };
+    el.addEventListener('scroll', syncBar, { passive: true });
     const ro = new ResizeObserver(updView);
     ro.observe(el);
-    const unsub = useStore.subscribe((s, p) => s.pps !== p.pps && updView());
+    // 其他方式縮放（滑桿、= / - 鍵、選單）：播放頭在畫面內就固定播放頭，否則固定畫面中間
+    const unsub = useStore.subscribe((s, p) => {
+      if (s.pps === p.pps || zoomAnchor.current) return;
+      const viewW = el.clientWidth - LABEL_W;
+      const px = s.time * p.pps - el.scrollLeft;
+      const off = px >= 0 && px <= viewW ? px : viewW / 2;
+      zoomAnchor.current = { t: (el.scrollLeft + off) / p.pps, off };
+    });
     const fit = () => {
       const dur = Math.max(1, projectDuration(useStore.getState()));
-      useStore.getState().setPps((el.clientWidth - LABEL_W - 40) / dur);
+      const np = Math.min(800, Math.max(5, (el.clientWidth - LABEL_W - 40) / dur));
+      if (np !== useStore.getState().pps) zoomAnchor.current = { t: 0, off: 0 }; // 縮放沒變就不會重畫，不能留下錨點
+      useStore.getState().setPps(np);
       el.scrollLeft = 0;
     };
     window.addEventListener('timeline-fit', fit);
+    const reveal = () => {
+      const x = useStore.getState().time * useStore.getState().pps;
+      const viewW = el.clientWidth - LABEL_W;
+      if (x > el.scrollLeft + viewW - 40 || x < el.scrollLeft) el.scrollLeft = x - viewW / 2;
+    };
+    window.addEventListener('timeline-reveal-playhead', reveal);
     return () => {
-      el.removeEventListener('scroll', updView);
+      el.removeEventListener('scroll', syncBar);
       ro.disconnect();
       unsub();
       el.removeEventListener('wheel', onWheel);
       window.removeEventListener('timeline-fit', fit);
+      window.removeEventListener('timeline-reveal-playhead', reveal);
     };
   }, []);
 
@@ -806,12 +870,9 @@ export function Timeline() {
         for (const el of document.elementsFromPoint(ev.clientX, ev.clientY)) {
           const d = (el as HTMLElement).dataset;
           if (!d?.rowKind) continue;
-          const rk = d.rowKind as TrackKind;
-          const ri = Number(d.rowIdx);
-          if (kind === 'fx' && (rk === 'video' || rk === 'fx')) {
-            const r = (el as HTMLElement).getBoundingClientRect();
-            over = { kind: rk, idx: ri, edge: rk === 'video' ? (ev.clientY < r.top + r.height / 2 ? 'top' : 'bottom') : 'mid' };
-          } else if (rk === kind) over = { kind: rk, idx: ri, edge: 'mid' };
+          // 任何軌道都可以拖到任何位置：滑鼠在目標軌道的上半 = 插在它上面、下半 = 下面
+          const r = (el as HTMLElement).getBoundingClientRect();
+          over = { kind: d.rowKind as TrackKind, idx: Number(d.rowIdx), edge: ev.clientY < r.top + r.height / 2 ? 'top' : 'bottom' };
           break;
         }
         setTrackDrag({ kind, from: idx, over });
@@ -821,15 +882,15 @@ export function Timeline() {
         if (!moved) return useStore.getState().setActiveTrack({ kind, idx });
         if (!over) return;
         const st = useStore.getState();
-        if (kind === 'fx' && over.kind === 'video') {
-          // 放在影片軌「畫面上方」那一半 = 疊在它上面（依設定，上層可能顯示在下方）
-          const above = (over.edge === 'top') === (useLayout.getState().upperLayerAt === 'top');
-          st.setFxLevel(idx, above ? over.idx + 1 : over.idx);
-        } else if (kind === 'fx' && over.kind === 'fx') {
-          if (over.idx === idx) return;
-          st.setFxLevel(idx, fxLevel(st.tracks, over.idx));
-          st.moveTrack('fx', idx, over.idx);
-        } else if (over.idx !== idx) st.moveTrack(kind, idx, over.idx);
+        const rows = displayRows(st.tracks, st.upperAt);
+        const from = rows.findIndex((r) => r.kind === kind && r.idx === idx);
+        const target = rows.findIndex((r) => r.kind === over!.kind && r.idx === over!.idx);
+        if (from < 0 || target < 0 || from === target) return;
+        const rest = rows.filter((_, i) => i !== from);
+        const at = Math.max(0, Math.min(rest.length, rest.indexOf(rows[target]) + (over.edge === 'bottom' ? 1 : 0)));
+        rest.splice(at, 0, rows[from]);
+        if (rest.every((r, i) => r === rows[i])) return;
+        st.reorderTracks(rest);
       },
     );
   };
@@ -890,13 +951,17 @@ export function Timeline() {
         );
       }
     }
-    if (kind === 'fx') {
+    {
+      const rows = displayRows(tracks, useStore.getState().upperAt);
+      const i = rows.findIndex((r) => r.kind === kind && r.idx === idx);
       items.push(
         { separator: true },
-        { label: $t('上移一層'), action: () => moveFxRow(idx, -1) },
-        { label: $t('下移一層'), action: () => moveFxRow(idx, 1) },
-        { label: $t('移到最上層（作用於全部）'), action: () => S.setFxLevel(idx, tracks.video.length) },
+        { label: $t('軌道上移'), action: i > 0 ? () => moveRow(kind, idx, -1) : undefined },
+        { label: $t('軌道下移'), action: i < rows.length - 1 ? () => moveRow(kind, idx, 1) : undefined },
+        { label: $t('移到最上方'), action: i > 0 ? () => moveRow(kind, idx, 'top') : undefined },
+        { label: $t('移到最下方'), action: i < rows.length - 1 ? () => moveRow(kind, idx, 'bottom') : undefined },
       );
+      if (kind === 'fx') items.push({ label: $t('移到最上層（作用於全部）'), action: () => S.setFxLevel(idx, tracks.video.length) });
     }
     items.push(
       { separator: true },
@@ -1002,7 +1067,10 @@ export function Timeline() {
   return (
     <div
       className="timeline"
-      onPointerDownCapture={() => {
+      onPointerDownCapture={(e) => {
+        // 跟時間軸互動 → 其他輸入框（例如素材庫的搜尋）失去焦點，Ctrl+Z 等快捷鍵才會作用在時間軸
+        const ae = document.activeElement as HTMLElement | null;
+        if (ae && ae !== document.body && !(e.currentTarget as HTMLElement).contains(ae)) ae.blur();
         // 跟時間軸互動 → 從「素材預覽」切回「預覽」
         stopPreviewFx();
         useDock.getState().activatePanel('preview', true);
@@ -1034,7 +1102,7 @@ export function Timeline() {
                   className="tl-label"
                   onPointerDown={(e) => startTrackDrag(e, kind, idx)}
                   onContextMenu={(e) => labelMenu(e, kind, idx)}
-                  title={kind === 'fx' ? $t('{0}\n拖曳到影片軌之間改變作用範圍，右鍵更多選項', fxLevelLabel(tracks, idx)) : $t('拖曳調整順序，下緣拖曳調整高度，右鍵更多選項')}
+                  title={kind === 'fx' ? $t('{0}\n拖曳到影片軌之間改變作用範圍，右鍵更多選項', fxLevelLabel(tracks, idx)) : $t('拖曳到任何位置調整順序（影片 / 特效 / 音訊軌可以交錯），下緣拖曳調整高度，右鍵更多選項')}
                 >
                   <span className="tl-name">{ICONS[kind]} {NAMES[kind]} {idx + 1}</span>
                   <span className="track-btns">
@@ -1115,6 +1183,13 @@ export function Timeline() {
         />
       )}
       {addTrack && <AddTrackPanel state={addTrack} close={() => setAddTrack(null)} />}
+      <div className="tl-hbar" ref={hbarRef} style={{ marginLeft: LABEL_W, marginRight: view.sbw }} onScroll={(e) => {
+        const el = scrollRef.current;
+        const x = (e.currentTarget as HTMLDivElement).scrollLeft;
+        if (el && Math.abs(el.scrollLeft - x) > 0.5) el.scrollLeft = x;
+      }}>
+        <div style={{ width: end * pps, height: 1 }} />
+      </div>
     </div>
   );
 }
@@ -1193,16 +1268,30 @@ function RulerHead({ pps }: { pps: number }) {
   return <div className="ruler-playhead" style={{ transform: `translateX(${t * pps}px)` }} />;
 }
 
+/** 滑鼠按著（拖曳片段 / 播放頭）時，播放頭跑出畫面不要自動捲動 */
+let pointerHeld = false;
+window.addEventListener('pointerdown', () => (pointerHeld = true), true);
+window.addEventListener('pointerup', () => (pointerHeld = false), true);
+window.addEventListener('blur', () => (pointerHeld = false));
+
 function Playhead({ pps, scrollRef, onPointerDown }: { pps: number; scrollRef: React.RefObject<HTMLDivElement>; onPointerDown: (e: React.PointerEvent) => void }) {
   const t = useStore((s) => s.time);
   const playing = useStore((s) => s.playing);
   const x = t * pps;
+  const ppsRef = useRef(pps);
   useEffect(() => {
     const el = scrollRef.current;
-    if (!el || !playing) return;
+    // 縮放造成的位移不算（Ctrl+滾輪會自己對準滑鼠位置）
+    const zoomed = ppsRef.current !== pps;
+    ppsRef.current = pps;
+    if (!el || zoomed) return;
     const viewW = el.clientWidth - LABEL_W;
-    if (x > el.scrollLeft + viewW - 40 || x < el.scrollLeft) el.scrollLeft = x - 80;
-  }, [x, playing, scrollRef]);
+    const out = x > el.scrollLeft + viewW - 40 || x < el.scrollLeft;
+    if (!out) return;
+    if (playing) el.scrollLeft = x - 80;
+    // 暫停時（Home / End、方向鍵、跳剪接點…）：播放頭跑出畫面就捲到置中；滑鼠拖曳中不動，避免畫面亂跳
+    else if (!pointerHeld) el.scrollLeft = x - viewW / 2;
+  }, [x, pps, playing, scrollRef]);
   return (
     <div className="playhead" style={{ transform: `translateX(${x}px)` }}>
       <div className="playhead-hit" onPointerDown={onPointerDown} />

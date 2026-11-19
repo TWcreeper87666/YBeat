@@ -1,7 +1,7 @@
 import { $t, displayName } from '../i18n';
-import { AlignCenter, AlignLeft, AlignRight, Bold, Circle, CircleCheck, Italic, LayoutGrid, List, Music, Palette, Play, Plus, Search, Square, Star, TriangleAlert, Upload, X, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, Unlink } from 'lucide-react';
+import { AlignCenter, AlignLeft, AlignRight, Bold, Circle, CircleCheck, Italic, LayoutGrid, List, Music, Palette, Play, Plus, Search, Square, Star, TriangleAlert, Upload, X, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, Unlink, Link2, Unlink2 } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
-import { type ClipFx, hasLinkedAudio, linkedAudioOf, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
+import { type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
 import type { Module } from '../modules/builtin';
 import { CATEGORIES, categoryOf } from '../modules/categories';
 import { colorMedia, colorName, importFiles, pickFiles, relinkWithPicker, removeMedia } from '../engine/media';
@@ -13,11 +13,23 @@ import { parseDuration, parseParams, type ParamDef, type ParamValue, type ParamV
 import { computeFrame, transitionWindow, sortClips, makeCtx } from '../engine/renderer';
 import { DEFAULT_TRANSFORM, FITS, type Fit } from '../engine/transform';
 import { plainSpeed } from '../engine/remap';
+import { CLIP_MASK_ID } from '../modules/extra';
+
+/** 混合模式選單（函式：語言在載入時決定） */
+const BLENDS = (): Record<BlendMode, string> => ({
+  normal: $t('一般'),
+  add: $t('加亮（相加）'),
+  screen: $t('濾色'),
+  multiply: $t('色彩增值（相乘）'),
+  subtract: $t('相減'),
+  lighten: $t('變亮'),
+});
 import { useModuleThumb } from '../engine/thumbs';
 import { startLibraryDrag } from './dnd';
 import { itemName } from './names';
 import { cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { openSource } from './SourcePanel';
+import { openEditorWindow, useEditorWindow } from './EditorWindow';
 import { openMenu, revealSelection, stopPreviewFx, toast, useLayout, usePreviewFx, type MenuItem } from './uiStore';
 import { DragNumber } from './DragNumber';
 import { ModuleCode } from './ModuleCode';
@@ -79,7 +91,6 @@ function ColorSwatches() {
   );
   return (
     <div className="swatches-wrap">
-      <p className="muted small lib-hint">{$t('純色背景素材：拖到影片軌；或選顏色後按「加到結尾」')}</p>
       <div className="swatches">{SWATCHES.map(swatch)}</div>
       <div className="swatch-custom">
         <input type="color" className="color" value={custom} onChange={(e) => setCustom(e.target.value)} />
@@ -225,7 +236,6 @@ export function TextPanel() {
         <button className="lib-add" title={$t('在播放頭加入文字')} onClick={() => add('title')}><Plus size={15} /></button>
       </div>
       <div className="lib-body">
-        <p className="muted small lib-hint">{$t('拖到影片軌，或按右上角 ＋ 加在播放頭。選取後在「屬性」修改文字與樣式')}</p>
         <div className={view === 'grid' ? 'lib-grid mods' : 'lib-list'}>
           {TEXT_PRESETS.map((p, i) => (
             <div
@@ -360,8 +370,6 @@ export function ModulePanel({ kind }: { kind: ModuleKind }) {
     ]);
   };
 
-  const hint = kind === 'remap' ? $t('拖到影片片段上套用') : $t('點一下試看 · 拖到時間軸套用（右鍵有更多套用方式）');
-
   return (
     <div className="lib" onContextMenu={bgMenu}>
       <LibToolbar id={kind} query={q} setQuery={setQ}>
@@ -377,7 +385,6 @@ export function ModulePanel({ kind }: { kind: ModuleKind }) {
         ))}
       </div>
       <div className="lib-body">
-        <p className="muted small lib-hint">{hint}</p>
         {modules.length === 0 && (
           <p className="muted small center">{cat === 'fav' ? $t('還沒有我的最愛：滑到模組上點星號加入') : cat === 'custom' ? $t('還沒有自訂模組：按右上角 ＋ 新增') : $t('沒有符合的模組')}</p>
         )}
@@ -492,6 +499,13 @@ function maxDurFor(type: 'clip' | 'audio', it: { id: string; start: number; dura
   return nextStart(spansOf(s, new Set([`${type}:${it.id}`])), laneOf(type, it.track), it.start + it.duration) - it.start;
 }
 
+/** 變速時保持音調：開 = 只變速度；關 = 像錄音帶一樣音調跟著變 */
+const PitchSwitch = ({ v, on }: { v: boolean; on: (v: boolean) => void }) => (
+  <span className="pitch-row" title={$t('開：變速時音調不變（人聲不會變尖 / 變低沉）；關：音調跟著速度變')}>
+    <Switch v={v} on={on} />
+  </span>
+);
+
 const Switch = ({ v, on }: { v: boolean; on: (v: boolean) => void }) => (
   <label className="switch"><input type="checkbox" checked={v} onChange={(e) => on(e.target.checked)} /><span /></label>
 );
@@ -566,6 +580,8 @@ function ClipInspector({ id }: { id: string }) {
   const remapMod = useStore((s) => s.modules.find((m) => m.id === clip?.remap.moduleId));
   const time = useStore((s) => s.time);
   const modules = useStore((s) => s.modules);
+  // 連結的音訊也要訂閱：只改音訊（音量、保持音調…）時片段本身沒變，不訂閱的話面板不會重畫
+  const linkedAudio = useStore((s) => (clip?.link ? s.audios.find((a) => a.link === clip.link) : undefined));
   if (!clip) return null;
   const { updateClip, setRemap } = useStore.getState();
   const host = clipHost(clip.id)!;
@@ -595,20 +611,40 @@ function ClipInspector({ id }: { id: string }) {
       id: 'motion',
       title: $t('運動'),
       channels: chs.filter((c) => c.id !== 'opacity'),
+      // 等比例縮放開關（鎖上：改縮放 X / Y 其中一個，另一個依比例跟著變；縮放可以是負數 = 翻轉）
+      actions: (
+        <button
+          className={`ec-icon ${clip.scaleUnlinked ? '' : 'on'}`}
+          title={clip.scaleUnlinked ? $t('縮放 X / Y 各自調整（點一下改成等比例）') : $t('等比例縮放（點一下讓 X / Y 各自調整）')}
+          onClick={() => updateClip(clip.id, { scaleUnlinked: !clip.scaleUnlinked || undefined })}
+        >
+          {clip.scaleUnlinked ? <Unlink2 size={13} /> : <Link2 size={13} />}
+        </button>
+      ),
       onReset: () => {
         const keys = { ...clip.keys };
-        delete keys.x; delete keys.y; delete keys.scale; delete keys.rotation;
-        updateClip(clip.id, { keys, transform: { ...clip.transform, x: 0, y: 0, scale: 1, rotation: 0 } });
+        delete keys.x; delete keys.y; delete keys.scaleX; delete keys.scaleY; delete keys.rotation;
+        updateClip(clip.id, { keys, transform: { ...clip.transform, x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0 } });
       },
     },
     {
       id: 'opacity',
       title: $t('不透明度'),
       channels: chs.filter((c) => c.id === 'opacity'),
+      rows: [
+        {
+          label: $t('混合模式'),
+          node: (
+            <select className="select" value={clip.blend ?? 'normal'} onChange={(e) => updateClip(clip.id, { blend: e.target.value === 'normal' ? undefined : (e.target.value as BlendMode) })}>
+              {Object.entries(BLENDS()).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+          ),
+        },
+      ],
       onReset: () => {
         const keys = { ...clip.keys };
         delete keys.opacity;
-        updateClip(clip.id, { keys, transform: { ...clip.transform, opacity: 1 } });
+        updateClip(clip.id, { keys, blend: undefined, transform: { ...clip.transform, opacity: 1 } });
       },
     },
   ];
@@ -625,7 +661,6 @@ function ClipInspector({ id }: { id: string }) {
             </select>
           ),
         },
-        { label: $t('水平翻轉'), node: <label className="switch"><input type="checkbox" checked={clip.flipX} onChange={(e) => updateClip(clip.id, { flipX: e.target.checked })} /><span /></label> },
       ],
       onReset: () => updateClip(clip.id, { fit: 'cover', flipX: false, transform: { ...DEFAULT_TRANSFORM }, keys: {} }),
     },
@@ -646,7 +681,7 @@ function ClipInspector({ id }: { id: string }) {
       footer: <ModuleCode module={remapMod} onFork={(nid) => updateClip(clip.id, { remap: { ...clip.remap, moduleId: nid } })} />,
     });
   }
-  const la = linkedAudioOf(useStore.getState(), clip);
+  const la = linkedAudio;
   if (isVideo && la) {
     // 連結的音訊跟影片是一體的：音量 / 淡入淡出直接在這裡調
     const { updateAudio } = useStore.getState();
@@ -657,6 +692,7 @@ function ClipInspector({ id }: { id: string }) {
         { label: $t('音量'), node: <DragNumber variant="text" value={la.volume} min={0} max={1} step={0.01} display={100} suffix="%" def={1} onChange={(v) => updateAudio(la.id, { volume: v })} /> },
         { label: $t('淡入'), node: <DragNumber variant="text" value={la.fadeIn} min={0} max={Math.min(10, la.duration)} step={0.01} suffix="s" def={0} onChange={(v) => updateAudio(la.id, { fadeIn: v })} /> },
         { label: $t('淡出'), node: <DragNumber variant="text" value={la.fadeOut} min={0} max={Math.min(10, la.duration)} step={0.01} suffix="s" def={0} onChange={(v) => updateAudio(la.id, { fadeOut: v })} /> },
+        { label: $t('保持音調'), node: <PitchSwitch v={la.keepPitch !== false} on={(v) => updateAudio(la.id, { keepPitch: v })} /> },
         {
           label: '',
           node: (
@@ -667,13 +703,14 @@ function ClipInspector({ id }: { id: string }) {
         },
       ],
     });
-  } else if (isVideo && media?.hasAudio) {
+  } else if (isVideo && media?.hasAudio && !clip.audioSplit) {
     const ok = plainSpeed(clip, new Map(modules.map((m) => [m.id, m]))) !== null;
     sections.push({
       id: 'sound',
       title: $t('聲音'),
       rows: [
         { label: $t('音量'), node: <DragNumber variant="text" value={clip.volume} min={0} max={1} step={0.01} display={100} suffix="%" def={1} onChange={(v) => updateClip(clip.id, { volume: v })} /> },
+        { label: $t('保持音調'), node: <PitchSwitch v={clip.keepPitch !== false} on={(v) => updateClip(clip.id, { keepPitch: v })} /> },
         ...(!ok ? [{ label: '', node: <span className="muted small">{$t('目前的時間重映射不播放原音')}</span> }] : []),
       ],
     });
@@ -720,7 +757,12 @@ function effectSections(
   // 片段特效的遮罩要按「在預覽中編輯」才會出現可拖曳的框（避免跟片段本身的變換框打架）
   const editKey = o.maskKey;
   const editing = !editKey || useMaskEdit.getState().key === editKey;
-  const toggleEdit = () => editKey && useMaskEdit.setState({ key: useMaskEdit.getState().key === editKey ? null : editKey });
+  // 「在預覽中編輯」：還沒開編輯視窗就打開它（遮罩在視窗的預覽裡拖）；已經開著就切換這個遮罩的編輯狀態
+  const toggleEdit = () => {
+    if (!editKey) return;
+    if (!useEditorWindow.getState().open) return openEditorWindow(editKey);
+    useMaskEdit.setState({ key: useMaskEdit.getState().key === editKey ? null : editKey });
+  };
   /** 快速設定：清掉該屬性的關鍵影格、直接設定固定值 */
   const preset = (v: Partial<typeof mask>) => {
     const keys = Object.fromEntries(Object.entries(f.keys ?? {}).filter(([k]) => !(k.startsWith('mask.') && k.slice(5) in v)));
@@ -766,7 +808,6 @@ function effectSections(
               </div>
             ),
           },
-          ...(!editKey ? [{ label: '', node: <span className="muted small">{$t('在預覽畫面上拖曳遮罩框：框內移動、把手縮放（Shift 等比）、上方圓點旋轉、右側菱形羽化')}</span> }] : []),
         ]
       : []),
   ];
@@ -832,7 +873,6 @@ function effectSections(
           ),
         };
       }),
-      footer: o.compact ? undefined : <p className="muted small drive-hint">{$t('音量 / 節拍來自整個專案正在播放的聲音。寫 GLSL 時也可以直接用 u_level（音量 0~1）與 u_beat（節拍脈衝）。')}</p>,
       onReset: () => update({ audio: undefined }),
     });
   }
@@ -868,9 +908,20 @@ function clipFxSections(clip: Clip, modules: Module[], local: number): Section[]
 }
 
 /** 「加入片段特效」下拉 */
+/** 片段遮罩 = 一個特殊的片段特效（沿用遮罩的關鍵影格、預覽拖曳編輯、分割 / 合併處理） */
+function addClipMask(clipId: string, shape: MaskShape) {
+  const S = useStore.getState();
+  S.addClipFx(clipId, CLIP_MASK_ID);
+  const f = useStore.getState().clips.find((c) => c.id === clipId)?.effects?.at(-1);
+  if (!f) return;
+  S.updateClipFx(clipId, f.id, { mask: { ...DEFAULT_MASK, shape, w: 0.8, h: 0.6 } });
+  openEditorWindow(cfxMaskKey(f.id)); // 加了片段遮罩就直接開編輯視窗調整
+}
+
 function AddClipFx({ clipId }: { clipId: string }) {
   const modules = useStore((s) => s.modules).filter((m) => m.kind === 'effect');
   return (
+    <>
     <div className="ec-row add-cfx-row">
       <div className="ec-left ec-plain">
         <Sparkles size={13} />
@@ -881,12 +932,23 @@ function AddClipFx({ clipId }: { clipId: string }) {
             if (e.target.value) useStore.getState().addClipFx(clipId, e.target.value);
           }}
         >
-          <option value="">{$t('＋ 加入片段特效…（也可以把特效拖到片段上）')}</option>
+          <option value="">{$t('＋ 加入片段特效…')}</option>
           {modules.map((m) => <option key={m.id} value={m.id}>{displayName(m.name)}</option>)}
         </select>
       </div>
       <div className="ec-right ec-dim" />
     </div>
+    {/* 片段遮罩放在自己的一列：跟下拉選單擠在一起時選單會被壓到看不到字 */}
+    <div className="ec-row add-cfx-row">
+      <div className="ec-left ec-plain">
+        <div className="btn-row cfx-mask-row">
+          <button className="btn small-h" title={$t('加入片段遮罩：只保留遮罩範圍內的畫面')} onClick={() => addClipMask(clipId, 'rect')}><Square size={12} /> {$t('矩形遮罩')}</button>
+          <button className="btn small-h" title={$t('加入橢圓片段遮罩')} onClick={() => addClipMask(clipId, 'ellipse')}><Circle size={12} /> {$t('橢圓遮罩')}</button>
+        </div>
+      </div>
+      <div className="ec-right ec-dim" />
+    </div>
+    </>
   );
 }
 
@@ -995,6 +1057,7 @@ function AudioInspector({ id }: { id: string }) {
         { label: $t('淡入'), node: <DragNumber variant="text" value={a.fadeIn} min={0} max={Math.min(10, a.duration)} step={0.01} suffix="s" def={0} onChange={(v) => updateAudio(id, { fadeIn: v })} /> },
         { label: $t('淡出'), node: <DragNumber variant="text" value={a.fadeOut} min={0} max={Math.min(10, a.duration)} step={0.01} suffix="s" def={0} onChange={(v) => updateAudio(id, { fadeOut: v })} /> },
         { label: $t('速率'), node: <DragNumber variant="text" value={a.rate ?? 1} min={0.1} max={4} step={0.01} suffix="×" def={1} onChange={(v) => updateAudio(id, { rate: v, duration: Math.min(a.duration * ((a.rate ?? 1) / v), maxDurFor('audio', a)) })} /> },
+        { label: $t('保持音調'), node: <PitchSwitch v={a.keepPitch !== false} on={(v) => updateAudio(id, { keepPitch: v })} /> },
       ]}
     />
   );

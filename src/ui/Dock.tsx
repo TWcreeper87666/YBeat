@@ -5,9 +5,10 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { useStore } from '../store';
 import { Slot } from './PreviewPanel';
+import { useEditorWindow } from './EditorWindow';
 import { openMenu, useLayout, type MenuItem } from './uiStore';
 import {
-  C, R, T, findGroup, mapTabs, movePanel, panelsIn, removePanel, setSizes, showPanel,
+  C, R, T, findGroup, mapTabs, moveGroup, movePanel, panelsIn, removePanel, setSizes, showPanel,
   type DockNode, type DropTarget, type PanelId, type Side, type SplitNode, type TabsNode,
 } from './dockTree';
 
@@ -44,6 +45,8 @@ interface DockState {
   customs: Custom[];
   maximized: string | null;
   move(panel: PanelId, from: string, target: DropTarget): void;
+  /** 整個群組一起移動 */
+  moveGroup(from: string, target: DropTarget): void;
   setActive(group: string, panel: PanelId): void;
   activatePanel(panel: PanelId, onlyIfPresent?: boolean): void;
   closePanel(panel: PanelId): void;
@@ -65,6 +68,7 @@ export const useDock = create<DockState>()(
       customs: [],
       maximized: null,
       move: (panel, from, target) => set({ layout: movePanel(get().layout, panel, from, target), maximized: null }),
+      moveGroup: (from, target) => set({ layout: moveGroup(get().layout, from, target), maximized: null }),
       setActive: (group, panel) => set({ layout: mapTabs(get().layout, (t) => (t.id === group ? { ...t, active: panel } : t)) }),
       activatePanel: (panel, onlyIfPresent) => {
         const l = get().layout;
@@ -99,7 +103,7 @@ export const useDock = create<DockState>()(
       },
     }),
     {
-      name: 'beatsync-dock-v2',
+      name: 'ybeat-dock',
       partialize: (s) => ({ layout: s.layout, current: s.current, customs: s.customs }),
       // 舊版存的版面沒有「文字」分頁：加在「素材」旁邊
       merge: (persisted, current) => {
@@ -157,7 +161,7 @@ export function panelMenuItems(): MenuItem[] {
 
 // ───────────────────────── 拖曳分頁（VS Code 行為） ─────────────────────────
 
-const useTabDrag = create<{ drag: { panel: PanelId; from: string; x: number; y: number; target: DropTarget | null } | null }>(() => ({ drag: null }));
+const useTabDrag = create<{ drag: { panel: PanelId | null; label: string; from: string; x: number; y: number; target: DropTarget | null } | null }>(() => ({ drag: null }));
 
 const ROOT_EDGE = 22; // 靠近整個版面邊緣多少 px 算「放到最外側」
 const SPLIT_EDGE = 0.3; // 靠近群組邊緣多少比例算「分割」
@@ -195,8 +199,9 @@ function targetAt(x: number, y: number, rootEl: HTMLElement): DropTarget | null 
   return { kind: 'group', group, zone: side[1] < SPLIT_EDGE ? side[0] : 'center' };
 }
 
-function startTabDrag(e: React.PointerEvent, panel: PanelId, from: string, rootEl: HTMLElement | null) {
-  if (e.button === 1) {
+/** panel = null：拖整個群組（按住分頁列右側空白處） */
+function startTabDrag(e: React.PointerEvent, panel: PanelId | null, from: string, rootEl: HTMLElement | null, label: string) {
+  if (e.button === 1 && panel) {
     e.preventDefault();
     return useDock.getState().closePanel(panel); // 中鍵關閉
   }
@@ -207,7 +212,7 @@ function startTabDrag(e: React.PointerEvent, panel: PanelId, from: string, rootE
     if (!started && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 6) return;
     started = true;
     document.body.classList.add('dock-dragging');
-    useTabDrag.setState({ drag: { panel, from, x: ev.clientX, y: ev.clientY, target: rootEl ? targetAt(ev.clientX, ev.clientY, rootEl) : null } });
+    useTabDrag.setState({ drag: { panel, label, from, x: ev.clientX, y: ev.clientY, target: rootEl ? targetAt(ev.clientX, ev.clientY, rootEl) : null } });
   };
   const up = () => {
     window.removeEventListener('pointermove', mv);
@@ -216,8 +221,10 @@ function startTabDrag(e: React.PointerEvent, panel: PanelId, from: string, rootE
     document.body.classList.remove('dock-dragging');
     const d = useTabDrag.getState().drag;
     useTabDrag.setState({ drag: null });
-    if (started && d?.target) useDock.getState().move(panel, from, d.target);
-    else if (!started) useDock.getState().setActive(from, panel);
+    if (started && d?.target) {
+      if (panel) useDock.getState().move(panel, from, d.target);
+      else useDock.getState().moveGroup(from, d.target);
+    } else if (!started && panel) useDock.getState().setActive(from, panel);
   };
   const esc = (ev: KeyboardEvent) => {
     if (ev.key !== 'Escape') return;
@@ -255,7 +262,7 @@ export function DockRoot({ hosts }: { hosts: Record<PanelId, HTMLElement> }) {
           </div>
         )}
         {rootSide && <div className={`dock-drop root ${rootSide}`} />}
-        {drag && <div className="dock-ghost" style={{ left: drag.x + 12, top: drag.y + 10 }}>{TITLE[drag.panel]}</div>}
+        {drag && <div className="dock-ghost" style={{ left: drag.x + 12, top: drag.y + 10 }}>{drag.label}</div>}
       </div>
     </RootCtx.Provider>
   );
@@ -309,6 +316,7 @@ function Group({ node, hosts }: { node: TabsNode; hosts: Record<PanelId, HTMLEle
   const rootRef = React.useContext(RootCtx);
   const drag = useTabDrag((s) => s.drag);
   const floating = useLayout((s) => s.floating);
+  const editorOpen = useEditorWindow((s) => s.open);
   const maximized = useDock((s) => s.maximized === node.id);
   const t = drag?.target;
   const zone = t?.kind === 'group' && t.group === node.id ? t.zone : null;
@@ -331,14 +339,18 @@ function Group({ node, hosts }: { node: TabsNode; hosts: Record<PanelId, HTMLEle
 
   return (
     <div className="dock-group" data-dock-group={node.id}>
-      <div className="dock-tabs" onDoubleClick={(e) => e.target === e.currentTarget && useDock.getState().toggleMax(node.id)}>
+      <div
+        className={`dock-tabs ${drag && !drag.panel && drag.from === node.id ? 'dragging' : ''}`}
+        onDoubleClick={(e) => e.target === e.currentTarget && useDock.getState().toggleMax(node.id)}
+        onPointerDown={(e) => e.target === e.currentTarget && e.button === 0 && startTabDrag(e, null, node.id, rootRef?.current ?? null, node.tabs.map((x) => TITLE[x]).join(' · '))}
+      >
         {node.tabs.map((p, i) => (
           <React.Fragment key={p}>
             {insertAt === i && <div className="dock-insert" />}
             <div
               data-dock-tab={p}
               className={`dock-tab ${p === active ? 'on' : ''} ${drag?.panel === p ? 'dragging' : ''}`}
-              onPointerDown={(e) => startTabDrag(e, p, node.id, rootRef?.current ?? null)}
+              onPointerDown={(e) => startTabDrag(e, p, node.id, rootRef?.current ?? null, TITLE[p])}
               onDoubleClick={() => useDock.getState().toggleMax(node.id)}
               onContextMenu={(e) => tabMenu(e, p)}
             >
@@ -350,7 +362,12 @@ function Group({ node, hosts }: { node: TabsNode; hosts: Record<PanelId, HTMLEle
         {maximized && <button className="dock-restore" onClick={() => useDock.getState().toggleMax(node.id)} title={$t('還原')}><Minimize2 size={12} /> {$t('還原')}</button>}
       </div>
       <div className="dock-body">
-        {active === 'preview' && floating ? (
+        {editorOpen && (active === 'preview' || active === 'inspector') ? (
+          // 編輯視窗開著：屬性 / 預覽暫時搬到視窗裡
+          <div className="dock-placeholder">
+            <p className="muted">{$t('目前在編輯視窗中')}</p>
+          </div>
+        ) : active === 'preview' && floating ? (
           <div className="dock-placeholder">
             <p className="muted">{$t('預覽目前是浮動視窗')}</p>
             <button className="btn" onClick={() => useLayout.getState().set({ floating: false })}>{$t('停駐回這裡')}</button>

@@ -6,11 +6,28 @@ import { ANIM_PROPS, evalKeys, upsertKey, type AnimProp, type Keys } from './key
 export interface Transform {
   x: number;
   y: number;
-  scale: number;
+  /** 水平 / 垂直縮放（1 = 原始大小）；舊版只有 scale，載入時用 normalizeScale 轉成兩個 */
+  scaleX: number;
+  scaleY: number;
   rotation: number;
   opacity: number;
 }
-export const DEFAULT_TRANSFORM: Transform = { x: 0, y: 0, scale: 1, rotation: 0, opacity: 1 };
+export const DEFAULT_TRANSFORM: Transform = { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 };
+
+/** 舊版 transform.scale / keys.scale → scaleX + scaleY（兩邊一樣） */
+export function normalizeScale<T extends { transform: Transform; keys?: Keys }>(c: T): T {
+  const t = c.transform as Transform & { scale?: number };
+  const k = c.keys as (Keys & { scale?: Keys['scaleX'] }) | undefined;
+  if (t.scale === undefined && !k?.scale) return c;
+  const transform = { ...t, scaleX: t.scaleX ?? t.scale ?? 1, scaleY: t.scaleY ?? t.scale ?? 1 };
+  delete (transform as { scale?: number }).scale;
+  let keys = c.keys;
+  if (k?.scale) {
+    const { scale, ...rest } = k;
+    keys = { ...rest, scaleX: scale, scaleY: scale!.map((x) => ({ ...x, id: x.id + 'y' })) };
+  }
+  return { ...c, transform, keys };
+}
 
 /** 舊版「起點 → 終點」動態用的緩動名稱（只用於轉換舊專案） */
 export type EaseName = 'linear' | 'in' | 'out' | 'inOut' | 'outBack';

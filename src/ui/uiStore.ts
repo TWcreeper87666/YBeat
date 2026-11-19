@@ -19,8 +19,7 @@ interface Layout {
   gridSafe: boolean;
   codeOpen: boolean;
   clipTab: 'frame' | 'speed' | 'sound';
-  /** 效果控制：左右分隔比例、收合的區塊 */
-  ecSplit: number;
+  /** 效果控制：收合的區塊 */
   ecCollapsed: Record<string, boolean>;
   /** 素材庫顯示方式 / 篩選 */
   libView: Record<string, 'list' | 'grid'>;
@@ -33,10 +32,15 @@ interface Layout {
   favorites: string[];
   /** 特效 / 轉場 / 變速分頁目前選的分類 */
   modCat: Record<string, string>;
+  /** 編輯視窗：排版（auto = 依視窗比例；stacked = 預覽上、屬性下；side = 屬性左、預覽右）與分隔比例（預覽 / 屬性所佔比例） */
+  editorLayout: 'auto' | 'stacked' | 'side';
+  editorSplit: { stacked: number; side: number };
+  /** 屬性表格左欄（名稱 + 數值）的寬度（px）：固定寬度，面板變窄時只縮右邊的關鍵影格時間軸；屬性分頁與編輯視窗共用 */
+  ecLeftPx: number;
   set(p: Partial<Omit<Layout, 'set' | 'reset'>>): void;
   reset(): void;
 }
-const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, codeOpen: false, clipTab: 'frame' as const, ecSplit: 0.56, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], favorites: [] as string[], previewScale: 1, upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string> };
+const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], favorites: [] as string[], previewScale: 1, upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300 };
 
 export const useLayout = create<Layout>()(
   persist(
@@ -45,7 +49,7 @@ export const useLayout = create<Layout>()(
       set: (p) => set(p),
       reset: () => set(LAYOUT_DEFAULT),
     }),
-    { name: 'beatsync-layout' },
+    { name: 'ybeat-layout' },
   ),
 );
 
@@ -146,3 +150,15 @@ export const useSnapLine = create<{ t: number | null }>(() => ({ t: null }));
 export const useReveal = create<{ n: number }>(() => ({ n: 0 }));
 /** 讓時間軸捲動到目前選取的項目並閃一下（用按鈕 / 選單加入時，才知道放到哪裡） */
 export const revealSelection = () => setTimeout(() => useReveal.setState((s) => ({ n: s.n + 1 })), 30);
+
+// ───────────── 編輯視窗（狀態放這裡：屬性表格、預覽、視窗本身都要用） ─────────────
+
+export const useEditorWindow = create<{ open: boolean }>(() => ({ open: false }));
+
+/** 編輯視窗目前的排版；沒開回傳 null。自動 = 看輸出尺寸：橫式上下排、直式左右排 */
+export function useEditorMode(landscape: boolean): 'stacked' | 'side' | null {
+  const open = useEditorWindow((s) => s.open);
+  const pref = useLayout((s) => s.editorLayout);
+  if (!open) return null;
+  return pref === 'auto' ? (landscape ? 'stacked' : 'side') : pref;
+}

@@ -25,11 +25,12 @@ body.resizing-h, body.resizing-h * { cursor: row-resize !important; }
 
 /* scrollbars */
 * { scrollbar-width: thin; scrollbar-color: #3a3f4d transparent; }
+select { scrollbar-color: #4a5163 #15171d; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #343946; border-radius: 10px; border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-thumb:hover { background: #4a5163; border: 2px solid transparent; background-clip: padding-box; }
-::-webkit-scrollbar-thumb:active { background: var(--accent); border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:active { background: #5d6577; border: 2px solid transparent; background-clip: padding-box; }
 ::-webkit-scrollbar-corner { background: transparent; }
 ::-webkit-scrollbar-button { display: none; }
 button, input, select { font: inherit; color: inherit; }
@@ -135,7 +136,7 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
 .fatal { color: var(--err); }
 
 /* timeline */
-.timeline { display: grid; grid-template-rows: 34px 1fr; background: var(--panel); border-top: 1px solid var(--line); min-height: 0; position: relative; }
+.timeline { display: grid; grid-template-rows: 34px 1fr auto; background: var(--panel); border-top: 1px solid var(--line); min-height: 0; position: relative; }
 .tl-toolbar { display: flex; align-items: center; gap: 4px; padding: 0 8px; border-bottom: 1px solid var(--line); }
 .tl-toolbar input[type=range] { width: 130px; accent-color: var(--accent); }
 .tl-toolbar .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
@@ -143,7 +144,9 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
 .tbtn:hover:not(:disabled) { background: var(--panel2); border-color: var(--line); }
 .tbtn:disabled { opacity: .35; cursor: default; }
 .tbtn.on { color: var(--accent2); border-color: #2a5a55; background: #13302d; }
-.tl-scroll { overflow: auto; position: relative; }
+.tl-scroll { overflow-x: hidden; overflow-y: auto; position: relative; scrollbar-gutter: stable; }
+/* 自訂水平捲軸：只在時間區域下方（不延伸到左側軌道名稱欄） */
+.tl-hbar { overflow-x: auto; overflow-y: hidden; height: 12px; border-top: 1px solid var(--line); }
 .tl-inner { position: relative; min-height: 100%; }
 .tl-row { display: flex; border-bottom: 1px solid var(--line); }
 .tl-row.video { height: 58px; }
@@ -204,6 +207,12 @@ kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--muted); }
 .gh.br { right: -7px; bottom: -7px; cursor: nwse-resize; }
 .gh.tr { right: -7px; top: -7px; cursor: nesw-resize; }
 .gh.bl { left: -7px; bottom: -7px; cursor: nesw-resize; }
+/* 邊的把手：只拉一個方向（可以拉過中心 = 翻轉） */
+.gh.edge { width: 10px; height: 10px; border-radius: 50%; }
+.gh.l { left: -6px; top: calc(50% - 5px); cursor: ew-resize; }
+.gh.r { right: -6px; top: calc(50% - 5px); cursor: ew-resize; }
+.gh.t { top: -6px; left: calc(50% - 5px); cursor: ns-resize; }
+.gh.b { bottom: -6px; left: calc(50% - 5px); cursor: ns-resize; }
 .grot { position: absolute; left: 50%; top: -30px; width: 14px; height: 14px; margin-left: -7px; border-radius: 50%; background: var(--accent2); border: 1px solid #000; cursor: grab; }
 .grot::after { content: ""; position: absolute; left: 6px; top: 14px; width: 1px; height: 16px; background: #fff; }
 .gizmo-tag { position: absolute; left: 0; top: -20px; font-size: 11px; background: var(--accent2); color: #000; padding: 0 5px; border-radius: 3px; font-weight: 700; }
@@ -494,6 +503,10 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .dock-group { position: relative; flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
 .dock-tabs { display: flex; flex: none; height: 28px; background: #121318; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
 .dock-tabs::-webkit-scrollbar { display: none; }
+/* 分頁列空白處：按住拖曳 = 整組移動 */
+.dock-tabs { cursor: grab; }
+.dock-tabs > * { cursor: default; }
+.dock-tabs.dragging { opacity: .6; }
 .dock-tab { display: flex; align-items: center; gap: 6px; padding: 0 12px; font-size: 12px; color: var(--muted); border-right: 1px solid #ffffff08; cursor: pointer; white-space: nowrap; }
 .dock-tab:hover { color: var(--text); background: #ffffff05; }
 .dock-tab.on { color: var(--text); background: var(--panel); box-shadow: inset 0 2px 0 var(--accent); }
@@ -504,7 +517,8 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .dock-body > .slot { flex: 1; }
 .panel-host { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .panel-host > * { flex: 1; min-height: 0; }
-.panel-inspector, .panel-media, .panel-transition, .panel-effect, .panel-remap { overflow: auto; }
+.panel-inspector.drop-here { box-shadow: inset 0 0 0 2px var(--accent2); background: #29d3c20d; }
+.panel-inspector, .panel-media, .panel-text, .panel-transition, .panel-effect, .panel-remap { overflow: auto; }
 .dock-drop { position: absolute; z-index: 30; background: #29d3c233; border: 2px solid var(--accent2); pointer-events: none; transition: all .08s; }
 .dock-drop.center { inset: 28px 0 0 0; }
 .dock-drop.left { left: 0; top: 28px; bottom: 0; width: 50%; }
@@ -567,8 +581,10 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 
 /* ───────────── 效果控制（屬性） ───────────── */
 .inspector-panel { min-height: 100%; }
-.ec { position: relative; font-size: 12px; }
-.ec-row { display: grid; grid-template-columns: var(--ec-left, 56%) 1fr; min-height: 26px; border-bottom: 1px solid #ffffff07; }
+.ec { position: relative; font-size: 12px; overflow-x: clip; } /* 播放頭在最右邊時（含箭頭）不要撐出水平捲軸；clip 不會變成捲動容器，sticky 標題列照常 */
+/* 左欄（名稱 + 數值）固定寬度（px，至少 240px）：各處一致，面板變窄只縮右邊的關鍵影格時間軸 */
+.ec { --ec-col: max(240px, var(--ec-left, 300px)); }
+.ec-row { display: grid; grid-template-columns: var(--ec-col) 1fr; min-height: 26px; border-bottom: 1px solid #ffffff07; }
 .ec.plain .ec-row { grid-template-columns: 1fr; }
 .ec-left { display: flex; align-items: center; gap: 4px; padding: 0 6px 0 8px; min-width: 0; position: relative; border-right: 1px solid var(--line); }
 .ec.plain .ec-left { border-right: none; }
@@ -594,6 +610,7 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .ec-watch:hover { opacity: .9; }
 .ec-label { flex: 1; min-width: 0; color: #b9bdc9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ec-row.anim .ec-label { color: var(--accent2); }
+.ec-tip { position: fixed; z-index: 1000; transform: translateY(-50%); pointer-events: none; padding: 2px 6px; background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; color: #e3e6ee; font-size: 12px; white-space: nowrap; box-shadow: 0 2px 8px #0008; }
 .ec-plain .ec-label { flex: 0 0 auto; max-width: 55%; padding-left: 18px; }
 .ec-plain .ec-node { margin-left: auto; }
 .ec.plain .ec-plain .ec-label { padding-left: 4px; }
@@ -606,6 +623,10 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .ec-node .select.wide { width: 100%; }
 .ec-node .color { width: 40px; height: 20px; border: 1px solid var(--line); background: none; padding: 0; border-radius: 4px; }
 .ec-node .switch { grid-column: auto; }
+/* 保持音調開關外面包了一層（掛提示文字用）：要是 flex，裡面的 label.switch 寬高才有效 */
+.pitch-row { display: flex; align-items: center; }
+/* 片段遮罩按鈕：跟上面的下拉選單對齊、面板太窄時換行 */
+.cfx-mask-row { display: flex; flex-wrap: wrap; gap: 6px; padding-left: 19px; }
 .ec-nav { display: flex; width: 50px; flex: none; justify-content: center; }
 .ec-nav button { background: none; border: none; padding: 0; width: 16px; color: var(--muted); font-size: 11px; }
 .ec-nav button:hover { color: #fff; }
@@ -642,8 +663,8 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .dragnum.text.modified .dn-value { color: #9fd0ff; }
 
 /* ───────────── 時間軸：Ctrl 變速 / Alt 滑移 ───────────── */
-body.key-ctrl .tl-scroll .handle { background: #ffb02e44; width: 9px; }
-body.key-ctrl .tl-scroll .handle::after { content: "⇿"; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 10px; color: #ffd27a; }
+body.key-ctrl .tl-scroll .handle:hover { width: 9px; }
+body.key-ctrl .tl-scroll .handle:hover::after { content: "⇿"; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); font-size: 10px; color: #ffd27a; }
 body.key-ctrl .tl-scroll .handle:hover { background: #ffb02e99; }
 body.key-alt .tl-scroll .clip, body.key-alt .tl-scroll .audioitem { cursor: ew-resize; }
 body.stretching, body.stretching * { cursor: ew-resize !important; }
@@ -875,3 +896,41 @@ body.mask-dragging, body.mask-dragging * { user-select: none; }
 .src-video-wrap { position: relative; max-width: 100%; max-height: 100%; display: flex; }
 .src-video-wrap video { max-width: 100%; max-height: 100%; }
 .src-scrub-frame { position: absolute; inset: 0; width: 100%; height: 100%; display: none; border-radius: 6px; pointer-events: none; }
+
+/* 旋轉把手：自訂旋轉游標（拖曳中整個畫面都維持） */
+:root { --cursor-rotate: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='18' height='12' viewBox='0 0 30 20'%3E%3Cpath d='M6.00 12.50Q15 3 24.00 12.50' fill='none' stroke='black' stroke-width='3.8' stroke-linecap='round'/%3E%3Cpath d='M1.53 17.22 2.73 9.41 9.27 15.59zM28.47 17.22 20.73 15.59 27.27 9.41z' fill='black' stroke='black' stroke-width='2.4' stroke-linejoin='round'/%3E%3Cpath d='M1.53 17.22 2.73 9.41 9.27 15.59zM28.47 17.22 20.73 15.59 27.27 9.41z' fill='white'/%3E%3Cpath d='M4.62 13.95L6.00 12.50Q15 3 24.00 12.50L25.38 13.95' fill='none' stroke='white' stroke-width='1.6' stroke-linejoin='round'/%3E%3C/svg%3E") 9 7, alias; }
+.grot, .mask-rot { cursor: var(--cursor-rotate) !important; }
+body.rotating, body.rotating * { cursor: var(--cursor-rotate) !important; }
+
+/* 說明 → 使用教學 */
+.dialog.tutorial { max-height: min(80vh, 720px); display: flex; flex-direction: column; }
+.tutorial-body { user-select: text; -webkit-user-select: text; cursor: text; overflow-y: auto; padding-right: 6px; display: flex; flex-direction: column; gap: 14px; }
+.tutorial-body h4 { margin: 0 0 6px; font-size: 13px; color: var(--accent2); }
+.tutorial-body ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 5px; }
+.tutorial-body li { line-height: 1.55; color: #c9cdd8; }
+
+/* ───────── 編輯視窗（屬性 + 預覽，置中、不能移動） ───────── */
+.editor-overlay { z-index: 90; }
+.editor-window { width: min(1400px, 94vw); height: min(880px, 90vh); background: var(--panel); border: 1px solid #3a3f4d; border-radius: 10px; box-shadow: 0 20px 60px #000c; display: flex; flex-direction: column; overflow: hidden; }
+.editor-head { display: flex; align-items: center; gap: 10px; height: 40px; flex: none; padding: 0 10px 0 16px; border-bottom: 1px solid var(--line); background: #121318; }
+.editor-title { font-weight: 600; }
+.editor-name { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.editor-head .spacer { flex: 1; }
+.editor-body { flex: 1; min-height: 0; min-width: 0; display: grid; grid-template-columns: 1fr; grid-template-rows: 1fr; padding: 4px; background: var(--bg); }
+.editor-props, .editor-preview { min-width: 0; min-height: 0; display: flex; overflow: hidden; background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+.editor-props > .slot, .editor-preview > .slot { flex: 1; }
+/* 分隔線（拖曳調整比例、雙擊恢復） */
+.editor-sash { position: relative; z-index: 5; }
+.editor-sash:hover, body.resizing-h .editor-sash.stacked, body.resizing-v .editor-sash.side { background: var(--accent); }
+.editor-sash.stacked { cursor: row-resize; }
+.editor-sash.side { cursor: col-resize; }
+.editor-sash::after { content: ""; position: absolute; inset: -4px 0; }
+.editor-sash.side::after { inset: 0 -4px; }
+.editor-layouts button { width: 30px; height: 24px; display: inline-flex; align-items: center; justify-content: center; }
+
+/* 編輯視窗的預覽：檢視縮放 / 平移 */
+.preview.pannable { cursor: grab; }
+body.panning, body.panning * { cursor: grabbing !important; }
+.view-zoom { position: absolute; right: 10px; bottom: 10px; z-index: 6; background: #000a; color: #c9cdd8; border: 1px solid var(--line); border-radius: 5px; padding: 2px 8px; font-size: 11.5px; cursor: pointer; }
+.view-zoom:hover { color: #fff; border-color: #4a5163; }
+.ec-icon.on { color: var(--accent2); }

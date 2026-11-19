@@ -2,6 +2,7 @@ import { $t } from '../i18n';
 import { Minimize2, Pause, PictureInPicture2, Play, Repeat, SkipBack, SkipForward, StepBack, StepForward } from 'lucide-react';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { projectDuration, useStore } from '../store';
+import { useEditorScope } from './EditorWindow';
 import { Preview } from './Preview';
 import { useLayout } from './uiStore';
 import { DragNumber } from './DragNumber';
@@ -34,28 +35,33 @@ function Transport() {
   const barRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<number | null>(null);
   const [gridPop, setGridPop] = useState<{ x: number; y: number } | null>(null);
-  const total = Math.max(dur, 0.001);
+  // 編輯視窗開著：播放列只看那個片段（時間從片段開頭算）；否則是整個專案
+  const scope = useEditorScope();
+  const t0 = scope?.a ?? 0;
+  const total = Math.max(scope ? scope.b - scope.a : dur, 0.001);
+  const local = Math.min(total, Math.max(0, time - t0));
 
   const cuts = useMemo(() => {
     const set = new Set<number>();
     for (const c of clips) {
-      set.add(+c.start.toFixed(3));
-      set.add(+(c.start + c.duration).toFixed(3));
+      set.add(+(c.start - t0).toFixed(3));
+      set.add(+(c.start + c.duration - t0).toFixed(3));
     }
     return [...set].filter((t) => t > 0 && t < total);
-  }, [clips, total]);
+  }, [clips, total, t0]);
 
+  /** 播放列上的位置 → 片段內 / 專案時間（回傳的是播放列上的時間，0 ~ total） */
   const tAt = (x: number) => {
     const r = barRef.current!.getBoundingClientRect();
-    return Math.min(total, Math.max(0, ((x - r.left) / r.width) * total));
+    return Math.min(total - (scope ? 1 / 60 : 0), Math.max(0, ((x - r.left) / r.width) * total));
   };
 
   const scrub = (e: React.PointerEvent) => {
     e.preventDefault();
     const wasPlaying = S.playing;
     S.setPlaying(false);
-    S.setTime(tAt(e.clientX));
-    const mv = (ev: PointerEvent) => S.setTime(tAt(ev.clientX));
+    S.setTime(t0 + tAt(e.clientX));
+    const mv = (ev: PointerEvent) => S.setTime(t0 + tAt(ev.clientX));
     const up = () => {
       window.removeEventListener('pointermove', mv);
       window.removeEventListener('pointerup', up);
@@ -65,7 +71,7 @@ function Transport() {
     window.addEventListener('pointerup', up);
   };
 
-  const step = (d: number) => () => S.setTime(Math.max(0, S.time + d));
+  const step = (d: number) => () => S.setTime(scope ? Math.min(scope.b - 1 / 60, Math.max(scope.a, S.time + d)) : Math.max(0, S.time + d));
 
   return (
     <div className="transport">
@@ -77,22 +83,22 @@ function Transport() {
         onPointerLeave={() => setHover(null)}
       >
         <div className="scrub-track">
-          {loop && <div className="scrub-loop" style={{ left: `${(loop.a / total) * 100}%`, width: `${((loop.b - loop.a) / total) * 100}%` }} />}
-          <div className="scrub-fill" style={{ width: `${(Math.min(time, total) / total) * 100}%` }} />
+          {loop && !scope && <div className="scrub-loop" style={{ left: `${(loop.a / total) * 100}%`, width: `${((loop.b - loop.a) / total) * 100}%` }} />}
+          <div className="scrub-fill" style={{ width: `${(local / total) * 100}%` }} />
           {cuts.map((c) => <div key={c} className="scrub-cut" style={{ left: `${(c / total) * 100}%` }} />)}
         </div>
-        <div className="scrub-thumb" style={{ left: `${(Math.min(time, total) / total) * 100}%` }} />
+        <div className="scrub-thumb" style={{ left: `${(local / total) * 100}%` }} />
         {hover !== null && <div className="scrub-tip" style={{ left: `${(hover / total) * 100}%` }}>{fmt(hover)}</div>}
       </div>
       <div className="transport-row">
-        <button className="tp" title={$t('回到開頭 (Home)')} onClick={() => S.setTime(0)}><SkipBack size={15} /></button>
+        <button className="tp" title={$t('回到開頭 (Home)')} onClick={() => S.setTime(t0)}><SkipBack size={15} /></button>
         <button className="tp" title={$t('上一格 (←)')} onClick={step(-1 / 60)}><StepBack size={15} /></button>
         <button className="tp play" title={$t('播放 / 暫停 (Space)')} onClick={S.togglePlay}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
         <button className="tp" title={$t('下一格 (→)')} onClick={step(1 / 60)}><StepForward size={15} /></button>
-        <button className="tp" title={$t('到結尾 (End)')} onClick={() => S.setTime(dur)}><SkipForward size={15} /></button>
-        <span className="tp-time">{fmt(time)} <span className="muted">/ {fmt(dur)}</span></span>
+        <button className="tp" title={$t('到結尾 (End)')} onClick={() => S.setTime(scope ? scope.b - 1 / 60 : dur)}><SkipForward size={15} /></button>
+        <span className="tp-time">{fmt(scope ? local : time)} <span className="muted">/ {fmt(total)}</span></span>
         <span className="spacer" />
-        {loop && <button className="tp on" title={$t('停止循環 (Esc)')} onClick={() => S.setLoop(null)}><Repeat size={15} /></button>}
+        {loop && !scope && <button className="tp on" title={$t('停止循環 (Esc)')} onClick={() => S.setLoop(null)}><Repeat size={15} /></button>}
         <button
           className={`tp ${grid ? 'on' : ''}`}
           title={$t('輔助網格（右鍵設定格數）')}
@@ -106,6 +112,7 @@ function Transport() {
           #
         </button>
         {gridPop && <GridPopover at={gridPop} close={() => setGridPop(null)} />}
+        {!scope && (
         <button
           className="tp"
           title={floating ? $t('停駐回主視窗') : $t('分離成浮動視窗')}
@@ -113,6 +120,7 @@ function Transport() {
         >
           {floating ? <Minimize2 size={15} /> : <PictureInPicture2 size={15} />}
         </button>
+        )}
       </div>
     </div>
   );

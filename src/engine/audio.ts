@@ -1,6 +1,7 @@
 import type { AudioClip, Clip, Media, Tracks } from '../store';
 import type { Module } from '../modules/builtin';
 import { plainSpeed } from './remap';
+import { timeStretch } from './stretch';
 
 export const SAMPLE_RATE = 48000;
 
@@ -49,77 +50,32 @@ export function fadeGain(a: AudioClip, local: number) {
   return Math.min(1, Math.max(0, g));
 }
 
-// ───────────── 預覽播放（音訊軌）─────────────
+// ───────────── 要播放的聲音（預覽與匯出共用）─────────────
 
-const els = new Map<string, HTMLAudioElement>();
-
-export function syncAudioPreview(s: { audios: AudioClip[]; media: Media[]; tracks: Tracks; clips?: Clip[] }, t: number, playing: boolean) {
-  const ids = new Set(s.audios.map((a) => a.id));
-  for (const [id, el] of els) if (!ids.has(id)) { el.pause(); els.delete(id); }
-  for (const a of s.audios) {
-    const m = s.media.find((x) => x.id === a.mediaId);
-    if (!m || m.missing) continue;
-    let el = els.get(a.id);
-    if (!el || el.dataset.src !== m.url) {
-      el?.pause();
-      el = new Audio(m.url);
-      el.preload = 'auto';
-      el.dataset.src = m.url;
-      els.set(a.id, el);
-    }
-    const local = t - a.start;
-    const active = playing && local >= 0 && local < a.duration && !audioMuted(s, a);
-    if (!active) {
-      if (!el.paused) el.pause();
-      continue;
-    }
-    el.volume = Math.min(1, Math.max(0, a.volume * fadeGain(a, local)));
-    const rate = a.rate ?? 1;
-    if (Math.abs(el.playbackRate - rate) > 1e-3) el.playbackRate = Math.min(16, Math.max(0.0625, rate));
-    const want = a.in + local * rate;
-    if (el.paused) {
-      el.currentTime = want;
-      el.play().catch(() => {});
-    } else if (Math.abs(el.currentTime - want) > 0.12) el.currentTime = want;
-  }
+/** 一段要播放的聲音：時間軸 start 起播放素材 in 秒處，長 duration（時間軸秒），速率 rate */
+export interface AudioPlanItem {
+  url: string;
+  start: number;
+  duration: number;
+  in: number;
+  rate: number;
+  volume: number;
+  fadeIn: number;
+  fadeOut: number;
+  /** 變速時保持音調 */
+  keepPitch: boolean;
 }
 
-export function stopAudioPreview() {
-  for (const el of els.values()) el.pause();
-}
+type PlanInput = { audios: AudioClip[]; clips: Clip[]; media: Media[]; tracks: Tracks };
 
-// ───────────── 匯出混音 ─────────────
-
-export async function mixdown(
-  s: { audios: AudioClip[]; clips: Clip[]; media: Media[]; tracks: Tracks },
-  modules: Map<string, Module>,
-  duration: number,
-): Promise<AudioBuffer | null> {
-  const ctx = new OfflineAudioContext(2, Math.max(1, Math.ceil(duration * SAMPLE_RATE)), SAMPLE_RATE);
-  let any = false;
+export function audioPlan(s: PlanInput, modules: Map<string, Module>): AudioPlanItem[] {
   const media = new Map(s.media.map((m) => [m.id, m]));
-
+  const out: AudioPlanItem[] = [];
   for (const a of s.audios) {
     const m = media.get(a.mediaId);
     if (!m || m.missing || audioMuted(s, a) || a.volume <= 0) continue;
-    const buf = await getAudioBuffer(m.url);
-    if (!buf) continue;
-    any = true;
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    const g = ctx.createGain();
-    const end = a.start + a.duration;
-    g.gain.setValueAtTime(a.fadeIn > 0 ? 0 : a.volume, a.start);
-    if (a.fadeIn > 0) g.gain.linearRampToValueAtTime(a.volume, a.start + a.fadeIn);
-    if (a.fadeOut > 0) {
-      g.gain.setValueAtTime(a.volume, Math.max(a.start, end - a.fadeOut));
-      g.gain.linearRampToValueAtTime(0, end);
-    }
-    src.connect(g).connect(ctx.destination);
-    src.playbackRate.value = a.rate ?? 1;
-    src.start(a.start, a.in, a.duration * (a.rate ?? 1));
+    out.push({ url: m.url, start: a.start, duration: a.duration, in: a.in, rate: a.rate ?? 1, volume: a.volume, fadeIn: a.fadeIn, fadeOut: a.fadeOut, keepPitch: a.keepPitch !== false });
   }
-
   // 影片原音：只有一般變速（非倒放 / 非自訂重映射）的片段會帶聲音
   for (const c of s.clips) {
     const m = media.get(c.mediaId);
@@ -127,16 +83,169 @@ export async function mixdown(
     if (c.link && s.audios.some((a) => a.link === c.link)) continue; // 聲音由連結的音訊片段負責
     const speed = plainSpeed(c, modules);
     if (!speed) continue;
-    const buf = await getAudioBuffer(m.url);
-    if (!buf) continue;
+    out.push({ url: m.url, start: c.start, duration: c.duration, in: c.in, rate: speed, volume: c.volume, fadeIn: 0, fadeOut: 0, keepPitch: c.keepPitch !== false });
+  }
+  return out;
+}
+
+// ───────────── 保持音調的變速：只處理片段用到的那段，結果快取 ─────────────
+
+const stretched = new Map<string, Promise<AudioBuffer | null>>();
+const needsStretch = (p: AudioPlanItem) => p.keepPitch && Math.abs(p.rate - 1) > 1e-3;
+const stretchKey = (p: AudioPlanItem) => `${p.url}|${p.in.toFixed(4)}|${(p.duration * p.rate).toFixed(4)}|${p.rate.toFixed(5)}`;
+
+/**
+ * 取得要播放的音訊：一般情況直接用解碼好的素材；保持音調的變速片段 → 先做成「已經變速、音調不變」的那一段，
+ * 之後以 1× 播放（回傳改寫過的 in / rate）。
+ */
+function sourceFor(p: AudioPlanItem): Promise<{ buf: AudioBuffer; p: AudioPlanItem } | null> {
+  if (!needsStretch(p)) return getAudioBuffer(p.url).then((buf) => (buf ? { buf, p } : null));
+  const key = stretchKey(p);
+  let job = stretched.get(key);
+  if (!job) {
+    job = getAudioBuffer(p.url).then((src) => {
+      if (!src) return null;
+      const a = Math.max(0, Math.floor(p.in * src.sampleRate));
+      const b = Math.min(src.length, Math.ceil((p.in + p.duration * p.rate) * src.sampleRate));
+      if (b <= a) return null;
+      const chans = Array.from({ length: src.numberOfChannels }, (_, i) => src.getChannelData(i).subarray(a, b));
+      const out = timeStretch(chans, p.rate);
+      const buf = new AudioBuffer({ length: out[0].length, numberOfChannels: out.length, sampleRate: src.sampleRate });
+      out.forEach((d, i) => buf.copyToChannel(d, i));
+      return buf;
+    });
+    stretched.set(key, job);
+    // 快取別無限長大（拖速度滑桿時會產生很多版本）
+    if (stretched.size > 48) stretched.delete(stretched.keys().next().value!);
+  }
+  return job.then((buf) => (buf ? { buf, p: { ...p, in: 0, rate: 1 } } : null));
+}
+
+/**
+ * 把一段聲音排進 AudioContext。
+ * c0 = 時間軸 t0 對應的 context 時間；已經過去的部分會從中間開始播。
+ */
+function schedule(ctx: BaseAudioContext, dest: AudioNode, buf: AudioBuffer, p: AudioPlanItem, t0: number, c0: number) {
+  const now = 'currentTime' in ctx ? ctx.currentTime : 0;
+  const end = p.start + p.duration;
+  if (end <= t0) return null;
+  let when = c0 + (p.start - t0);
+  let offset = p.in;
+  let dur = p.duration;
+  const skip = Math.max(0, Math.max(now, c0) - when); // 已經錯過的時間軸秒數
+  if (skip >= dur) return null;
+  when += skip;
+  offset += skip * p.rate;
+  dur -= skip;
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+  src.playbackRate.value = p.rate;
+  const g = ctx.createGain();
+  // 音量 / 淡入淡出：時間軸時間 T → context 時間 c0 + (T - t0)
+  const at = (T: number) => c0 + (T - t0);
+  const gain = (local: number) => {
+    let k = 1;
+    if (p.fadeIn > 0) k = Math.min(k, local / p.fadeIn);
+    if (p.fadeOut > 0) k = Math.min(k, (p.duration - local) / p.fadeOut);
+    return p.volume * Math.min(1, Math.max(0, k));
+  };
+  const local0 = when - c0 + t0 - p.start;
+  g.gain.setValueAtTime(gain(local0), when);
+  if (p.fadeIn > 0 && local0 < p.fadeIn) g.gain.linearRampToValueAtTime(p.volume, at(p.start + p.fadeIn));
+  if (p.fadeOut > 0) {
+    const fs = Math.max(local0, p.duration - p.fadeOut);
+    g.gain.setValueAtTime(gain(fs), at(p.start + fs));
+    g.gain.linearRampToValueAtTime(0, at(end));
+  }
+  src.connect(g).connect(dest);
+  src.start(when, offset, dur * p.rate);
+  return src;
+}
+
+// ───────────── 預覽播放（Web Audio：用 AudioContext 的時鐘排程，不會因為 <audio> 元素對時而卡頓）─────────────
+
+let actx: AudioContext | null = null;
+let live: AudioBufferSourceNode[] = [];
+let gen = 0;
+/** 目前排程對應的時間軸起點與 context 時間 */
+let anchor: { t0: number; c0: number } | null = null;
+let lastInput: unknown[] = [];
+/** 上一次看到的時間軸時間與畫面時鐘（偵測跳動用） */
+let tick: { t: number; perf: number } | null = null;
+let modMap: { src: Module[] | null; map: Map<string, Module> } = { src: null, map: new Map() };
+let prepTimer: ReturnType<typeof setTimeout> | undefined;
+
+function stopLive() {
+  gen++;
+  for (const n of live) {
+    try { n.stop(); } catch { /* 還沒開始 */ }
+    n.disconnect();
+  }
+  live = [];
+  anchor = null;
+  tick = null;
+}
+
+export function syncAudioPreview(s: PlanInput & { modules: Module[] }, t: number, playing: boolean) {
+  if (modMap.src !== s.modules) modMap = { src: s.modules, map: new Map(s.modules.map((m) => [m.id, m])) };
+  const input = [s.audios, s.clips, s.media, s.tracks, s.modules];
+  const changed = input.some((x, i) => x !== lastInput[i]);
+  lastInput = input;
+  if (changed) {
+    for (const p of audioPlan(s, modMap.map)) void getAudioBuffer(p.url); // 先解碼，按下播放時就有聲音
+    // 保持音調的變速片段：停止編輯一下子之後才預先處理（拖速度滑桿時不要每一格都算）
+    clearTimeout(prepTimer);
+    prepTimer = setTimeout(() => {
+      for (const p of audioPlan(s, modMap.map)) if (needsStretch(p)) void sourceFor(p);
+    }, 400);
+  }
+  if (!playing) {
+    if (anchor) stopLive();
+    return;
+  }
+  actx ??= new AudioContext({ latencyHint: 'interactive' });
+  // 還沒開始跑（瀏覽器的自動播放限制、剛建立）：時鐘不會動，等它跑起來再排程，不然會一直重排
+  if (actx.state !== 'running') {
+    void actx.resume();
+    if (anchor) stopLive();
+    return;
+  }
+  // 時間軸跳動（拖播放頭、循環、Home/End）或內容改了 → 重新排程。
+  // 用畫面時鐘判斷「跳動」：AudioContext 剛啟動時 currentTime 會停一下，拿它比會誤判
+  const now = performance.now();
+  const jumped = !tick || Math.abs(t - (tick.t + (now - tick.perf) / 1000)) > 0.25;
+  tick = { t, perf: now };
+  if (!changed && anchor && !jumped) return;
+  stopLive();
+  tick = { t, perf: now };
+  const my = gen;
+  const ctx = actx;
+  const c0 = ctx.currentTime + 0.02;
+  anchor = { t0: t, c0 };
+  for (const p of audioPlan(s, modMap.map)) {
+    if (p.start + p.duration <= t) continue;
+    void sourceFor(p).then((r) => {
+      if (!r || my !== gen) return;
+      const n = schedule(ctx, ctx.destination, r.buf, r.p, t, c0);
+      if (n) live.push(n);
+    });
+  }
+}
+
+export function stopAudioPreview() {
+  stopLive();
+}
+
+// ───────────── 匯出混音 ─────────────
+
+export async function mixdown(s: PlanInput, modules: Map<string, Module>, duration: number): Promise<AudioBuffer | null> {
+  const ctx = new OfflineAudioContext(2, Math.max(1, Math.ceil(duration * SAMPLE_RATE)), SAMPLE_RATE);
+  let any = false;
+  for (const p of audioPlan(s, modules)) {
+    const r = await sourceFor(p);
+    if (!r) continue;
     any = true;
-    const src = ctx.createBufferSource();
-    src.buffer = buf;
-    src.playbackRate.value = speed;
-    const g = ctx.createGain();
-    g.gain.value = c.volume;
-    src.connect(g).connect(ctx.destination);
-    src.start(c.start, c.in, c.duration * speed);
+    schedule(ctx, ctx.destination, r.buf, r.p, 0, 0);
   }
   return any ? ctx.startRendering() : null;
 }

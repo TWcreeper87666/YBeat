@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "test": "esbuild tests/dock.test.ts --bundle --platform=node --outfile=node_modules/.cache/dock.test.cjs --log-level=warning && node node_modules/.cache/dock.test.cjs && esbuild tests/overlap.test.ts --bundle --platform=node --outfile=node_modules/.cache/overlap.test.cjs --log-level=warning && node node_modules/.cache/overlap.test.cjs"
+    "test": "esbuild tests/snap.test.ts --bundle --platform=node --outfile=node_modules/.cache/snap.test.cjs --log-level=warning && node node_modules/.cache/snap.test.cjs && esbuild tests/stretch.test.ts --bundle --platform=node --outfile=node_modules/.cache/stretch.test.cjs --log-level=warning && node node_modules/.cache/stretch.test.cjs && esbuild tests/tracks.test.ts --bundle --platform=node --outfile=node_modules/.cache/tracks.test.cjs --log-level=warning && node node_modules/.cache/tracks.test.cjs && esbuild tests/dock.test.ts --bundle --platform=node --outfile=node_modules/.cache/dock.test.cjs --log-level=warning && node node_modules/.cache/dock.test.cjs && esbuild tests/overlap.test.ts --bundle --platform=node --outfile=node_modules/.cache/overlap.test.cjs --log-level=warning && node node_modules/.cache/overlap.test.cjs"
   },
   "dependencies": {
     "@codemirror/lang-cpp": "^6.0.2",

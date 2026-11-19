@@ -12,3 +12,27 @@
 - [x] 所有效果都要有遮罩功能
 - [x] 素材新增色板
 - [x] 新增字幕元素
+- [x] add more edit transitions, like scale+video play/reverse idk
+- [x] 去背也當作一個effect or as a default property
+- [x] 影片audio軌道分離後，properties就不應該有sound了
+- [x] timeline tab, home/end key, preventDefault so y scrollbar won't move
+- [x] 點擊未選中的片段時，若playhead已經在片段內部，就不要動到playhead。如果本來就已經選中片段，再點一次的話再回到開頭
+- [x] 跟timeline tab互動時要把其他focus停掉，例如tab的search欄位，不然我已經在timeline tab操作，按下ctrl+Z結果undo的是search欄位的搜尋
+- [x] timeline播放，經過片段間隙處會卡，就算我已經把預覽品質調整為33%，你確定用web而不是exe啥的真的沒問題嗎..
+- [x] text tab無法透過滑鼠滾動
+- [x] 拖曳某一個tabs區塊標題列右側空白時，應該要可以整塊一起移動，不然目前如果有多個tab我會需要將每個tab都移動一次
+- [x] properties tab寬度很容易讓屬性不能完整顯示，無法改善的話我覺得變成hover時會顯示完整property name也不是不行
+- [x] 拖曳影片到timeline tab，為什麼不是完整的影片片段啊
+- [x] 點選片段前方的空白處按下delete或backspace，應該要可以移除空白並將後面內容往前推，其實應該就是根據選中的track以及playhead位置並且沒有選取片段來判斷之類的。
+- [x] 為什麼軌道沒辦法隨心所欲的移動順序啊?軌道就是軌道沒有在分什麼audio/video/effect之類的啦
+- [x] alt+delete片段時，其他軌道也要一起往前推，就像威力導演那樣
+- [ ] 額外UI用於自定義遮罩形狀，片段的屬性本身就要有mask（片段遮罩已完成：屬性面板「＋遮罩」；自訂形狀（鋼筆 / 多邊形）還沒做）
+- [x] 片段的混合模式property，加法、色減等等啥的
+- [x] zoom blur transition, 放大位置應該要可以自定義
+- [x] 按ctrl時timeline tab的所有片段不需要有那個黃色的顯示，只有按著ctrl並且滑鼠處於某個片段的開頭或結尾時再出現
+- [ ] 融入AI，自行輸入gemini api key，使用gemini-3.5-flash-lite，可以介紹怎麼使用，並幫忙生成轉場代碼
+
+- [ ] 色板custom color ui 優化
+- [x] editor window, property panel, 跟preview panel水平排時, property內部的property field min-width size也應該固定成最小值，而不是等到property panel本身也變窄了才跟著改變min-width size
+- [x] 滑鼠的旋轉icon可以再小一些
+- [ ] 

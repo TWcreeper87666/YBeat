@@ -4,7 +4,9 @@ import { persist } from 'zustand/middleware';
 import { BUILTIN_MODULES, NEW_MODULE_TEMPLATES, type Module, type ModuleKind } from './modules/builtin';
 import { parseDuration, type ParamValues } from './engine/params';
 import { clipSource, plainSpeed } from './engine/remap';
-import { DEFAULT_TRANSFORM, EASES, type EaseName, type Fit, type Transform } from './engine/transform';
+import { DEFAULT_TRANSFORM, EASES, normalizeScale, type EaseName, type Fit, type Transform } from './engine/transform';
+import { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualRows, type TrackKind, type TrackState, type Tracks } from './engine/tracks';
+export { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualRows, type TrackKind, type TrackState, type Tracks };
 import { ANIM_PROPS, newKey, scaleKeyMap, splitKeys, type Ease, type Keyframe, type Keys } from './engine/keyframes';
 import { fitStart, groupFits, resolveShift, type Span } from './engine/overlap';
 import { DEFAULT_TEXT, TEXT_PRESETS, type TextStyle } from './engine/text';
@@ -78,7 +80,10 @@ export interface Clip extends ItemBase {
   /** 轉出（後面沒有緊貼的片段時，轉到透明） */
   transitionOut?: TransitionRef | null;
   fit: Fit;
+  /** 舊版的水平翻轉（載入時轉成負的 scaleX，之後一律是 false） */
   flipX: boolean;
+  /** 縮放 X / Y 不等比例（沒設定 = 等比例：改其中一個，另一個依比例跟著變、各自保留正負號） */
+  scaleUnlinked?: boolean;
   /** 沒有關鍵影格時的固定值 */
   transform: Transform;
   /** 關鍵影格（片段內時間） */
@@ -88,10 +93,18 @@ export interface Clip extends ItemBase {
   rate: number;
   /** 文字 / 字幕片段（沒有素材，mediaId 為空字串） */
   text?: TextStyle;
+  /** 影片原音變速時保持音調（沒設定 = 保持；有連結音訊時看音訊片段的設定） */
+  keepPitch?: boolean;
+  /** 混合模式（疊到下面圖層的方式），預設 normal */
+  blend?: BlendMode;
+  /** 原音已分離成獨立音訊片段（影片本身不再出聲，屬性面板不顯示「聲音」） */
+  audioSplit?: boolean;
   /** 舊版欄位，載入時會轉成 keys */
   transformEnd?: Transform | null;
   ease?: EaseName;
 }
+
+export type BlendMode = 'normal' | 'add' | 'screen' | 'multiply' | 'subtract' | 'lighten';
 
 export interface FxItem extends ItemBase {
   id: string;
@@ -120,22 +133,9 @@ export interface AudioClip extends ItemBase {
   fadeOut: number;
   /** 播放速率 */
   rate: number;
+  /** 變速時保持音調（沒設定 = 保持） */
+  keepPitch?: boolean;
 }
-
-export type TrackKind = 'video' | 'fx' | 'audio';
-export interface TrackState {
-  hidden?: boolean;
-  muted?: boolean;
-  /** 軌道高度（px），沒設定就用預設 */
-  height?: number;
-  /** 特效軌：下面有幾條影片軌（特效只作用在它下面的影片軌，跟調整圖層一樣）；沒設定 = 最上層 */
-  level?: number;
-  /** 音訊軌：上面有幾條影片 / 特效軌（決定它顯示在哪；沒設定 = 在所有影片 / 特效軌下面） */
-  row?: number;
-}
-export const TRACK_H: Record<'video' | 'fx' | 'audio', number> = { video: 58, fx: 38, audio: 50 };
-export type Tracks = Record<TrackKind, TrackState[]>;
-export const DEFAULT_TRACKS: Tracks = { video: [{}], fx: [{}], audio: [{}] };
 
 /** 輸出畫面大小（比例） */
 export interface Format { w: number; h: number }
@@ -222,7 +222,10 @@ interface State {
   /** 換成另一個特效模組（參數與參數的關鍵影格會清掉，遮罩保留） */
   replaceEffect(id: string, moduleId: string): void;
   relinkMedia(oldId: string, newId: string): void;
-  removeSelection(ripple?: boolean): void;
+  /** ripple = true：同一軌往前推；'all'：所有軌道一起往前推（其他軌被擋住時只推到不重疊為止） */
+  removeSelection(ripple?: boolean | 'all'): void;
+  /** 沒有選取時：移除選中軌道上播放頭所在的空白，後面的項目往前推 */
+  removeGap(): boolean;
   split(): void;
   trim(side: 'start' | 'end'): void;
   nudge(dt: number): void;
@@ -233,6 +236,8 @@ interface State {
   /** level：特效軌放在第幾條影片軌上方（沒給就自動） */
   addTrack(kind: TrackKind, at?: number, level?: number, row?: number): void;
   moveTrack(kind: TrackKind, from: number, to: number): void;
+  /** 依顯示順序（由上到下、所有軌道）重新排列；影片 / 特效 / 音訊軌可以任意交錯 */
+  reorderTracks(order: { kind: TrackKind; idx: number }[]): void;
   /** 刪除軌道（連同上面的項目）；影片軌至少要留一條 */
   deleteTrack(kind: TrackKind, idx: number): boolean;
   /** 軌道上有幾個項目（刪除前確認用） */
@@ -305,6 +310,19 @@ export function makeClip(p: Partial<Clip> & { mediaId: string }): Clip {
     rate: 1,
     ...p,
   };
+  // 舊版只有 scale → scaleX / scaleY（transformEnd 也要轉，下面的舊版動態轉換才拿得到值）
+  Object.assign(c, normalizeScale(c));
+  if (c.transformEnd && (c.transformEnd as { scale?: number }).scale !== undefined) {
+    const s = (c.transformEnd as { scale?: number }).scale!;
+    c.transformEnd = { ...c.transformEnd, scaleX: s, scaleY: s };
+  }
+  // 舊版「水平翻轉」→ 負的縮放 X（關鍵影格也一起反過來）
+  if (c.flipX) {
+    c.transform = { ...c.transform, scaleX: -c.transform.scaleX };
+    if (c.keys.scaleX) c.keys = { ...c.keys, scaleX: c.keys.scaleX.map((k) => ({ ...k, v: -k.v })) };
+    if (c.transformEnd) c.transformEnd = { ...c.transformEnd, scaleX: -c.transformEnd.scaleX };
+    c.flipX = false;
+  }
   // 舊版「起點 → 終點」動態 → 兩個關鍵影格
   if (c.transformEnd) {
     const keys: Keys = { ...c.keys };
@@ -393,44 +411,6 @@ export function attachedAudioIds(s: { clips: Clip[]; audios: AudioClip[] }): Set
 
 /** 影片片段連結的音訊片段 */
 export const linkedAudioOf = (s: { audios: AudioClip[] }, c: Clip) => (c.link ? s.audios.find((a) => a.link === c.link) : undefined);
-
-/** 特效軌下面有幾條影片軌（0 ~ 影片軌數） */
-export function fxLevel(tracks: Tracks, idx: number): number {
-  const n = tracks.video.length;
-  const l = tracks.fx[idx]?.level;
-  return l === undefined ? n : Math.max(0, Math.min(n, l));
-}
-
-/** 影片 / 特效軌由上到下的顯示順序（特效軌插在影片軌之間） */
-export function visualRows(tracks: Tracks): { kind: 'video' | 'fx'; idx: number }[] {
-  const rows: { kind: 'video' | 'fx'; idx: number }[] = [];
-  const n = tracks.video.length;
-  for (let lv = n; lv >= 0; lv--) {
-    tracks.fx
-      .map((_, i) => i)
-      .filter((i) => fxLevel(tracks, i) === lv)
-      .reverse()
-      .forEach((i) => rows.push({ kind: 'fx', idx: i }));
-    if (lv > 0) rows.push({ kind: 'video', idx: lv - 1 });
-  }
-  return rows;
-}
-
-/** 所有軌道由上到下的顯示順序（音訊軌可以排在影片 / 特效軌之間） */
-export function displayRows(tracks: Tracks, upperAt: 'top' | 'bottom'): { kind: TrackKind; idx: number }[] {
-  const layered = upperAt === 'top' ? visualRows(tracks) : [...visualRows(tracks)].reverse();
-  const L = layered.length;
-  const audio = tracks.audio
-    .map((t, i) => ({ i, row: Math.max(0, Math.min(L, t.row ?? L)) }))
-    .sort((a, b) => a.row - b.row || a.i - b.i);
-  const out: { kind: TrackKind; idx: number }[] = [];
-  let k = 0;
-  for (let p = 0; p <= L; p++) {
-    while (k < audio.length && audio[k].row === p) out.push({ kind: 'audio', idx: audio[k++].i });
-    if (p < L) out.push(layered[p]);
-  }
-  return out;
-}
 
 export const useStore = create<State>()(
   persist(
@@ -618,7 +598,7 @@ export const useStore = create<State>()(
           if (!mediaUsable(media)) return;
           if (media.kind === 'audio') return s.addAudio(mediaId, start, undefined, range);
           track = Math.min(track, s.tracks.video.length - 1);
-          const duration = range ? range.duration : media.kind === 'video' ? Math.min(media.duration, 6) : 2;
+          const duration = range ? range.duration : media.kind === 'video' ? media.duration : 2; // 影片放完整長度
           const clip = makeClip({
             mediaId,
             track,
@@ -813,16 +793,77 @@ export const useStore = create<State>()(
             .map(({ type, id }) => ({ type, it: findItem(type, id) }))
             .filter((d): d is { type: ItemType; it: AnyItem } => !!d.it)
             .sort((a, b) => b.it.start - a.it.start); // 從後面刪，波紋位移才不會互相干擾
-          if (!dels.length) return;
+          if (!dels.length) return void get().removeGap();
           const lists: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios };
-          for (const { type, it } of dels) {
-            const key = LIST[type];
-            const end = it.start + it.duration;
-            let l = lists[key].filter((x) => x.id !== it.id);
-            if (ripple) l = l.map((x) => (x.track === it.track && x.start >= end - 1e-3 ? { ...x, start: Math.max(0, x.start - it.duration) } : x));
-            lists[key] = l;
+          if (ripple === 'all') {
+            const gone = new Set(dels.map((d) => keyOf(d.type, d.it.id)));
+            for (const t of ['clip', 'effect', 'audio'] as ItemType[]) lists[LIST[t]] = lists[LIST[t]].filter((x) => !gone.has(keyOf(t, x.id)));
+            // 刪掉的時間範圍取聯集，從後面往前處理
+            const ranges = dels.map((d) => [d.it.start, d.it.start + d.it.duration]).sort((a, b) => a[0] - b[0]);
+            const merged: number[][] = [];
+            for (const r of ranges) {
+              const last = merged[merged.length - 1];
+              if (last && r[0] <= last[1] + 1e-6) last[1] = Math.max(last[1], r[1]);
+              else merged.push([...r]);
+            }
+            for (const [a, b] of merged.reverse()) {
+              const attached = attachedAudioIds({ clips: lists.clips as Clip[], audios: lists.audios as AudioClip[] });
+              const lanes = new Map<string, number>(); // 每條軌最多能往前推多少
+              for (const t of ['clip', 'effect', 'audio'] as ItemType[]) {
+                for (const x of lists[LIST[t]]) {
+                  if (t === 'audio' && attached.has(x.id)) continue;
+                  const lane = `${KIND_OF[t]}:${x.track}`;
+                  if (!lanes.has(lane)) lanes.set(lane, b - a);
+                  // 留在原地、但結尾超過 a 的項目會擋住後面的東西
+                  if (x.start < b - 1e-3 && x.start + x.duration > a) lanes.set(lane, Math.min(lanes.get(lane)!, Math.max(0, b - (x.start + x.duration))));
+                }
+              }
+              for (const t of ['clip', 'effect', 'audio'] as ItemType[]) {
+                lists[LIST[t]] = lists[LIST[t]].map((x) => {
+                  if (t === 'audio' && attached.has(x.id)) return x; // 連結音訊跟著影片同步
+                  const d = lanes.get(`${KIND_OF[t]}:${x.track}`) ?? 0;
+                  return d > 1e-6 && x.start >= b - 1e-3 ? { ...x, start: Math.max(0, x.start - d) } : x;
+                });
+              }
+            }
+          } else {
+            for (const { type, it } of dels) {
+              const key = LIST[type];
+              const end = it.start + it.duration;
+              let l = lists[key].filter((x) => x.id !== it.id);
+              if (ripple) l = l.map((x) => (x.track === it.track && x.start >= end - 1e-3 ? { ...x, start: Math.max(0, x.start - it.duration) } : x));
+              lists[key] = l;
+            }
           }
           set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[], selection: null, selected: [] });
+        },
+
+        removeGap: () => {
+          const s = get();
+          const at = s.activeTrack;
+          if (!at) return false;
+          const lane = `${at.kind}:${at.idx}`;
+          const spans = spansOf(s).filter((x) => x.lane === lane);
+          const t = s.time;
+          if (spans.some((x) => t >= x.start - 1e-6 && t < x.start + x.duration - 1e-6)) return false;
+          const prevEnd = Math.max(0, ...spans.filter((x) => x.start + x.duration <= t + 1e-6).map((x) => x.start + x.duration));
+          const after = spans.filter((x) => x.start >= t - 1e-6);
+          if (!after.length) return false;
+          const nextStart = Math.min(...after.map((x) => x.start));
+          const gap = nextStart - prevEnd;
+          if (gap < 1e-6) return false;
+          const attached = attachedAudioIds(s);
+          const patches: Record<string, Partial<AnyItem>> = {};
+          (['clip', 'effect', 'audio'] as ItemType[]).forEach((type) => {
+            if (KIND_OF[type] !== at.kind) return;
+            for (const it of s[LIST[type]] as AnyItem[]) {
+              if (it.track !== at.idx || it.start < nextStart - 1e-6 || (type === 'audio' && attached.has(it.id))) continue;
+              patches[keyOf(type, it.id)] = { start: Math.max(0, it.start - gap) };
+            }
+          });
+          s.patchItems(patches);
+          s.setTime(prevEnd);
+          return true;
         },
 
         split: () => {
@@ -959,6 +1000,25 @@ export const useStore = create<State>()(
               activeTrack: s.activeTrack?.kind === kind ? { kind, idx: newIdx.get(s.activeTrack.idx) ?? s.activeTrack.idx } : s.activeTrack,
               tracks: { ...s.tracks, [kind]: order.map((o) => s.tracks[kind][o]) },
               ...(kind === 'video' ? { clips: remap(s.clips) } : kind === 'fx' ? { effects: remap(s.effects) } : { audios: remap(s.audios) }),
+            };
+          }),
+
+        reorderTracks: (order) =>
+          set((s) => {
+            const all = displayRows(s.tracks, s.upperAt);
+            if (order.length !== all.length) return {};
+            const { tracks, maps } = tracksFromOrder(s.tracks, order, s.upperAt);
+            const remap = <T extends AnyItem>(items: T[], kind: TrackKind) => items.map((x) => {
+              const n = maps[kind].get(x.track);
+              return n === undefined || n === x.track ? x : { ...x, track: n };
+            });
+            const act = s.activeTrack;
+            return {
+              tracks,
+              clips: remap(s.clips, 'video'),
+              effects: remap(s.effects, 'fx'),
+              audios: remap(s.audios, 'audio'),
+              activeTrack: act ? { kind: act.kind, idx: maps[act.kind].get(act.idx) ?? act.idx } : act,
             };
           }),
 
@@ -1103,7 +1163,7 @@ export const useStore = create<State>()(
           if (!list.some((x) => x.type === 'clip') || !list.some((x) => x.type === 'audio')) return false;
           const id = uid();
           const patches: Record<string, Partial<AnyItem>> = {};
-          for (const { type, id: iid } of list) if (type !== 'effect') patches[keyOf(type, iid)] = { link: id };
+          for (const { type, id: iid } of list) if (type !== 'effect') patches[keyOf(type, iid)] = type === 'clip' ? { link: id, audioSplit: undefined } : { link: id };
           s.patchItems(patches);
           return true;
         },
@@ -1119,7 +1179,12 @@ export const useStore = create<State>()(
             if (a && c) clipTrackOf.set(a.id, c.track);
           }
           const patches: Record<string, Partial<AnyItem>> = {};
-          for (const { type, id } of targets()) patches[keyOf(type, id)] = { link: undefined };
+          for (const { type, id } of targets()) {
+            // 影片原本的聲音由連結音訊負責 → 分開後影片本身要靜音，不然會跟獨立出來的音訊重複
+            const c = type === 'clip' ? before.clips.find((x) => x.id === id) : undefined;
+            const hadAudio = !!c?.link && before.audios.some((a) => a.link === c.link);
+            patches[keyOf(type, id)] = hadAudio ? { link: undefined, volume: 0, audioSplit: true } : { link: undefined };
+          }
           get().patchItems(patches);
           // 分開後：影片軌的下一條是音訊軌而且有空位 → 放進去；否則在影片軌正下方新增一條音訊軌
           for (const [aid, vt] of clipTrackOf) {
@@ -1265,14 +1330,18 @@ export const useStore = create<State>()(
       };
     },
     {
-      name: 'beatsync-modules',
+      name: 'ybeat-modules',
       version: 1,
       // 模組（你寫的程式碼）存在 localStorage；專案與素材另外存在 IndexedDB（見 engine/project.ts）
       partialize: (s) => ({ modules: s.modules }),
       merge: (persisted, current) => {
         const saved: Module[] = (persisted as { modules?: Module[] })?.modules ?? [];
         const byId = new Map(saved.map((m) => [m.id, m]));
-        const modules = BUILTIN_MODULES.map((b) => (byId.has(b.id) ? { ...b, code: byId.get(b.id)!.code } : b));
+        // 存檔裡的內建模組程式碼（可能被使用者改過）只在版本相同時沿用
+        const modules = BUILTIN_MODULES.map((b) => {
+          const m = byId.get(b.id);
+          return m && (m.rev ?? 1) === (b.rev ?? 1) ? { ...b, code: m.code } : b;
+        });
         for (const m of saved) if (!BUILTIN_MODULES.some((b) => b.id === m.id)) modules.push(m);
         return { ...current, modules };
       },

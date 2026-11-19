@@ -5,7 +5,7 @@ import { resetHistory } from './history';
 
 /** 專案自動存檔：素材檔案（Blob）與時間軸存在 IndexedDB，重新整理不會遺失 */
 
-const DB_NAME = 'beatsync';
+const DB_NAME = 'ybeat';
 let dbp: Promise<IDBDatabase> | null = null;
 
 function db() {

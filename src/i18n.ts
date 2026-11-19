@@ -12,7 +12,7 @@ export const LANGS: { id: Lang; label: string }[] = [
   { id: 'ja', label: '日本語' },
 ];
 
-const KEY = 'beatsync-lang';
+const KEY = 'ybeat-lang';
 
 function detect(): Lang {
   try {

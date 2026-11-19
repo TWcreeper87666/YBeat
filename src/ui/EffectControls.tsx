@@ -12,6 +12,25 @@ import { DragNumber } from './DragNumber';
 import { openMenu, useKeySel, useLayout, type KeyRef } from './uiStore';
 import { ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Timer } from 'lucide-react';
 
+/** 屬性名稱被截斷時，滑鼠移上去立刻浮出完整名稱（屬性面板很窄時用） */
+function installLabelTip() {
+  let tip: HTMLDivElement | null = null;
+  const hide = () => tip?.remove();
+  document.addEventListener('mouseover', (e) => {
+    const el = (e.target as HTMLElement).closest?.('.ec-label') as HTMLElement | null;
+    if (!el || el.scrollWidth <= el.clientWidth + 1) return hide();
+    tip ??= Object.assign(document.createElement('div'), { className: 'ec-tip' });
+    tip.textContent = el.textContent;
+    const r = el.getBoundingClientRect();
+    tip.style.left = `${r.left - 4}px`;
+    tip.style.top = `${r.top + r.height / 2}px`;
+    document.body.appendChild(tip);
+  });
+  document.addEventListener('pointerdown', hide, true);
+  window.addEventListener('blur', hide);
+}
+installLabelTip();
+
 // ───────────────────────── 資料介面 ─────────────────────────
 
 /** 一個可動畫的數值屬性 */
@@ -26,6 +45,15 @@ export interface Channel {
   max?: number;
   suffix?: string;
   display?: number;
+  /** 等比例連動：改這個值時，partner 依同樣的比例跟著變（各自保留正負號）；開 / 關動畫也一起 */
+  partner?: { id: string; value: number; keys: Keyframe[] };
+}
+
+/** 等比例連動時，partner 的新值：大小跟著比例變、保留原本的正負號 */
+function partnerValue(from: number, to: number, partner: number) {
+  const sign = partner < 0 ? -1 : 1;
+  if (Math.abs(from) < 1e-9) return sign * Math.abs(to);
+  return partner * Math.abs(to / from);
 }
 
 /** 擁有關鍵影格的對象（片段 / 特效） */
@@ -153,19 +181,25 @@ function currentKeys(owner: string, ch: string): Keyframe[] {
 /** 片段的動畫屬性 */
 export function clipChannels(c: Clip, local: number): Channel[] {
   const cur = clipTransformAt(c, local);
-  return ANIM_PROPS.map(({ prop, label, step, suffix, min, max }) => ({
-    id: prop,
-    label,
-    value: cur[prop],
-    keys: c.keys[prop] ?? [],
-    def: prop === 'scale' || prop === 'opacity' ? 1 : 0,
-    step: prop === 'scale' || prop === 'opacity' ? 0.005 : step,
-    min,
-    max,
-    // 位置用像素顯示（畫面 1080×1920），縮放 / 不透明度用 %
-    suffix: prop === 'scale' || prop === 'opacity' ? '%' : prop === 'x' || prop === 'y' ? ' px' : suffix,
-    display: prop === 'scale' || prop === 'opacity' ? 100 : prop === 'x' ? useStore.getState().format.w : prop === 'y' ? useStore.getState().format.h : 1,
-  }));
+  const pct = (p: string) => p === 'scaleX' || p === 'scaleY' || p === 'opacity';
+  const other = { scaleX: 'scaleY', scaleY: 'scaleX' } as Record<string, AnimProp | undefined>;
+  return ANIM_PROPS.map(({ prop, label, step, suffix, min, max }) => {
+    const o = other[prop];
+    return {
+      id: prop,
+      label,
+      value: cur[prop],
+      keys: c.keys[prop] ?? [],
+      def: pct(prop) ? 1 : 0,
+      step: pct(prop) ? 0.005 : step,
+      min,
+      max,
+      // 位置用像素顯示（畫面 1080×1920），縮放 / 不透明度用 %
+      suffix: pct(prop) ? '%' : prop === 'x' || prop === 'y' ? ' px' : suffix,
+      display: pct(prop) ? 100 : prop === 'x' ? useStore.getState().format.w : prop === 'y' ? useStore.getState().format.h : 1,
+      ...(o && !c.scaleUnlinked ? { partner: { id: o, value: cur[o], keys: c.keys[o] ?? [] } } : {}),
+    };
+  });
 }
 
 /** 特效的動畫屬性（只有數值型參數可以打 key） */
@@ -369,9 +403,13 @@ export interface Section {
   dim?: boolean;
 }
 
+/** 屬性表格左欄寬度範圍（px） */
+const LEFT_MIN = 240, LEFT_MAX = 640;
+
 export function EffectControls({ host, sections, title, extra }: { host: Host; sections: Section[]; title?: React.ReactNode; extra?: React.ReactNode }) {
   const time = useStore((s) => s.time);
-  const split = useLayout((s) => s.ecSplit);
+  // 左欄固定寬度（px）：不管面板多寬、屬性分頁還是編輯視窗都一樣，面板變窄只縮右邊的時間軸
+  const leftPx = useLayout((s) => s.ecLeftPx);
   const collapsed = useLayout((s) => s.ecCollapsed);
   const ksel = useKeySel();
   const [open, setOpen] = useState<Record<string, boolean>>({});
@@ -444,16 +482,23 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
     if (hit) selectKeys(host.owner, [{ ch: ch.id, id: hit.id }]);
   };
 
+  const setOne = (id: string, hasKeys: boolean, v: number) => {
+    if (hasKeys) host.setKeys(id, upsertKey(currentKeys(host.owner, id), lc, v));
+    else host.setBase(id, v);
+  };
   const setValue = (ch: Channel, v: number) => {
-    if (ch.keys.length) host.setKeys(ch.id, upsertKey(currentKeys(host.owner, ch.id), lc, v));
-    else host.setBase(ch.id, v);
+    setOne(ch.id, ch.keys.length > 0, v);
+    // 等比例：另一個也依比例跟著變
+    if (ch.partner) setOne(ch.partner.id, ch.partner.keys.length > 0, partnerValue(ch.value, v, ch.partner.value));
   };
   const toggleAnim = (ch: Channel) => {
-    if (ch.keys.length) host.setKeys(ch.id, null, ch.value);
-    else {
-      host.setKeys(ch.id, [newKey(lc, ch.value)]);
-      if (!inside) seek(lc);
+    const chans = [{ id: ch.id, value: ch.value, on: ch.keys.length > 0 }, ...(ch.partner ? [{ id: ch.partner.id, value: ch.partner.value, on: ch.partner.keys.length > 0 }] : [])];
+    const turnOff = ch.keys.length > 0;
+    for (const c of chans) {
+      if (turnOff && c.on) host.setKeys(c.id, null, c.value);
+      else if (!turnOff && !c.on) host.setKeys(c.id, [newKey(lc, c.value)]);
     }
+    if (!turnOff && !inside) seek(lc);
   };
   const toggleKeyHere = (ch: Channel) => {
     const list = currentKeys(host.owner, ch.id);
@@ -545,7 +590,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
     e.preventDefault();
     e.stopPropagation();
     const r = tableRef.current!.getBoundingClientRect();
-    listen((ev) => useLayout.getState().set({ ecSplit: Math.min(0.75, Math.max(0.35, (ev.clientX - r.left) / r.width)) }));
+    listen((ev) => useLayout.getState().set({ ecLeftPx: Math.round(Math.min(LEFT_MAX, Math.max(LEFT_MIN, ev.clientX - r.left))) }));
   };
 
   const toggleSection = (id: string) => useLayout.getState().set({ ecCollapsed: { ...collapsed, [id]: !collapsed[id] } });
@@ -553,7 +598,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
   const pct = (t: number) => `${(t / dur) * 100}%`;
 
   return (
-    <div className="ec" ref={tableRef} style={{ '--ec-left': `${split * 100}%` } as React.CSSProperties}>
+    <div className="ec" ref={tableRef} style={{ '--ec-left': `${Math.max(LEFT_MIN, leftPx)}px` } as React.CSSProperties}>
       {/* 表頭：名稱 + 片段內時間尺規（只有這裡可以拖播放頭） */}
       <div className="ec-row ec-header">
         <div className="ec-left">
@@ -584,7 +629,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
               <>
                 {sec.rows?.map((r) => (
                   <div key={r.label} className="ec-row">
-                    <div className="ec-left ec-plain"><span className="ec-label">{r.label}</span><div className="ec-node">{r.node}</div></div>
+                    <div className="ec-left ec-plain"><span className="ec-label" title={typeof r.label === 'string' ? r.label : undefined}>{r.label}</span><div className="ec-node">{r.node}</div></div>
                     <div className="ec-right ec-dim" onPointerDown={startMarquee} onContextMenu={(e) => laneMenu(e)} />
                   </div>
                 ))}
@@ -653,7 +698,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
 
       {extra}
       {/* 播放頭（蓋住右側所有列） */}
-      {inside && <div className="ec-playhead" style={{ left: `calc(var(--ec-left) + (100% - var(--ec-left)) * ${lc / dur})` }} />}
+      {inside && <div className="ec-playhead" style={{ left: `calc(var(--ec-col) + (100% - var(--ec-col)) * ${lc / dur})` }} />}
       {marquee && (
         <div
           className="marquee"

@@ -64,12 +64,12 @@ export async function loadDemo() {
       transitionIn: trs[i] ? { moduleId: trs[i]!, params: {}, duration: 0.4 } : null,
       // 最後一張示範「動態縮放」：從放大旋轉回到正常
       ...(i === 5
-        ? { keys: { scale: [newKey(0, 1.4, [0.34, 1.56, 0.64, 1]), newKey(1, 1)], rotation: [newKey(0, -8, [0.34, 1.56, 0.64, 1]), newKey(1, 0)] } }
+        ? { keys: { scaleX: [newKey(0, 1.4, [0.34, 1.56, 0.64, 1]), newKey(1, 1)], scaleY: [newKey(0, 1.4, [0.34, 1.56, 0.64, 1]), newKey(1, 1)], rotation: [newKey(0, -8, [0.34, 1.56, 0.64, 1]), newKey(1, 0)] } }
         : {}),
     }),
   );
   // 上層軌：子母畫面示範
-  clips.push(makeClip({ mediaId: media[0].id, track: 1, start: 2, duration: 2, fit: 'contain', transform: { x: 0.22, y: -0.3, scale: 0.35, rotation: 6, opacity: 1 } }));
+  clips.push(makeClip({ mediaId: media[0].id, track: 1, start: 2, duration: 2, fit: 'contain', transform: { x: 0.22, y: -0.3, scaleX: 0.35, scaleY: 0.35, rotation: 6, opacity: 1 } }));
   const effects: FxItem[] = [
     { id: uid(), moduleId: 'fx-entrance', params: {}, start: 0, duration: 0.6, track: 1 },
     { id: uid(), moduleId: 'fx-speedlines', params: {}, start: 2.35, duration: 0.6, track: 0 },

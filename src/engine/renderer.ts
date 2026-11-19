@@ -1,8 +1,9 @@
 import { $t } from '../i18n';
 import { audioSignal, type AudioSignal } from './audioReact';
 import { scrubFrame } from './scrubCache';
-import { fxLevel, type TransitionRef, type AudioClip, type AudioDrive, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
+import { fxLevel, type BlendMode, type TransitionRef, type AudioClip, type AudioDrive, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
 import { maskAt, type Mask } from './mask';
+import { CLIP_MASK_ID } from '../modules/extra';
 import { renderText, textKey } from './text';
 import { hexToRgb, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
 import { clipSource, plainSpeed } from './remap';
@@ -28,6 +29,11 @@ export type FrameInfo =
   | { kind: 'transition'; A: Clip | null; B: Clip | null; tr: TransitionRef; progress: number; d: number };
 
 const ADJ_EPS = 0.01;
+/** 播放時提前多少秒開始播放下一段影片 */
+const PREROLL = 0.4;
+
+/** false = 直接覆寫；true = 一般疊加；或指定混合模式 */
+type Blend = boolean | BlendMode;
 export const adjacent = (a: Clip | undefined, b: Clip | undefined) => !!a && !!b && Math.abs(a.start + a.duration - b.start) <= ADJ_EPS;
 
 /**
@@ -115,7 +121,7 @@ function paramUniforms(defs: ParamDef[]) {
   return defs.map((d) => `uniform ${t[d.type]} ${d.name};`).join('\n');
 }
 
-function buildEffectFS(code: string, defs: ParamDef[]) {
+export function buildEffectFS(code: string, defs: ParamDef[]) {
   return `${HEAD}uniform sampler2D u_tex;
 ${GLSL_LIB}
 vec4 tex(vec2 uv) { return texture(u_tex, uv); }
@@ -125,7 +131,7 @@ ${code}
 void main() { outColor = effect(v_uv); }`;
 }
 
-function buildTransitionFS(code: string, defs: ParamDef[]) {
+export function buildTransitionFS(code: string, defs: ParamDef[]) {
   return `${HEAD}uniform sampler2D u_from;
 uniform sampler2D u_to;
 #define progress u_progress
@@ -141,7 +147,8 @@ void main() { outColor = transition(v_uv); }`;
 /** 素材 → 畫面：縮放 / 位移 / 旋轉 / 翻轉 / 不透明度 / 填滿模式（輸出 premultiplied alpha） */
 const CLIP_FS = `${HEAD}uniform sampler2D u_tex;
 uniform float u_srcAspect;
-uniform vec4 u_xf;       // x, y, scale, rotation(rad)
+uniform vec4 u_xf;       // x, y, （未用）, rotation(rad)
+uniform vec2 u_scl;      // 水平 / 垂直縮放
 uniform float u_opacity;
 uniform int u_fit;       // 0 cover, 1 contain, 2 contain + blur bg, 3 原始大小（文字）
 uniform vec2 u_native;   // 原始大小（以畫面高度為 1）
@@ -158,7 +165,7 @@ void main() {
   vec2 p = vec2(v_uv.x - 0.5, 0.5 - v_uv.y) - u_xf.xy;   // 畫面座標，y 向下
   p.x *= ASPECT;
   float c = cos(u_xf.w), s = sin(u_xf.w);
-  vec2 q = vec2(c * p.x + s * p.y, -s * p.x + c * p.y) / u_xf.z;
+  vec2 q = vec2(c * p.x + s * p.y, -s * p.x + c * p.y) / u_scl;
   vec2 uv = q / fitSize(u_fit == 0) + 0.5;
   if (u_flip > 0.5) uv.x = 1.0 - uv.x;
   vec4 col = vec4(0.0);
@@ -360,7 +367,20 @@ export class Renderer {
     return p.locs.get(name)!;
   }
 
-  private pass(target: Target | null, p: Prog, setup: (p: Prog) => void, blend = false) {
+  /** 疊加方式（輸入都是 premultiplied alpha；alpha 一律用一般疊加） */
+  private setBlend(mode: BlendMode) {
+    const gl = this.gl;
+    const eq = mode === 'subtract' ? gl.FUNC_REVERSE_SUBTRACT : mode === 'lighten' ? gl.MAX : gl.FUNC_ADD;
+    gl.blendEquationSeparate(eq, gl.FUNC_ADD);
+    const [src, dst] =
+      mode === 'add' || mode === 'subtract' ? [gl.ONE, gl.ONE]
+      : mode === 'screen' ? [gl.ONE, gl.ONE_MINUS_SRC_COLOR]
+      : mode === 'multiply' ? [gl.DST_COLOR, gl.ONE_MINUS_SRC_ALPHA]
+      : [gl.ONE, gl.ONE_MINUS_SRC_ALPHA];
+    gl.blendFuncSeparate(src, dst, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+  }
+
+  private pass(target: Target | null, p: Prog, setup: (p: Prog) => void, blend: Blend = false) {
     const gl = this.gl;
     gl.bindFramebuffer(gl.FRAMEBUFFER, target ? target.fb : null);
     gl.viewport(0, 0, this.w, this.h);
@@ -369,11 +389,14 @@ export class Renderer {
     setup(p);
     if (blend) {
       gl.enable(gl.BLEND);
-      gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      this.setBlend(blend === true ? 'normal' : blend);
     }
     gl.bindVertexArray(this.vao);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-    if (blend) gl.disable(gl.BLEND);
+    if (blend) {
+      gl.blendEquation(gl.FUNC_ADD);
+      gl.disable(gl.BLEND);
+    }
   }
 
   private bindTex(p: Prog, name: string, tex: WebGLTexture, unit: number) {
@@ -461,8 +484,42 @@ export class Renderer {
     return this.textures.get(key)!;
   }
 
+  /**
+   * 切開後首尾相接、內容連續的片段（同一素材、同軌、速度相同、中間沒有轉場）共用同一個 <video>：
+   * 播到剪接點時影片元素一路播下去，不用換另一個解碼器接手（換手會頓一下）。
+   * 回傳每個片段所屬串接的第一個片段 id。
+   */
+  private chain = { clips: null as Clip[] | null, root: new Map<string, string>() };
+  private rootOf(id: string) {
+    return this.chain.root.get(id) ?? id;
+  }
+  private updateChains(ctx: RenderCtx) {
+    if (this.chain.clips === ctx.clips) return;
+    const root = new Map<string, string>();
+    const byTrack = new Map<number, Clip[]>();
+    for (const c of ctx.clips) {
+      if (!c.mediaId || c.text) continue;
+      if (!byTrack.has(c.track)) byTrack.set(c.track, []);
+      byTrack.get(c.track)!.push(c);
+    }
+    for (const list of byTrack.values()) {
+      list.sort((a, b) => a.start - b.start);
+      for (let i = 1; i < list.length; i++) {
+        const a = list[i - 1], b = list[i];
+        if (a.mediaId !== b.mediaId || a.transitionOut || b.transitionIn) continue;
+        if (Math.abs(a.start + a.duration - b.start) > 1e-3) continue;
+        const sa = plainSpeed(a, ctx.modules), sb = plainSpeed(b, ctx.modules);
+        if (sa === null || sb === null || Math.abs(sa - sb) > 1e-6) continue;
+        if (Math.abs(a.in + a.duration * sa - b.in) > 0.05) continue;
+        root.set(b.id, root.get(a.id) ?? a.id);
+      }
+    }
+    this.chain = { clips: ctx.clips, root };
+  }
+
   private videoFor(clip: Clip, media: Media) {
-    let v = this.videos.get(clip.id);
+    const key = this.rootOf(clip.id);
+    let v = this.videos.get(key);
     if (!v || v.dataset.src !== media.url) {
       v?.pause();
       v = document.createElement('video');
@@ -485,7 +542,7 @@ export class Renderer {
       v.addEventListener('seeked', dirty);
       v.addEventListener('loadeddata', dirty);
       v.addEventListener('canplay', dirty);
-      this.videos.set(clip.id, v);
+      this.videos.set(key, v);
     }
     return v;
   }
@@ -551,7 +608,7 @@ export class Renderer {
   private textState = new Map<string, string>();
 
   /** 把片段畫到 target；blend=true 時疊在現有內容上 */
-  private drawClip(target: Target, clip: Clip, t: number, ctx: RenderCtx, mode: 'preview' | 'export', playing: boolean, blend: boolean) {
+  private drawClip(target: Target, clip: Clip, t: number, ctx: RenderCtx, mode: 'preview' | 'export', playing: boolean, blend: Blend) {
     const fxs = (clip.effects ?? []).filter((f) => f.enabled !== false);
     const progs = fxs.map((f) => {
       const m = ctx.modules.get(f.moduleId);
@@ -574,7 +631,7 @@ export class Renderer {
     this.pass(target, this.blit, (p) => this.bindTex(p, 'u_tex', cur.tex, 0), blend);
   }
 
-  private drawClipRaw(target: Target, clip: Clip, t: number, ctx: RenderCtx, mode: 'preview' | 'export', playing: boolean, blend: boolean) {
+  private drawClipRaw(target: Target, clip: Clip, t: number, ctx: RenderCtx, mode: 'preview' | 'export', playing: boolean, blend: Blend) {
     const local = t - clip.start;
     if (clip.text) {
       const { tex, w, h } = this.textTex(clip);
@@ -592,15 +649,13 @@ export class Renderer {
       const { src, rate } = clipSource(clip, local, media, ctx.modules);
       const v = this.videoFor(clip, media);
       if (mode === 'preview') {
-        const native = this.syncVideo(v, src, rate, playing);
-        const sound = native && !(clip.link && ctx.linked.has(clip.link)) && clip.volume > 0 && media.hasAudio && !ctx.tracks.video[clip.track]?.muted && plainSpeed(clip, ctx.modules) !== null;
-        v.muted = !sound;
-        if (sound) v.volume = Math.min(1, clip.volume);
+        this.syncVideo(v, src, rate, playing);
+        v.muted = true; // 聲音一律由 audio.ts（Web Audio）播放
       }
-      tex = this.videoTex(clip.id, v, clip.fit === 'blur', mode === 'export');
+      tex = this.videoTex(this.rootOf(clip.id), v, clip.fit === 'blur', mode === 'export');
       // 暫停中拖播放頭：精準的 seek 還沒完成（長 GOP 影片很慢）就先用快取的小張影格
       if (mode === 'preview' && !playing) {
-        const shown = this.texTime.get('vid:' + clip.id);
+        const shown = this.texTime.get('vid:' + this.rootOf(clip.id));
         if (shown === undefined || Math.abs(shown - src) > 0.1) {
           const bm = scrubFrame(media, src);
           if (bm) tex = this.bitmapTex('scrub:' + clip.id, bm);
@@ -639,7 +694,7 @@ export class Renderer {
     return this.missing;
   }
 
-  private drawTex(target: Target, clip: Clip, local: number, tex: WebGLTexture, media: Media, blend: boolean, native?: [number, number]) {
+  private drawTex(target: Target, clip: Clip, local: number, tex: WebGLTexture, media: Media, blend: Blend, native?: [number, number]) {
     const xf = clipTransformAt(clip, Math.min(local, clip.duration));
     const fit = native ? 3 : clip.fit === 'cover' ? 0 : clip.fit === 'contain' ? 1 : 2;
     this.pass(
@@ -649,7 +704,10 @@ export class Renderer {
         const gl = this.gl;
         this.bindTex(p, 'u_tex', tex, 0);
         gl.uniform1f(this.loc(p, 'u_srcAspect'), media.width / media.height);
-        gl.uniform4f(this.loc(p, 'u_xf'), xf.x, xf.y, Math.max(0.001, xf.scale), (xf.rotation * Math.PI) / 180);
+        gl.uniform4f(this.loc(p, 'u_xf'), xf.x, xf.y, 1, (xf.rotation * Math.PI) / 180);
+        // 負的縮放 = 翻轉；保留正負號，只避免除以 0
+        const nz = (v: number) => (v < 0 ? -1 : 1) * Math.max(0.001, Math.abs(v));
+        gl.uniform2f(this.loc(p, 'u_scl'), nz(xf.scaleX), nz(xf.scaleY));
         gl.uniform1f(this.loc(p, 'u_opacity'), Math.min(1, Math.max(0, xf.opacity)));
         gl.uniform1i(this.loc(p, 'u_fit'), fit);
         gl.uniform2f(this.loc(p, 'u_native'), native?.[0] ?? 1, native?.[1] ?? 1);
@@ -719,13 +777,18 @@ export class Renderer {
     src: Target,
     out: Target,
     tmp: Target,
-    fx: { params: ParamValues; keys?: Record<string, Keyframe[]>; mask?: Mask; audio?: Record<string, AudioDrive> },
+    fx: { moduleId?: string; params: ParamValues; keys?: Record<string, Keyframe[]>; mask?: Mask; audio?: Record<string, AudioDrive> },
     g: Prog,
     t: number,
     local: number,
     duration: number,
   ) {
-    const mask = maskAt(fx.mask, fx.keys, local);
+    let mask = maskAt(fx.mask, fx.keys, local);
+    if (fx.moduleId === CLIP_MASK_ID) {
+      // 片段遮罩：沒設形狀 = 不動；有形狀 = 反轉後套用（遮罩內保留原畫面、遮罩外變透明）
+      if (!mask) return this.pass(out, this.blit, (p) => this.bindTex(p, 'u_tex', src.tex, 0));
+      mask = { ...mask, invert: !mask.invert };
+    }
     const dst = mask ? tmp : out;
     this.pass(dst, g, (p) => {
       this.bindTex(p, 'u_tex', src.tex, 0);
@@ -749,6 +812,7 @@ export class Renderer {
   }
 
   render(ctx: RenderCtx, t: number, mode: 'preview' | 'export', playing = false, extra?: { module: Module; progress: number; duration: number }) {
+    this.updateChains(ctx);
     const [TA, TB, P0, P1] = this.targets;
     const active = new Set<string>();
     this.clear(P0, true);
@@ -780,7 +844,7 @@ export class Renderer {
       const fr = computeFrame(clips, t);
       if (fr.kind === 'clip') {
         active.add(fr.clip.id);
-        this.drawClip(P0, fr.clip, t, ctx, mode, playing, true);
+        this.drawClip(P0, fr.clip, t, ctx, mode, playing, fr.clip.blend ?? true);
       } else if (fr.kind === 'transition') {
         this.clear(TA, false);
         this.clear(TB, false);
@@ -793,6 +857,8 @@ export class Renderer {
           this.drawClip(TB, fr.B, t, ctx, mode, playing, false);
         }
         const tr = fr.tr;
+        // 轉場期間的混合模式：前半用前一段、後半用後一段的設定
+        const trBlend: Blend = (fr.progress < 0.5 ? fr.A ?? fr.B : fr.B ?? fr.A)?.blend ?? true;
         const m = ctx.modules.get(tr.moduleId);
         const g = m ? this.moduleProg(m) : null;
         if (g) {
@@ -801,9 +867,9 @@ export class Renderer {
             this.bindTex(p, 'u_to', TB.tex, 1);
             this.setCommon(p, t, fr.progress * fr.d, fr.d, fr.progress);
             this.setParams(p, tr.params);
-          }, true);
+          }, trBlend);
         } else {
-          this.pass(P0, this.blit, (p) => this.bindTex(p, 'u_tex', fr.progress < 0.5 ? TA.tex : TB.tex, 0), true);
+          this.pass(P0, this.blit, (p) => this.bindTex(p, 'u_tex', fr.progress < 0.5 ? TA.tex : TB.tex, 0), trBlend);
         }
       }
     });
@@ -838,11 +904,11 @@ export class Renderer {
     }
 
     this.pass(null, this.blit, (p) => this.bindTex(p, 'u_tex', cur.tex, 0));
-    if (mode === 'preview') this.manageVideos(ctx, t, active);
+    if (mode === 'preview') this.manageVideos(ctx, t, active, playing);
   }
 
   /** 暫停非作用中的影片、預先 seek 即將出現的片段、回收已刪除片段 */
-  private manageVideos(ctx: RenderCtx, t: number, active: Set<string>) {
+  private manageVideos(ctx: RenderCtx, t: number, active: Set<string>, playing = false) {
     const ids = new Set(ctx.clips.map((c) => c.id));
     for (const key of [...this.textState.keys()]) {
       if (ids.has(key.slice(4))) continue;
@@ -851,8 +917,9 @@ export class Renderer {
       if (tex) this.gl.deleteTexture(tex);
       this.textures.delete(key);
     }
+    const roots = new Set(ctx.clips.map((c) => this.rootOf(c.id)));
     for (const [id, v] of this.videos) {
-      if (!ids.has(id)) {
+      if (!roots.has(id)) {
         v.pause();
         v.removeAttribute('src');
         v.load();
@@ -862,19 +929,39 @@ export class Renderer {
         this.textures.delete('vid:' + id);
       }
     }
-    for (const c of ctx.clips) {
-      if (active.has(c.id)) continue;
+    // 每個影片元素只處理一次：正在畫的跳過；其他的用串接裡「還沒播完、最早的那段」決定要預先 seek / 預播到哪
+    const activeRoots = new Set([...active].map((id) => this.rootOf(id)));
+    const handled = new Set<string>();
+    for (const c of [...ctx.clips].sort((a, b) => a.start - b.start)) {
+      const key = this.rootOf(c.id);
+      if (activeRoots.has(key) || handled.has(key) || c.start + c.duration <= t) continue;
+      handled.add(key);
       const media = ctx.media.get(c.mediaId);
       if (!media || media.missing || media.kind !== 'video') continue;
       const v = this.videoFor(c, media);
-      if (!v.paused) v.pause();
       v.muted = true;
       const ahead = c.start - t;
+      // 播放中、下一段快到了：提前（靜音）開始播放，接上時影片已經在跑，不會因為 play() 的啟動延遲而卡一下
+      const speed = playing && ahead > 0 && ahead < PREROLL ? plainSpeed(c, ctx.modules) : null;
+      if (speed !== null && speed >= 0.0625 && speed <= 16) {
+        const { src } = clipSource(c, 0, media, ctx.modules);
+        const want = src - ahead * speed;
+        if (want < 0 && ahead > 0.12) continue; // 片段從素材開頭開始：太早播會超前，等近一點再開始
+        if (v.paused) {
+          if (!v.seeking && Math.abs(v.currentTime - Math.max(0, want)) > 0.05) v.currentTime = Math.max(0, want);
+          v.playbackRate = speed;
+          v.play().catch(() => {});
+        }
+        continue;
+      }
+      if (!v.paused) v.pause();
       if (ahead > 0 && ahead < 1.5 && !v.seeking) {
         const { src } = clipSource(c, 0, media, ctx.modules);
         if (Math.abs(v.currentTime - src) > 0.01) v.currentTime = src;
       }
     }
+    // 整串都已經播完的影片元素：暫停
+    for (const [key, v] of this.videos) if (!activeRoots.has(key) && !handled.has(key) && !v.paused) v.pause();
   }
 
   /** 產生特效 / 轉場的預覽縮圖（畫在自己的 canvas 上） */
@@ -913,6 +1000,7 @@ export class Renderer {
 
   /** 匯出用：精準 seek 到每個需要的影格，確定畫面就緒後才回傳 */
   async prepareExact(ctx: RenderCtx, t: number) {
+    this.updateChains(ctx);
     const list: [Clip, number][] = [];
     for (const clips of ctx.videoTracks) {
       const fr = computeFrame(clips, t);
