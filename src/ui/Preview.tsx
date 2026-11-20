@@ -123,7 +123,7 @@ export function Preview() {
           extra = { module: m, progress: Math.min(1, el / dur), duration: dur };
         } else trialLoop = -1;
         r.render(ctx, rt, 'preview', rPlaying, extra);
-        syncAudioPreview(st, t, st.playing);
+        syncAudioPreview(st, t, st.playing, useLayout.getState().scrubAudio);
         // 閒置時預先編譯 shader，播放時第一次遇到特效才不會卡
         if (!st.playing) r.warmup(ctx.modules);
       }

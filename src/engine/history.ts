@@ -9,6 +9,7 @@ let future: Doc[] = [];
 let burstStart: Doc | null = null;
 let timer = 0;
 let applying = false;
+let transaction: Doc | null = null;
 const LIMIT = 200;
 
 export const useHistory = create(() => ({ canUndo: false, canRedo: false }));
@@ -28,6 +29,7 @@ function flush() {
 useStore.subscribe((s, prev) => {
   if (applying) return;
   if (s.clips === prev.clips && s.effects === prev.effects && s.audios === prev.audios && s.tracks === prev.tracks) return;
+  if (transaction) return;
   if (!burstStart) burstStart = docOf(prev);
   future = [];
   clearTimeout(timer);
@@ -49,6 +51,29 @@ function apply(d: Doc) {
     d.audios.some((c) => c.id === sel.id);
   useStore.setState({ ...d, selection: exists ? sel : null });
   applying = false;
+}
+
+/** Keep live drag previews out of history until the user chooses a drop action. */
+export function beginHistoryTransaction() {
+  flush();
+  transaction = docOf(useStore.getState());
+  sync();
+}
+
+export function endHistoryTransaction(commit: boolean) {
+  const before = transaction;
+  if (!before) return;
+  transaction = null;
+  if (!commit) apply(before);
+  else {
+    const now = useStore.getState();
+    if (before.clips !== now.clips || before.effects !== now.effects || before.audios !== now.audios || before.tracks !== now.tracks) {
+      past.push(before);
+      if (past.length > LIMIT) past.shift();
+      future = [];
+    }
+  }
+  sync();
 }
 
 export function undo() {
@@ -74,5 +99,6 @@ export function resetHistory() {
   past.length = 0;
   future = [];
   burstStart = null;
+  transaction = null;
   sync();
 }

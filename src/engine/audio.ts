@@ -218,14 +218,69 @@ function reconcile(ctx: AudioContext, plan: AudioPlanItem[]) {
   live = next;
 }
 
-export function syncAudioPreview(s: PlanInput & { modules: Module[] }, t: number, playing: boolean) {
+// ───────────── 拖播放頭時的聲音（scrub）：每次播放頭移動，播一小段（約 80ms）那個位置的聲音 ─────────────
+
+const GRAIN = 0.08;
+/** 已經解碼好的素材（scrub 不能等解碼，還沒好就先跳過） */
+const ready = new Map<string, AudioBuffer>();
+let grains: AudioBufferSourceNode[] = [];
+let lastScrub: number | null = null;
+let lastGrainAt = 0;
+let lastPlan: AudioPlanItem[] = [];
+/** 正在拖曳播放頭（按下後真的移動了才算）：只有拖曳時才出聲，單擊跳過去不會爆一聲 */
+let scrubbing = false;
+export function setScrubbing(on: boolean) {
+  scrubbing = on;
+}
+
+function scrubGrain(ctx: AudioContext, plan: AudioPlanItem[], t: number) {
+  for (const g of grains) {
+    try { g.stop(); } catch { /* 已經停了 */ }
+  }
+  grains = [];
+  const now = ctx.currentTime + 0.005;
+  for (const p of plan) {
+    if (t < p.start || t >= p.start + p.duration) continue;
+    const buf = ready.get(p.url);
+    if (!buf) {
+      void getAudioBuffer(p.url).then((b) => b && ready.set(p.url, b));
+      continue;
+    }
+    const local = t - p.start;
+    const offset = p.in + local * p.rate;
+    if (offset >= buf.duration) continue;
+    let k = 1;
+    if (p.fadeIn > 0) k = Math.min(k, local / p.fadeIn);
+    if (p.fadeOut > 0) k = Math.min(k, (p.duration - local) / p.fadeOut);
+    const vol = p.volume * Math.min(1, Math.max(0, k));
+    if (vol <= 0) continue;
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.playbackRate.value = Math.min(4, Math.max(0.25, p.rate));
+    // 很短的淡入淡出，避免喀喀聲
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0, now);
+    g.gain.linearRampToValueAtTime(vol, now + 0.008);
+    g.gain.setValueAtTime(vol, now + GRAIN - 0.015);
+    g.gain.linearRampToValueAtTime(0, now + GRAIN);
+    src.connect(g).connect(ctx.destination);
+    src.start(now, offset);
+    src.stop(now + GRAIN + 0.01);
+    src.onended = () => g.disconnect();
+    grains.push(src);
+  }
+}
+
+/** scrub：沒在播放時，播放頭移動就播一小段聲音 */
+export function syncAudioPreview(s: PlanInput & { modules: Module[] }, t: number, playing: boolean, scrub = false) {
   if (modMap.src !== s.modules) modMap = { src: s.modules, map: new Map(s.modules.map((m) => [m.id, m])) };
   const input = [s.audios, s.clips, s.media, s.tracks, s.modules];
   const changed = input.some((x, i) => x !== lastInput[i]);
   lastInput = input;
   const plan = changed || !anchor ? audioPlan(s, modMap.map) : null;
+  if (plan) lastPlan = plan;
   if (changed) {
-    for (const p of plan!) void getAudioBuffer(p.url); // 先解碼，按下播放時就有聲音
+    for (const p of plan!) void getAudioBuffer(p.url).then((b) => b && ready.set(p.url, b)); // 先解碼，按下播放 / 拖播放頭時就有聲音
     // 保持音調的變速片段：停止編輯一下子之後才預先處理（拖速度滑桿時不要每一格都算）
     clearTimeout(prepTimer);
     prepTimer = setTimeout(() => {
@@ -233,9 +288,32 @@ export function syncAudioPreview(s: PlanInput & { modules: Module[] }, t: number
     }, 400);
   }
   if (!playing) {
-    if (anchor) stopLive();
+    if (anchor) {
+      stopLive();
+      lastScrub = t; // 剛停下來：不要播一小段
+      return;
+    }
+    if (!scrub || !scrubbing) {
+      lastScrub = t;
+      return;
+    }
+    if (t === lastScrub) return;
+    // 每 45ms 最多一段；來不及的這一格先不記，下一格用最新的位置補
+    const nowMs = performance.now();
+    if (lastScrub !== null && nowMs - lastGrainAt < 45) return;
+    const first = lastScrub === null;
+    lastScrub = t;
+    if (first) return; // 剛開啟頁面時的第一個位置不出聲
+    lastGrainAt = nowMs;
+    actx ??= new AudioContext({ latencyHint: 'interactive' });
+    if (actx.state !== 'running') {
+      void actx.resume();
+      return;
+    }
+    scrubGrain(actx, lastPlan, t);
     return;
   }
+  lastScrub = t;
   actx ??= new AudioContext({ latencyHint: 'interactive' });
   // 還沒開始跑（瀏覽器的自動播放限制、剛建立）：時鐘不會動，等它跑起來再排程，不然會一直重排
   if (actx.state !== 'running') {

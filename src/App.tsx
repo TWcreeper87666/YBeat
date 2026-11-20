@@ -10,7 +10,7 @@ import { navEdge, navItem, navRow } from './ui/trackNav';
 import { CodePanel } from './ui/CodePanel';
 import { AiPanel } from './ui/AiPanel';
 import { PickerHost } from './ui/Library';
-import { Timeline, mergeOrHint } from './ui/Timeline';
+import { Timeline, duplicateTimeline, mergeOrHint, pasteTimeline } from './ui/Timeline';
 import { closeSource, sourceHotkey } from './ui/SourcePanel';
 import { FloatingWindow, PreviewPanel, Slot } from './ui/PreviewPanel';
 import { DockRoot, PANELS, layoutMenuItems, panelMenuItems, useDock, type PanelId } from './ui/Dock';
@@ -19,6 +19,8 @@ import { copyKeys, deleteSelectedKey, keysFocused, nudgeKeys, pasteKeys, selectA
 import { ShapeDrawerHost } from './ui/ShapeDrawer';
 import { SHORTCUTS, TUTORIAL } from './ui/helpText';
 import { useLayout, toast, stopPreviewFx, confirmDialog, openMenu, type MenuItem } from './ui/uiStore';
+import { DragNumber } from './ui/DragNumber';
+import { usePrefs } from './prefs';
 import { Globe, Settings } from 'lucide-react';
 import { downloadBlob, exportMp4 } from './engine/exporter';
 import { loadDemo } from './engine/demo';
@@ -152,6 +154,7 @@ const QUALITIES = [1, 0.75, 0.5, 0.33];
 
 function SettingsDialog({ close }: { close: () => void }) {
   const L = useLayout();
+  const P = usePrefs();
   const fmt = useStore((s) => s.format);
   return (
     <div className="dialog wide settings">
@@ -188,6 +191,22 @@ function SettingsDialog({ close }: { close: () => void }) {
           <button className={L.upperLayerAt === 'bottom' ? 'on' : ''} onClick={() => L.set({ upperLayerAt: 'bottom' })}>{$t('下方')}</button>
           <button className={L.upperLayerAt === 'top' ? 'on' : ''} onClick={() => L.set({ upperLayerAt: 'top' })}>{$t('上方')}</button>
         </div>
+      </div>
+      <div className="form-row">
+        <span>{$t('圖片 / 色板 / 文字預設長度')}</span>
+        <div className="set-num"><DragNumber variant="text" value={P.stillDur} min={0.1} max={60} step={0.1} def={2} suffix="s" onChange={(v) => P.set({ stillDur: Math.round(v * 100) / 100 })} /></div>
+      </div>
+      <div className="form-row">
+        <span>{$t('轉場預設長度')}</span>
+        <div className="set-num"><DragNumber variant="text" value={P.transDur} min={0.05} max={5} step={0.05} def={0.4} suffix="s" onChange={(v) => P.set({ transDur: Math.round(v * 100) / 100 })} /></div>
+      </div>
+      <div className="form-row col">
+        <span>{$t('節拍提前')}</span>
+        <div className="beat-lead">
+          <DragNumber variant="text" value={L.beatLead} min={0} max={30} step={1} decimals={0} def={5} onChange={(v) => L.set({ beatLead: Math.round(v) })} />
+          <span className="muted small">/ 60 {$t('秒')} ≈ {Math.round((L.beatLead / 60) * 1000)} ms</span>
+        </div>
+        <small className="muted">{$t('節拍格線、吸附與節拍分割都會往前移這麼多：畫面先切換、聲音稍後到，看起來才會對到拍子。預設 5（約 0.08 秒）。')}</small>
       </div>
       <div className="set-sec">{$t('語言')} / Language</div>
       <div className="form-row col">
@@ -300,8 +319,8 @@ function menus(): { label: string; items: () => MenuItem[] }[] {
           { separator: true },
           { label: $t('剪下'), shortcut: 'Ctrl+X', action: has ? s.cut : undefined },
           { label: $t('複製'), shortcut: 'Ctrl+C', action: has ? s.copy : undefined },
-          { label: $t('貼上'), shortcut: 'Ctrl+V', action: s.clipboard ? () => s.paste() : undefined },
-          { label: $t('再製'), shortcut: 'Ctrl+D', action: has ? s.duplicate : undefined },
+          { label: $t('貼上'), shortcut: 'Ctrl+V', action: s.clipboard ? () => pasteTimeline() : undefined },
+          { label: $t('再製'), shortcut: 'Ctrl+D', action: has ? duplicateTimeline : undefined },
           { label: $t('刪除'), shortcut: 'Del', action: s.selection ? () => s.removeSelection() : undefined },
           { label: $t('波紋刪除'), shortcut: 'Shift+Del', action: has ? () => s.removeSelection(true) : undefined },
           { label: $t('波紋刪除（所有軌道）'), shortcut: 'Alt+Del', action: has ? () => s.removeSelection('all') : undefined },
@@ -325,6 +344,7 @@ function menus(): { label: string; items: () => MenuItem[] }[] {
           { separator: true },
           { label: $t('預覽：浮動視窗'), checked: L.floating, action: () => L.set({ floating: !L.floating }) },
           { label: $t('磁吸對齊'), shortcut: 'N', checked: s.snap, action: () => s.setSnap(!s.snap) },
+          { label: $t('拖曳播放頭時播放聲音'), checked: L.scrubAudio, action: () => L.set({ scrubAudio: !L.scrubAudio }) },
           { separator: true },
           { label: $t('時間軸放大'), shortcut: '=', action: () => s.setPps(s.pps * 1.25) },
           { label: $t('時間軸縮小'), shortcut: '-', action: () => s.setPps(s.pps / 1.25) },
@@ -422,8 +442,8 @@ function onKey(e: KeyboardEvent) {
     else if (k === 'y') { e.preventDefault(); redo(); }
     else if (k === 'c') s.copy();
     else if (k === 'x') s.cut();
-    else if (k === 'v') s.paste();
-    else if (k === 'd') { e.preventDefault(); s.duplicate(); }
+    else if (k === 'v') { e.preventDefault(); pasteTimeline(); }
+    else if (k === 'd') { e.preventDefault(); duplicateTimeline(); }
     else if (k === 'b') { e.preventDefault(); s.split(); }
     else if (k === 'a') { e.preventDefault(); s.selectAll(); }
     else if (k === 's') { e.preventDefault(); saveNow().then(() => toast($t('已儲存'))); }

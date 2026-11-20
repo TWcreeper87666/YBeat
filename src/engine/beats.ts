@@ -153,8 +153,9 @@ export const beatSource = (a: AudioClip, attached: Set<string>) => a.beats !== f
 
 /**
  * 時間軸上的節拍：所有提供節拍的音訊片段，素材時間換成時間軸時間（照速率），合併、去掉太近的重複。
+ * lead：整體往前移幾秒（畫面要比聲音早一點切換，看起來才會對到拍子；跟威力導演的「節拍提前」一樣）。
  */
-export function timelineBeats(s: { audios: AudioClip[]; clips: Clip[]; media: Media[] }, attached: Set<string>): Beat[] {
+export function timelineBeats(s: { audios: AudioClip[]; clips: Clip[]; media: Media[] }, attached: Set<string>, lead = 0): Beat[] {
   const media = new Map(s.media.map((m) => [m.id, m]));
   const out: Beat[] = [];
   for (const a of s.audios) {
@@ -165,7 +166,8 @@ export function timelineBeats(s: { audios: AudioClip[]; clips: Clip[]; media: Me
     const end = a.in + a.duration * rate;
     for (const b of info.beats) {
       if (b.t < a.in - 1e-6 || b.t >= end) continue;
-      out.push({ ...b, t: a.start + (b.t - a.in) / rate });
+      const t = a.start + (b.t - a.in) / rate - lead;
+      if (t >= 0) out.push({ ...b, t });
     }
   }
   out.sort((x, y) => x.t - y.t);

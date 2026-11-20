@@ -6,13 +6,11 @@ import { useEditorScope } from './EditorWindow';
 import { Preview } from './Preview';
 import { useLayout } from './uiStore';
 import { GridButton } from './GridOverlay';
+import { setScrubbing } from '../engine/audio';
+import { snapFrame, tc } from '../engine/rulerTicks';
 import { SourceOverlay, useSource } from './SourcePanel';
 
-const fmt = (t: number) => {
-  const m = Math.floor(t / 60);
-  const s = t - m * 60;
-  return `${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`;
-};
+const fmt = (t: number) => tc(t);
 
 /** 預覽面板 = 畫面 + 播放控制列（與時間軸同步）；打開素材預覽時暫時蓋掉 */
 export function PreviewPanel() {
@@ -62,9 +60,13 @@ function Transport() {
     e.preventDefault();
     const wasPlaying = S.playing;
     S.setPlaying(false);
-    S.setTime(t0 + tAt(e.clientX));
-    const mv = (ev: PointerEvent) => S.setTime(t0 + tAt(ev.clientX));
+    S.setTime(snapFrame(t0 + tAt(e.clientX)));
+    const mv = (ev: PointerEvent) => {
+      setScrubbing(true);
+      S.setTime(snapFrame(t0 + tAt(ev.clientX)));
+    };
     const up = () => {
+      setScrubbing(false);
       window.removeEventListener('pointermove', mv);
       window.removeEventListener('pointerup', up);
       if (wasPlaying) S.setPlaying(true);

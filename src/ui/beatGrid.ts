@@ -11,18 +11,22 @@ import { toast, useLayout } from './uiStore';
 
 type S = ReturnType<typeof useStore.getState>;
 
-let memo: { audios: S['audios']; clips: S['clips']; media: S['media']; beats: Beat[] } | null = null;
-/** 目前專案的節拍（時間軸秒數）；音訊 / 素材沒變就用上次算好的 */
+let memo: { audios: S['audios']; clips: S['clips']; media: S['media']; lead: number; beats: Beat[] } | null = null;
+/** 節拍提前（秒）：設定裡是 1/60 秒為單位 */
+export const beatLead = () => Math.max(0, useLayout.getState().beatLead ?? 5) / 60;
+/** 目前專案的節拍（時間軸秒數，已經往前移「節拍提前」）；音訊 / 素材沒變就用上次算好的 */
 export function getBeats(s: S = useStore.getState()): Beat[] {
-  if (memo && memo.audios === s.audios && memo.clips === s.clips && memo.media === s.media) return memo.beats;
-  const beats = timelineBeats(s, attachedAudioIds(s));
-  memo = { audios: s.audios, clips: s.clips, media: s.media, beats };
+  const lead = beatLead();
+  if (memo && memo.audios === s.audios && memo.clips === s.clips && memo.media === s.media && memo.lead === lead) return memo.beats;
+  const beats = timelineBeats(s, attachedAudioIds(s), lead);
+  memo = { audios: s.audios, clips: s.clips, media: s.media, lead, beats };
   return beats;
 }
 
 /** React 用：格線開著才回傳節拍 */
 export function useBeats(): Beat[] {
   const on = useLayout((l) => l.beats);
+  useLayout((l) => l.beatLead); // 改了節拍提前要重畫
   const audios = useStore((s) => s.audios);
   const clips = useStore((s) => s.clips);
   const media = useStore((s) => s.media);

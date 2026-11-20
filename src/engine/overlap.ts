@@ -11,6 +11,31 @@ const EPS = 1e-4;
 
 export const spansOverlap = (a: Span, b: Span) => a.lane === b.lane && a.start < b.start + b.duration - EPS && b.start < a.start + a.duration - EPS;
 
+/** Parts of an existing span that survive an overwrite. */
+export function overwriteParts(start: number, duration: number, cuts: { start: number; duration: number }[]): { start: number; duration: number }[] {
+  let parts = [{ start, duration }];
+  for (const cut of cuts) {
+    const end = cut.start + cut.duration;
+    parts = parts.flatMap((p) => {
+      const pEnd = p.start + p.duration;
+      if (end <= p.start + EPS || cut.start >= pEnd - EPS) return [p];
+      const out: { start: number; duration: number }[] = [];
+      if (cut.start > p.start + EPS) out.push({ start: p.start, duration: cut.start - p.start });
+      if (end < pEnd - EPS) out.push({ start: end, duration: pEnd - end });
+      return out;
+    });
+  }
+  return parts;
+}
+
+/** Insert at t: split the item crossing t and shift every part to its right. */
+export function insertParts(start: number, duration: number, t: number, length: number): { start: number; duration: number }[] {
+  const end = start + duration;
+  if (end <= t + EPS) return [{ start, duration }];
+  if (start >= t - EPS) return [{ start: start + length, duration }];
+  return [{ start, duration: t - start }, { start: t + length, duration: end - t }];
+}
+
 /** moving 整組平移 dt 之後會不會撞到 others（或跑到 0 秒之前） */
 export function groupFits(moving: Span[], others: Span[], dt: number): boolean {
   for (const m of moving) {
@@ -60,6 +85,19 @@ export function resolveShift(moving: Span[], others: Span[], dt: number, forward
 /** 單一項目：回傳最接近 start 的可放位置 */
 export function fitStart(others: Span[], lane: string, start: number, duration: number, forward = false): number {
   return start + resolveShift([{ lane, start, duration }], others, 0, forward);
+}
+
+/**
+ * 長度可以隨意的項目（圖片 / 色板 / 文字）：放在空隙裡就縮短到剛好填滿空隙；
+ * 放在別的項目上（或空隙太小）就照 fitStart 找最近的空位、長度不變。
+ */
+export function fitInGap(others: Span[], lane: string, start: number, duration: number, min = 0.1): { start: number; duration: number } {
+  const inside = others.some((o) => o.lane === lane && start >= o.start - EPS && start < o.start + o.duration - EPS);
+  if (!inside) {
+    const room = nextStart(others, lane, start) - start;
+    if (room >= min) return { start, duration: Math.min(duration, room) };
+  }
+  return { start: fitStart(others, lane, start, duration), duration };
 }
 
 /** 項目在同軌上可以往右延伸到哪裡（下一個項目的開頭） */

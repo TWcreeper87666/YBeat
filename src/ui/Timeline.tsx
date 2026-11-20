@@ -8,14 +8,16 @@ import {
   trSelId, type TrScope, type TrSide,
   attachedAudioIds, linkedAudioOf,
   KIND_OF, LIST, TRACK_H, fxLevel, itemSpeed, keyOf, laneOf, mediaUsable, parseKey, projectDuration, spansOf, stretchPatch, useStore, displayRows,
-  type AnyItem, type AudioClip, type Clip, type FxItem, type ItemType, type Media, type TrackKind, type Tracks,
+  type AnyItem, type AudioClip, type Clip, type DropFit, type FxItem, type ItemType, type Media, type PasteResult, type PlacementGhost, type TrackKind, type Tracks, type TimelineDropMode,
 } from '../store';
 import { sortClips, transitionWindow, makeCtx, type TrWindow } from '../engine/renderer';
-import { groupFits, nextStart, prevEnd, resolveShift, type Span } from '../engine/overlap';
+import { groupFits, nextStart, prevEnd, spansOverlap, type Span } from '../engine/overlap';
 import { plainSpeed } from '../engine/remap';
-import { undo, redo, useHistory } from '../engine/history';
+import { setScrubbing } from '../engine/audio';
+import { PPS_MAX, PPS_MIN, rulerLabel, rulerSteps, snapFrame } from '../engine/rulerTicks';
+import { undo, redo, useHistory, beginHistoryTransaction, endHistoryTransaction } from '../engine/history';
 import { relinkWithPicker } from '../engine/media';
-import { confirmDialog, openMenu, promptDialog, stopPreviewFx, toast, useDrag, useLayout, useReveal, useSnapLine, type MenuItem } from './uiStore';
+import { confirmDialog, openMenu, promptDialog, stopPreviewFx, toast, useDrag, useLayout, useReveal, useSnapLine, useMenu, type MenuItem } from './uiStore';
 import { itemName } from './names';
 import { useDock } from './Dock';
 import { closeSource } from './SourcePanel';
@@ -29,6 +31,58 @@ const NAMES: Record<TrackKind, string> = { fx: $t('特效'), video: $t('影片')
 const ICONS: Record<TrackKind, React.ReactNode> = { fx: <Sparkles size={13} />, video: <Film size={13} />, audio: <Music size={13} /> };
 
 const showSnap = (t: number | null) => useSnapLine.getState().t !== t && useSnapLine.setState({ t });
+const usePlacementPreview = create<{ owner: string | null; items: PlacementGhost[] }>(() => ({ owner: null, items: [] }));
+let placementMenuId = 0;
+
+function placementChoices(fit: DropFit | null, choose: (mode: TimelineDropMode) => void, cancel: () => void): MenuItem[] {
+  return [
+    { label: $t('覆蓋'), action: () => choose('overwrite') },
+    { label: $t('插入'), action: () => choose('insert') },
+    { label: $t('插入並移動所有軌道'), action: () => choose('insertAll') },
+    { label: $t('修剪以符合長度'), action: fit ? () => choose('trimFit') : undefined },
+    { label: $t('加速以符合長度'), action: fit?.speed ? () => choose('speedFit') : undefined },
+    { label: $t('取消'), action: cancel },
+  ];
+}
+
+const openPlacementMenu = (x: number, y: number, items: MenuItem[], owner?: string) => openMenu(x + 32, y + 24, items, owner);
+
+function showPendingPlacement(result: PasteResult, x: number, y: number, choose: (mode: TimelineDropMode) => void) {
+  const owner = `timeline-placement-${++placementMenuId}`;
+  const clear = () => {
+    if (usePlacementPreview.getState().owner === owner) usePlacementPreview.setState({ owner: null, items: [] });
+  };
+  usePlacementPreview.setState({ owner, items: result.preview });
+  const unsub = useMenu.subscribe((s) => {
+    if (s.menu?.owner !== owner) queueMicrotask(() => {
+      if (useMenu.getState().menu?.owner !== owner) { unsub(); clear(); }
+    });
+  });
+  openPlacementMenu(x, y, placementChoices(result.fit, (mode) => { unsub(); clear(); choose(mode); }, () => { unsub(); clear(); }), owner);
+}
+
+/** 貼上遇到重疊時才讓使用者決定如何處理；取消時不修改時間軸。 */
+export function pasteTimeline(at?: { time: number; track: number; kind: TrackKind }, point?: { x: number; y: number }) {
+  const s = useStore.getState();
+  const target = at ?? (s.activeTrack ? { time: s.time, track: s.activeTrack.idx, kind: s.activeTrack.kind } : undefined);
+  const result = s.paste(target);
+  if (!result?.conflict) return;
+  const head = document.querySelector('.timeline .playhead')?.getBoundingClientRect();
+  const row = document.querySelector('.timeline .tl-row.active .lane')?.getBoundingClientRect();
+  const x = point?.x ?? head?.left ?? innerWidth / 2;
+  const y = point?.y ?? row?.top ?? innerHeight / 2;
+  showPendingPlacement(result, x, y, (mode) => { useStore.getState().paste(target, mode); });
+}
+
+/** 再製固定接在選取範圍尾端，重疊時沿用貼上的選擇。 */
+export function duplicateTimeline() {
+  const result = useStore.getState().duplicate();
+  if (!result?.conflict) return;
+  const selected = document.querySelector('.timeline [data-key].sel')?.getBoundingClientRect();
+  const x = selected?.right ?? innerWidth / 2;
+  const y = selected?.top ?? innerHeight / 2;
+  showPendingPlacement(result, x, y, (mode) => { useStore.getState().duplicate(mode); });
+}
 
 function nearest(v: number, pts: number[], pps: number) {
   if (!useStore.getState().snap) return { v, d: Infinity };
@@ -69,6 +123,13 @@ function listen(onMove: (ev: PointerEvent) => void, onUp?: (ev: PointerEvent) =>
 
 /** 拖曳中顯示在片段上的提示 */
 const useOp = create<{ op: { key: string; kind: 'stretch' | 'slip'; text: string; keys?: string[] } | null }>(() => ({ op: null }));
+const useMovePreview = create<{ moving: Set<string>; affected: Record<string, { left: number; width: number }> }>(() => ({ moving: new Set(), affected: {} }));
+const clearMovePreview = () => useMovePreview.setState({ moving: new Set(), affected: {} });
+function movePreview(key: string) {
+  const moving = useMovePreview((s) => s.moving.has(key));
+  const affected = useMovePreview((s) => s.affected[key]);
+  return { moving, affected };
+}
 
 /** 按住 Ctrl / Alt 時讓把手和游標有不同樣子 */
 function trackModifiers() {
@@ -192,9 +253,10 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
   if (e.shiftKey) return S.select({ type, id: it.id }, 'range');
   const already = S.selected.includes(key);
   if (!already) S.select({ type, id: it.id });
-  else useStore.setState({ selection: { type, id: it.id }, leftTab: 'editor' });
+  else useStore.setState({ selection: { type, id: it.id }, activeTrack: { kind: KIND_OF[type], idx: it.track }, leftTab: 'editor' });
 
   const st = useStore.getState();
+  const timeBeforeDrag = st.time;
   const group = st.selected
     .map(parseKey)
     .map(({ type: t, id }) => ({ type: t, it: (st[LIST[t]] as AnyItem[]).find((x) => x.id === id)! }))
@@ -203,7 +265,7 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
   // 吸附點不含播放頭（播放頭會跟著片段走）
   const pts = snapPoints(new Set(st.selected)).slice(0);
   pts.splice(1, 1);
-  const others = spansOf(st, new Set(st.selected));
+  const movingKeys = new Set(st.selected);
   // 按下就移動播放頭（不等放開，沒有延遲）：點未選中的片段 → 移到片段開頭，但播放頭已經在片段裡就不動；
   // 點已選中的片段 → 回到片段開頭。接著拖曳的話，播放頭在片段裡就跟著片段一起移動（看到的還是同一格）
   let inside = st.time >= it.start - 1e-6 && st.time < it.start + it.duration;
@@ -235,18 +297,8 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
         if (KIND_OF[g.type] !== kind) continue;
         dTrack = Math.max(-g.it.track, Math.min(n - 1 - g.it.track, dTrack));
       }
-      // 同一軌不能重疊：找最接近游標、整組都放得下的位置
-      const span = (d: number): Span[] =>
-        group.map((g) => ({ lane: laneOf(g.type, KIND_OF[g.type] === kind ? g.it.track + d : g.it.track), start: g.it.start, duration: g.it.duration }));
-      let fdt = resolveShift(span(dTrack), others, dt);
-      if (dTrack !== 0) {
-        // 換軌會被擠很遠的話，寧可留在原軌
-        const stay = resolveShift(span(0), others, dt);
-        if (Math.abs(fdt - dt) > it.duration && Math.abs(stay - dt) < Math.abs(fdt - dt)) {
-          dTrack = 0;
-          fdt = stay;
-        }
-      }
+      if (!useMovePreview.getState().moving.size) beginHistoryTransaction();
+      const fdt = dt;
       const patches: Record<string, Partial<AnyItem>> = {};
       for (const g of group) {
         const p: Partial<AnyItem> = { start: g.it.start + fdt };
@@ -254,10 +306,57 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
         patches[keyOf(g.type, g.it.id)] = p;
       }
       useStore.getState().patchItems(patches);
+      if (dTrack) useStore.getState().setActiveTrack({ kind, idx: it.track + dTrack });
       if (inside) useStore.getState().setTime(head + fdt);
+      const current = useStore.getState();
+      const attached = attachedAudioIds(current);
+      const visualLane = (t: ItemType, x: AnyItem) => {
+        const parent = t === 'audio' && attached.has(x.id) ? current.clips.find((c) => c.link && c.link === x.link) : undefined;
+        return parent ? laneOf('clip', parent.track) : laneOf(t, x.track);
+      };
+      const movedSpans = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((t) =>
+        (current[LIST[t]] as AnyItem[]).filter((x) => movingKeys.has(keyOf(t, x.id)))
+          .map((x) => ({ lane: visualLane(t, x), start: x.start, duration: x.duration })));
+      const affected: Record<string, { left: number; width: number }> = {};
+      (['clip', 'effect', 'audio'] as ItemType[]).forEach((t) => {
+        for (const other of current[LIST[t]] as AnyItem[]) {
+          const k = keyOf(t, other.id);
+          if (movingKeys.has(k)) continue;
+          const o = { lane: visualLane(t, other), start: other.start, duration: other.duration };
+          const hits = movedSpans.filter((m) => spansOverlap(m, o));
+          if (!hits.length) continue;
+          const left = Math.max(other.start, Math.min(...hits.map((h) => h.start)));
+          const right = Math.min(other.start + other.duration, Math.max(...hits.map((h) => h.start + h.duration)));
+          affected[k] = { left: (left - other.start) * pps, width: (right - left) * pps };
+        }
+      });
+      useMovePreview.setState({ moving: movingKeys, affected });
     },
-    () => {
+    (ev) => {
       showSnap(null);
+      const preview = useMovePreview.getState();
+      const overlaps = Object.keys(preview.affected).length > 0;
+      if (moved && overlaps) {
+        const owner = `timeline-drop-${Date.now()}`;
+        let decided = false;
+        const fit = useStore.getState().dropFit([...movingKeys]);
+        const finish = (mode?: TimelineDropMode) => {
+          if (decided) return;
+          decided = true;
+          unsub();
+          if (mode) useStore.getState().resolveTimelineDrop([...movingKeys], mode);
+          endHistoryTransaction(!!mode);
+          if (!mode) useStore.getState().setTime(timeBeforeDrag);
+          clearMovePreview();
+        };
+        const unsub = useMenu.subscribe((s) => {
+          if (s.menu?.owner !== owner) queueMicrotask(() => { if (useMenu.getState().menu?.owner !== owner) finish(); });
+        });
+        openPlacementMenu(ev.clientX, ev.clientY, placementChoices(fit, (mode) => finish(mode), () => finish()), owner);
+      } else if (moved) {
+        endHistoryTransaction(true);
+        clearMovePreview();
+      }
       if (!moved && already && useStore.getState().selected.length > 1 && !it.link && !it.group) S.select({ type, id: it.id });
     },
   );
@@ -363,8 +462,8 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
     { separator: true },
     { label: n > 1 ? $t('複製 {0} 個項目', n) : $t('複製'), shortcut: 'Ctrl+C', action: S.copy },
     { label: $t('剪下'), shortcut: 'Ctrl+X', action: S.cut },
-    { label: $t('貼上到播放頭'), shortcut: 'Ctrl+V', action: S.clipboard ? () => S.paste() : undefined },
-    { label: $t('再製'), shortcut: 'Ctrl+D', action: S.duplicate },
+    { label: $t('貼上到播放頭'), shortcut: 'Ctrl+V', action: S.clipboard ? () => pasteTimeline() : undefined },
+    { label: $t('再製'), shortcut: 'Ctrl+D', action: duplicateTimeline },
     { separator: true },
     {
       label: $t('重新命名…'),
@@ -580,7 +679,7 @@ interface ClipViewProps {
   pps: number;
   sel: boolean;
   remapName: string | null;
-  drop: 'relink' | 'transition' | 'transitionOut' | 'remap' | 'effect' | 'mask' | null;
+  drop: 'relink' | 'replace' | 'transition' | 'transitionOut' | 'remap' | 'effect' | 'mask' | null;
   dropThumb?: string;
 }
 
@@ -625,21 +724,23 @@ function MatteBar({ clip, media, width }: { clip: Clip; media: Media; width: num
 
 const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel, remapName, drop, dropThumb }: ClipViewProps) {
   const key = keyOf('clip', c.id);
+  const preview = movePreview(key);
   const opCls = useOpCls(key);
   const isText = !!c.text;
   const ok = isText || mediaUsable(m);
-  const relinkGhost = drop === 'relink' && dropThumb;
+  const relinkGhost = (drop === 'relink' || drop === 'replace') && dropThumb;
   const sp = itemSpeed('clip', c) ?? 1;
   const name = ok ? label : $t('遺失：{0}', label);
   return (
     <div
       data-key={key}
-      className={`clip ${la ? 'av' : ''} ${isText ? 'textclip' : ''} ${sel ? 'sel' : ''} ${ok && !relinkGhost ? '' : 'missing'} ${drop ? 'drop-hint' : ''} ${opCls}`}
+      className={`clip ${la ? 'av' : ''} ${isText ? 'textclip' : ''} ${sel ? 'sel' : ''} ${ok && !(drop === 'relink' && dropThumb) ? '' : 'missing'} ${drop ? 'drop-hint' : ''} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
       style={{
         left: c.start * pps,
         width: Math.max(4, c.duration * pps),
+        '--overlap-left': `${preview.affected?.left ?? 0}px`, '--overlap-width': `${preview.affected?.width ?? 0}px`,
         backgroundImage: relinkGhost ? `url(${dropThumb})` : !isText && ok && m!.thumb ? `url(${m!.thumb})` : undefined,
-      }}
+      } as React.CSSProperties}
       title={ok ? undefined : $t('素材遺失：把素材拖到這裡、或右鍵「重新連結素材…」')}
       onPointerDown={(e) => itemPointerDown(e, 'clip', c)}
       onDoubleClick={() => openItemEditor('clip', c.id)}
@@ -651,17 +752,18 @@ const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel,
       {c.aiMatte && m && ok && (m.kind === 'video' || m.kind === 'image') && <MatteBar clip={c} media={m} width={c.duration * pps} />}
       {c.link && <Link2 size={11} className="link-ico" />}
       {c.group && <Group size={11} className="link-ico" />}
-      <span className="clip-name" title={name}>{name}</span>
+      <span className="clip-name" title={`${name} · ${c.duration.toFixed(2)}s`}>{name}</span>
       {remapName && <span className="badge"><Gauge size={10} /> {remapName}</span>}
       {!!c.effects?.some((f) => !f.base) && <span className="badge" title={$t('片段特效')}><Sparkles size={10} /> {c.effects!.filter((f) => !f.base).length}</span>}
       {drop === 'effect' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段特效')}</span>}
       {drop === 'mask' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段遮罩')}</span>}
+      {drop === 'replace' && <span className="badge replace-tag"><Replace size={10} /> {$t('取代')}</span>}
       {Math.abs(sp - 1) > 1e-3 && <span className="badge">{+sp.toFixed(2)}×</span>}
       <OpBadge k={key} />
       {ok && !isText && m!.hasAudio && m!.kind === 'video' && (la ? la.volume === 0 : c.volume === 0 && !c.audioSplit) && <span className="badge"><VolumeX size={10} /></span>}
       {la && (
         <div className="av-strip" title={$t('連結的音訊（右鍵「取消影音連結」可以分開成獨立的音訊片段）')}>
-          {ok && <Waveform media={m!} inT={la.in} dur={la.duration * (la.rate ?? 1)} width={Math.max(4, c.duration * pps)} />}
+          {ok && <Waveform media={m!} inT={la.in} dur={la.duration * (la.rate ?? 1)} width={Math.max(4, c.duration * pps)} gain={{ volume: la.volume, fadeIn: la.fadeIn, fadeOut: la.fadeOut, len: la.duration }} />}
           {la.fadeIn > 0 && <div className="fade in" style={{ width: la.fadeIn * pps }} />}
           {la.fadeOut > 0 && <div className="fade out" style={{ width: la.fadeOut * pps }} />}
         </div>
@@ -700,19 +802,20 @@ const TransitionView = React.memo(function TransitionView({ c, prev, next, side,
 
 const FxView = React.memo(function FxView({ f, pps, sel, name, drop, masked }: { f: FxItem; pps: number; sel: boolean; name: string; drop: boolean; masked: boolean }) {
   const key = keyOf('effect', f.id);
+  const preview = movePreview(key);
   const opCls = useOpCls(key);
   return (
     <div
       data-key={key}
-      className={`fxitem ${sel ? 'sel' : ''} ${drop ? 'drop-hint replace' : ''} ${opCls}`}
-      style={{ left: f.start * pps, width: Math.max(4, f.duration * pps) }}
+      className={`fxitem ${sel ? 'sel' : ''} ${drop ? 'drop-hint replace' : ''} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
+      style={{ left: f.start * pps, width: Math.max(4, f.duration * pps), '--overlap-left': `${preview.affected?.left ?? 0}px`, '--overlap-width': `${preview.affected?.width ?? 0}px` } as React.CSSProperties}
       onPointerDown={(e) => itemPointerDown(e, 'effect', f)}
       onDoubleClick={() => openItemEditor('effect', f.id)}
       onContextMenu={(e) => itemMenu(e, 'effect', f)}
     >
       <div className="handle l" onPointerDown={(e) => resizeItem(e, 'effect', f, 'l', false)} />
       {f.group && <Group size={11} className="link-ico" />}
-      <span className="clip-name" title={name}>{name}</span>
+      <span className="clip-name" title={`${name} · ${f.duration.toFixed(2)}s`}>{name}</span>
       {masked && <span className="badge" title={$t('有遮罩')}><CircleDashed size={10} /></span>}
       {drop && <span className="badge replace-tag"><Replace size={10} /> {$t('取代')}</span>}
       <OpBadge k={key} />
@@ -724,19 +827,20 @@ const FxView = React.memo(function FxView({ f, pps, sel, name, drop, masked }: {
 const AudioView = React.memo(function AudioView({ a, m, pps, sel }: { a: AudioClip; m: Media | undefined; pps: number; sel: boolean }) {
   const label = a.name ?? m?.name ?? $t('未知素材');
   const key = keyOf('audio', a.id);
+  const preview = movePreview(key);
   const opCls = useOpCls(key);
   const ok = mediaUsable(m);
   const w = Math.max(4, a.duration * pps);
   return (
     <div
       data-key={key}
-      className={`audioitem ${sel ? 'sel' : ''} ${ok ? '' : 'missing'} ${opCls}`}
-      style={{ left: a.start * pps, width: w }}
+      className={`audioitem ${sel ? 'sel' : ''} ${ok ? '' : 'missing'} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
+      style={{ left: a.start * pps, width: w, '--overlap-left': `${preview.affected?.left ?? 0}px`, '--overlap-width': `${preview.affected?.width ?? 0}px` } as React.CSSProperties}
       title={ok ? undefined : $t('素材遺失：右鍵「重新連結素材…」')}
       onPointerDown={(e) => itemPointerDown(e, 'audio', a)}
       onContextMenu={(e) => itemMenu(e, 'audio', a, m)}
     >
-      {ok && <Waveform media={m} inT={a.in} dur={a.duration * (a.rate ?? 1)} width={w} />}
+      {ok && <Waveform media={m} inT={a.in} dur={a.duration * (a.rate ?? 1)} width={w} gain={{ volume: a.volume, fadeIn: a.fadeIn, fadeOut: a.fadeOut, len: a.duration }} />}
       {Math.abs((a.rate ?? 1) - 1) > 1e-3 && <span className="badge">{+(a.rate ?? 1).toFixed(2)}×</span>}
       <OpBadge k={key} />
       {a.fadeIn > 0 && <div className="fade in" style={{ width: a.fadeIn * pps }} />}
@@ -745,7 +849,7 @@ const AudioView = React.memo(function AudioView({ a, m, pps, sel }: { a: AudioCl
       {!ok && <TriangleAlert size={12} className="warn-ico" />}
       {a.link && <Link2 size={11} className="link-ico" />}
       {a.group && <Group size={11} className="link-ico" />}
-      <span className="clip-name" title={label}>{ok ? label : $t('遺失：{0}', label)}</span>
+      <span className="clip-name" title={`${label} · ${a.duration.toFixed(2)}s`}>{ok ? label : $t('遺失：{0}', label)}</span>
       <div className="handle r" onPointerDown={(e) => resizeItem(e, 'audio', a, 'r', true, ok ? m.duration : Infinity)} />
     </div>
   );
@@ -790,6 +894,7 @@ export function Timeline() {
   const sel = useStore((s) => s.selection);
   const selected = useStore((s) => s.selected);
   const drag = useDrag((s) => s.drag);
+  const placement = usePlacementPreview((s) => s.items);
   const upperAt = useLayout((s) => s.upperLayerAt);
   // store 需要知道顯示方向（新增軌道 / 取消連結時判斷「下面」是哪裡）
   useEffect(() => {
@@ -869,7 +974,7 @@ export function Timeline() {
       const s = useStore.getState();
       const rect = el.getBoundingClientRect();
       const off = e.clientX - rect.left - LABEL_W;
-      const np = Math.min(800, Math.max(5, s.pps * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
+      const np = Math.min(PPS_MAX, Math.max(PPS_MIN, s.pps * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
       if (np === s.pps) return;
       zoomAnchor.current = { t: (el.scrollLeft + off) / s.pps, off }; // 滑鼠底下的時間點不動
       s.setPps(np);
@@ -899,7 +1004,7 @@ export function Timeline() {
     });
     const fit = () => {
       const dur = Math.max(1, projectDuration(useStore.getState()));
-      const np = Math.min(800, Math.max(5, (el.clientWidth - LABEL_W - 40) / dur));
+      const np = Math.min(PPS_MAX, Math.max(PPS_MIN, (el.clientWidth - LABEL_W - 40) / dur));
       if (np !== useStore.getState().pps) zoomAnchor.current = { t: 0, off: 0 }; // 縮放沒變就不會重畫，不能留下錨點
       useStore.getState().setPps(np);
       el.scrollLeft = 0;
@@ -927,11 +1032,18 @@ export function Timeline() {
     e.preventDefault();
     e.stopPropagation();
     stopPreviewFx();
-    S.setTime(timeAt(e.clientX));
+    // 播放頭對齊到 1/60 秒一格
+    S.setTime(snapFrame(timeAt(e.clientX)));
     document.body.classList.add('resizing-v');
     listen(
-      (ev) => S.setTime(timeAt(ev.clientX)),
-      () => document.body.classList.remove('resizing-v'),
+      (ev) => {
+        setScrubbing(true); // 真的拖了才播聲音（單擊不出聲）
+        S.setTime(snapFrame(timeAt(ev.clientX)));
+      },
+      () => {
+        setScrubbing(false);
+        document.body.classList.remove('resizing-v');
+      },
     );
   };
 
@@ -1033,7 +1145,7 @@ export function Timeline() {
     e.preventDefault();
     const t = timeAt(e.clientX);
     openMenu(e.clientX, e.clientY, [
-      { label: $t('貼上到這裡'), shortcut: 'Ctrl+V', action: S.clipboard ? () => S.paste({ time: t, track: idx, kind }) : undefined },
+      { label: $t('貼上到這裡'), shortcut: 'Ctrl+V', action: S.clipboard ? () => pasteTimeline({ time: t, track: idx, kind }, { x: e.clientX, y: e.clientY }) : undefined },
       ...(useStore.getState().loop ? [{ label: $t('停止循環'), action: () => useStore.getState().setLoop(null) }] : []),
       ...(kind === 'video' ? [{ label: $t('在這裡加入文字'), action: () => S.addText('title', t, idx) }] : []),
       { separator: true },
@@ -1113,7 +1225,7 @@ export function Timeline() {
               sel={isSel('clip', c.id)}
               remapName={c.remap.moduleId !== 'remap-speed' ? modName(c.remap.moduleId) : null}
               drop={isDrop}
-              dropThumb={isDrop === 'relink' ? dropThumb : undefined}
+              dropThumb={isDrop === 'relink' || isDrop === 'replace' ? dropThumb : undefined}
             />
             {c.transitionIn && (
               <TransitionView c={c} prev={sorted[i - 1]} next={sorted[i + 1]} side="in" pps={pps} sel={sel?.type === 'transition' && sel.id === c.id} name={modName(c.transitionIn.moduleId)} />
@@ -1157,6 +1269,18 @@ export function Timeline() {
       </div>
     );
   };
+
+  const pendingFor = (kind: TrackKind, idx: number) => placement
+    .filter((g) => KIND_OF[g.type] === kind && g.track === idx)
+    .map((g, i) => (
+      <div
+        key={`${g.type}:${g.track}:${g.start}:${i}`}
+        className={`${kind === 'video' ? 'clip' : kind === 'fx' ? 'fxitem' : 'audioitem'} drop-ghost placement-ghost`}
+        style={{ left: g.start * pps, width: Math.max(8, g.duration * pps), backgroundImage: g.thumb ? `url(${g.thumb})` : undefined }}
+      >
+        <span className="clip-name">{g.label}</span>
+      </div>
+    ));
 
   /** 特效軌的層級分隔：上一列是特效、這一列是影片時畫一條線，提示特效只作用到線以下 */
   const fxBoundary = (i: number) => !!rows[i - 1] && rows[i].kind !== 'audio' && rows[i - 1].kind !== 'audio' && rows[i].kind !== rows[i - 1].kind;
@@ -1230,6 +1354,7 @@ export function Timeline() {
                 >
                   {renderLane(kind, idx)}
                   {ghostFor(kind, idx)}
+                  {pendingFor(kind, idx)}
                   {!drag && kind === 'video' && idx === 0 && clips.length === 0 && <div className="track-hint">{$t('把素材拖到這裡')}</div>}
                   {!drag && kind === 'fx' && idx === 0 && effects.length === 0 && <div className="track-hint">{$t('把特效拖到這裡')}</div>}
                   {!drag && kind === 'audio' && idx === 0 && audios.every((a) => attached.has(a.id)) && <div className="track-hint">{$t('把音樂拖到這裡')}</div>}
@@ -1292,8 +1417,8 @@ export function Timeline() {
   );
 }
 
-// 縮放滑桿用對數刻度：5 ~ 800 px/s
-const ZMIN = 5, ZMAX = 800;
+// 縮放滑桿用對數刻度：5 ~ 1200 px/s（放到最大一格 1/60 秒 = 20px）
+const ZMIN = PPS_MIN, ZMAX = PPS_MAX;
 const toSlider = (pps: number) => (Math.log(pps / ZMIN) / Math.log(ZMAX / ZMIN)) * 1000;
 const fromSlider = (v: number) => ZMIN * Math.pow(ZMAX / ZMIN, v / 1000);
 
@@ -1331,8 +1456,19 @@ function TimelineToolbar() {
   );
 }
 
-function Waveform({ media, inT, dur, width }: { media: Media; inT: number; dur: number; width: number }) {
+/** 波形跟著音量走：音量 × 淡入淡出（跟 audio.ts 一樣是線性），音量 0 就是一條線 */
+type Gain = { volume: number; fadeIn: number; fadeOut: number; len: number };
+const gainAt = (g: Gain | undefined, local: number) => {
+  if (!g) return 1;
+  let f = 1;
+  if (g.fadeIn > 0) f = Math.min(f, local / g.fadeIn);
+  if (g.fadeOut > 0) f = Math.min(f, (g.len - local) / g.fadeOut);
+  return g.volume * Math.min(1, Math.max(0, f));
+};
+
+function Waveform({ media, inT, dur, width, gain }: { media: Media; inT: number; dur: number; width: number; gain?: Gain }) {
   const ref = useRef<HTMLCanvasElement>(null);
+  const gv = gain?.volume, gi = gain?.fadeIn, go = gain?.fadeOut, gl = gain?.len;
   useEffect(() => {
     const c = ref.current;
     const peaks = media.peaks;
@@ -1350,23 +1486,28 @@ function Waveform({ media, inT, dur, width }: { media: Media; inT: number; dur: 
       const i1 = Math.max(i0, Math.floor((inT + ((x + 1) / W) * dur) * ps));
       let m = 0;
       for (let i = i0; i <= i1 && i < peaks.length; i++) m = Math.max(m, peaks[i]);
-      const h = Math.max(1, m * H);
+      const k = gainAt(gain, gain ? ((x + 0.5) / W) * gain.len : 0);
+      const h = Math.max(1, Math.min(1, m * k) * H);
       g.fillRect(x, (H - h) / 2, 1, h);
     }
-  }, [media, inT, dur, width]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [media, inT, dur, width, gv, gi, go, gl]);
   return <canvas ref={ref} className="wave" />;
 }
 
 const Ruler = React.memo(function Ruler({ end, pps, onPointerDown }: { end: number; pps: number; onPointerDown: (e: React.PointerEvent) => void }) {
-  const step = pps >= 200 ? 0.5 : pps >= 60 ? 1 : pps >= 25 ? 2 : pps >= 10 ? 5 : 10;
-  const ticks = [];
-  for (let s = 0; s <= end; s += step) ticks.push(s);
+  // 放大到最後，最小的刻度是 1/60 秒（一格）；有數字的刻度用整數格數算，不會累積誤差
+  const { major, minor } = rulerSteps(pps);
+  const n = Math.round(major * 60);
+  const ticks: number[] = [];
+  for (let f = 0; f / 60 <= end; f += n) ticks.push(f / 60);
   const loop = useStore((s) => s.loop);
+  const w = minor * pps;
   return (
-    <div className="ruler" onPointerDown={onPointerDown}>
+    <div className="ruler" onPointerDown={onPointerDown} style={{ backgroundImage: `repeating-linear-gradient(90deg, #ffffff12 0 1px, transparent 1px ${w}px)` }}>
       {ticks.map((s) => (
         <div key={s} className="tick" style={{ left: s * pps }}>
-          {Number.isInteger(s) ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : ''}
+          {rulerLabel(s, major)}
         </div>
       ))}
       {loop && <div className="loop-region" style={{ left: loop.a * pps, width: (loop.b - loop.a) * pps }} />}

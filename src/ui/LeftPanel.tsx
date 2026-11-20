@@ -16,6 +16,8 @@ import { parseDuration, parseParams, type ParamDef, type ParamValue, type ParamV
 import { computeFrame, transitionWindow, sortClips, makeCtx } from '../engine/renderer';
 import { DEFAULT_TRANSFORM, FITS, type Fit } from '../engine/transform';
 import { plainSpeed } from '../engine/remap';
+import { stillDur } from '../prefs';
+import { tc } from '../engine/rulerTicks';
 import { CURVE_ID, curveCode, defaultCurveKeys, keysToCurve } from '../engine/remapCurve';
 
 /** 混合模式選單（函式：語言在載入時決定） */
@@ -309,7 +311,7 @@ export function TextPanel() {
   const add = (id: string) => {
     const s = useStore.getState();
     const p = TEXT_PRESETS.find((x) => x.id === id);
-    s.addText(id, s.time, s.trackForInsert('video', s.time, p?.duration ?? 3));
+    s.addText(id, s.time, s.trackForInsert('video', s.time, stillDur()));
     revealSelection();
   };
   return (
@@ -605,8 +607,32 @@ function ParamWidget({ d, v, onChange }: { d: ParamDef; v: ParamValue; onChange:
 const paramRows = (defs: ParamDef[], values: ParamValues, set: (p: ParamValues) => void) =>
   defs.map((d) => ({ label: $t(d.label), node: <ParamWidget d={d} v={values[d.name] ?? d.def} onChange={(v) => set({ ...values, [d.name]: v })} /> }));
 
+
+/**
+ * 「資訊」：開始 / 長度 / 結束（＋素材）。
+ * setDur：長度可以直接改（圖片、色板、文字、特效）；影片 / 音訊的長度受素材限制，用修剪。
+ */
+function infoRows(it: { start: number; duration: number }, media?: Media, setDur?: (v: number) => void) {
+  const rows: { label: string; node: React.ReactNode }[] = [
+    { label: $t('開始'), node: <span className="info-val">{tc(it.start)}</span> },
+    {
+      label: $t('長度'),
+      node: setDur
+        ? <DragNumber variant="text" value={it.duration} min={0.05} step={0.01} suffix="s" onChange={setDur} />
+        : <span className="info-val">{it.duration.toFixed(2)}s</span>,
+    },
+    { label: $t('結束'), node: <span className="info-val">{tc(it.start + it.duration)}</span> },
+  ];
+  if (media) {
+    const size = media.width && media.height ? `${media.width}×${media.height}` : '';
+    const len = media.kind !== 'image' ? `${media.duration.toFixed(2)}s` : '';
+    rows.push({ label: $t('素材'), node: <span className="info-val" title={media.name}>{[size, len].filter(Boolean).join(' · ') || media.name}</span> });
+  }
+  return rows;
+}
+
 /** 改速度導致片段變長時，不能蓋到同軌下一個片段：回傳允許的最大長度 */
-function maxDurFor(type: 'clip' | 'audio', it: { id: string; start: number; duration: number; track: number }) {
+function maxDurFor(type: 'clip' | 'audio' | 'effect', it: { id: string; start: number; duration: number; track: number }) {
   const s = useStore.getState();
   return nextStart(spansOf(s, new Set([`${type}:${it.id}`])), laneOf(type, it.track), it.start + it.duration) - it.start;
 }
@@ -742,7 +768,11 @@ function ClipInspector({ id }: { id: string }) {
     updateClip(clip.id, { remap: { ...clip.remap, params: p } });
   };
 
+  // 圖片 / 色板 / 文字的長度可以直接改（最多到同軌下一個片段）
+  const still = isText || media?.kind === 'image';
+  const setDur = still ? (v: number) => updateClip(clip.id, { duration: Math.max(0.05, Math.min(v, maxDurFor('clip', clip))) }) : undefined;
   const sections: Section[] = [
+    { id: 'info', title: $t('資訊'), rows: infoRows(clip, isText ? undefined : media, setDur) },
     ...(isText ? [textSection(clip as Clip & { text: TextStyle })] : []),
     {
       id: 'motion',
@@ -1145,7 +1175,10 @@ function EffectInspector({ id }: { id: string }) {
   const { updateEffect } = useStore.getState();
   const host = fxHost(fx.id)!;
   const local = Math.min(fx.duration, Math.max(0, time - fx.start));
-  const sections = effectSections(fx, mod, local, (p) => updateEffect(id, p as Partial<FxItem>), { idBase: 'fx', drawKey: `fx:${fx.id}`, fresh: () => useStore.getState().effects.find((e) => e.id === id) });
+  const sections = [
+    { id: 'info', title: $t('資訊'), rows: infoRows(fx, undefined, (v) => updateEffect(id, { duration: Math.max(0.05, Math.min(v, maxDurFor('effect', fx))) })) },
+    ...effectSections(fx, mod, local, (p) => updateEffect(id, p as Partial<FxItem>), { idBase: 'fx', drawKey: `fx:${fx.id}`, fresh: () => useStore.getState().effects.find((e) => e.id === id) }),
+  ];
   return (
     <EffectControls
       host={host}
@@ -1238,6 +1271,7 @@ function AudioInspector({ id }: { id: string }) {
     <PlainControls
       title={<Title kind="k-audio" label={$t('音訊')} name={a.name ?? media?.name ?? $t('（素材遺失）')} onRename={(n) => useStore.getState().renameItem('audio', a.id, n)} />}
       rows={[
+        ...infoRows(a, media ?? undefined),
         { label: $t('音量'), node: <DragNumber variant="text" value={a.volume} min={0} max={1} step={0.01} display={100} suffix="%" def={1} onChange={(v) => updateAudio(id, { volume: v })} /> },
         { label: $t('淡入'), node: <DragNumber variant="text" value={a.fadeIn} min={0} max={Math.min(10, a.duration)} step={0.01} suffix="s" def={0} onChange={(v) => updateAudio(id, { fadeIn: v })} /> },
         { label: $t('淡出'), node: <DragNumber variant="text" value={a.fadeOut} min={0} max={Math.min(10, a.duration)} step={0.01} suffix="s" def={0} onChange={(v) => updateAudio(id, { fadeOut: v })} /> },

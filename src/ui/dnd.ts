@@ -3,7 +3,8 @@ import type React from 'react';
 import { useStore, mediaUsable, spansOf, type TrackKind } from '../store';
 import { parseDuration } from '../engine/params';
 import { addMediaBlob, colorMedia } from '../engine/media';
-import { fitStart } from '../engine/overlap';
+import { fitInGap, fitStart } from '../engine/overlap';
+import { stillDur } from '../prefs';
 import { TEXT_PRESETS } from '../engine/text';
 import { setClipMask, setEffectMask } from './MaskPanel';
 import { confirmDialog, toast, useDrag, useSnapLine, type DragPayload, type DragState, type DropTarget } from './uiStore';
@@ -21,7 +22,7 @@ function laneDuration(payload: DragPayload): { dur: number; label: string; accep
     if (!mediaUsable(m)) return null;
     if (m.kind === 'audio') return { dur: m.duration, label: m.name, accepts: (k) => k === 'audio' };
     return {
-      dur: m.kind === 'video' ? m.duration : 2,
+      dur: m.kind === 'video' ? m.duration : stillDur(),
       label: m.name,
       accepts: (k) => k === 'video' || (k === 'audio' && m.hasAudio),
     };
@@ -30,12 +31,12 @@ function laneDuration(payload: DragPayload): { dur: number; label: string; accep
     const m = s.modules.find((x) => x.id === payload.id);
     return { dur: m ? parseDuration(m.code, 0.5) : 0.5, label: m ? displayName(m.name) : '', accepts: (k) => k === 'fx' };
   }
-  if (payload.kind === 'color') return { dur: 2, label: payload.color, accepts: (k) => k === 'video' };
+  if (payload.kind === 'color') return { dur: stillDur(), label: payload.color, accepts: (k) => k === 'video' };
   if (payload.kind === 'text') {
     const p = TEXT_PRESETS.find((x) => x.id === payload.preset);
-    return { dur: p?.duration ?? 3, label: p?.name ?? '', accepts: (k) => k === 'video' };
+    return { dur: stillDur(), label: p?.name ?? '', accepts: (k) => k === 'video' };
   }
-  if (payload.kind === 'files') return { dur: 2, label: $t('{0} 個檔案', payload.count), accepts: (k) => k !== 'fx' };
+  if (payload.kind === 'files') return { dur: stillDur(), label: $t('{0} 個檔案', payload.count), accepts: (k) => k !== 'fx' };
   return null;
 }
 
@@ -114,6 +115,11 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
       return { kind: 'clip', clipId: clip.id, action: 'relink', valid };
     }
   }
+  // 圖片 / 影片 / 色板拖到時間軸上的影片或圖片片段 → 直接取代這個片段的素材（文字片段、音訊素材不算）
+  if (clip && !clip.text && (payload.kind === 'media' || payload.kind === 'color' || payload.kind === 'files')) {
+    const nm = payload.kind === 'media' ? s.media.find((x) => x.id === payload.id) : undefined;
+    if (payload.kind !== 'media' || (mediaUsable(nm) && nm.kind !== 'audio')) return { kind: 'clip', clipId: clip.id, action: 'replace', valid: true };
+  }
 
   const laneEl = els.find((e) => e.dataset.laneKind);
   if (!laneEl) {
@@ -138,9 +144,10 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
   }
   if (!s.snap) snapped = null;
   useSnapLine.setState({ t: snapped });
-  // 同一軌不能重疊：放到最近的空位
-  time = fitStart(spansOf(s), `${lane}:${idx}`, time, info.dur);
-  return { kind: 'lane', lane, idx, time, duration: info.dur, label: info.label };
+  // 同一軌不能重疊：放到最近的空位；圖片 / 色板 / 文字放進空隙時縮短到剛好填滿
+  const flexible = payload.kind === 'color' || payload.kind === 'text' || (payload.kind === 'media' && s.media.find((m) => m.id === payload.id)?.kind === 'image');
+  const fit = flexible ? fitInGap(spansOf(s), `${lane}:${idx}`, time, info.dur) : { start: fitStart(spansOf(s), `${lane}:${idx}`, time, info.dur), duration: info.dur };
+  return { kind: 'lane', lane, idx, time: fit.start, duration: fit.duration, label: info.label };
 }
 
 /** 執行放置 */
@@ -188,11 +195,18 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
       else s.setRemap(clip.id, payload.id);
       return;
     }
-    // 重新連結
     let newId: string | null = null;
     if (payload.kind === 'media') newId = payload.id;
+    else if (payload.kind === 'color') newId = (await colorMedia(payload.color))?.id ?? null;
     else if (files?.length) newId = (await addMediaBlob(files[0], files[0].name))?.id ?? null;
     if (!newId) return;
+    // 取代：只換這一個片段
+    if (target.action === 'replace') {
+      if (useStore.getState().replaceClipMedia(clip.id, newId)) toast($t('已取代片段的素材'));
+      else toast($t('這裡不能放'), 'error');
+      return;
+    }
+    // 重新連結（素材遺失）
     const old = s.media.find((m) => m.id === clip.mediaId);
     useStore.getState().relinkMedia(clip.mediaId, newId);
     toast($t('已重新連結{0}', old ? $t('「{0}」', old.name) : ''));
@@ -204,7 +218,8 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
     const m = st.media.find((x) => x.id === mediaId);
     if (!mediaUsable(m)) return 0;
     if (target.lane === 'audio' || m.kind === 'audio') st.addAudio(mediaId, time, target.lane === 'audio' ? target.idx : 0);
-    else st.addClip(mediaId, time, target.lane === 'video' ? target.idx : 0);
+    // 圖片：用放置目標算好的長度（放進空隙時已經縮短）
+    else st.addClip(mediaId, time, target.lane === 'video' ? target.idx : 0, m.kind === 'image' && !files ? { in: 0, duration: target.duration } : undefined);
     const after = useStore.getState();
     const sel = after.selection;
     const it = sel && [...after.clips, ...after.audios].find((x) => x.id === sel.id);
@@ -212,7 +227,7 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
   };
   if (payload.kind === 'media') place(payload.id, target.time);
   else if (payload.kind === 'module') s.addEffect(payload.id, target.time, target.idx);
-  else if (payload.kind === 'text') s.addText(payload.preset, target.time, target.idx);
+  else if (payload.kind === 'text') s.addText(payload.preset, target.time, target.idx, target.duration);
   else if (payload.kind === 'color') {
     const m = await colorMedia(payload.color);
     if (m) place(m.id, target.time);

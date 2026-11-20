@@ -4,6 +4,7 @@ import { Clapperboard, Pause, Play, SkipBack, X } from 'lucide-react';
 import { mediaUsable, useStore, type Media } from '../store';
 import { $t } from '../i18n';
 import { scrubFrame } from '../engine/scrubCache';
+import { tc } from '../engine/rulerTicks';
 import { useDock } from './Dock';
 import { revealSelection, stopPreviewFx, useEditorWindow, usePreviewFx } from './uiStore';
 
@@ -32,11 +33,7 @@ useEditorWindow.subscribe((s, p) => {
   if (s.open && !p.open) closeSource();
 });
 
-const fmt = (t: number) => {
-  const m = Math.floor(t / 60);
-  const s = t - m * 60;
-  return `${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`;
-};
+const fmt = (t: number) => tc(t);
 
 /** 預覽面板裡的素材預覽（沒有打開時回傳 null） */
 export function SourceOverlay() {

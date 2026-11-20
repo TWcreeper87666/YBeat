@@ -10,6 +10,8 @@ import { clipTransformAt } from '../engine/transform';
 import { parseParams, resolveParams } from '../engine/params';
 import { DEFAULT_MASK, MASK_PROPS, maskKey } from '../engine/mask';
 import { DragNumber } from './DragNumber';
+import { setScrubbing } from '../engine/audio';
+import { frameTicks, tc } from '../engine/rulerTicks';
 import { openMenu, useKeySel, useLayout, type KeyRef } from './uiStore';
 import { ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Timer } from 'lucide-react';
 
@@ -475,6 +477,15 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
+  const [rulerW, setRulerW] = useState(320);
+  useLayoutEffect(() => {
+    const el = rulerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setRulerW(el.clientWidth));
+    ro.observe(el);
+    setRulerW(el.clientWidth);
+    return () => ro.disconnect();
+  }, []);
   const tableRef = useRef<HTMLDivElement>(null);
   const S = useStore.getState();
   const dur = host.duration;
@@ -556,7 +567,13 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
     if (e.button !== 0) return;
     e.preventDefault();
     seek(localAt(e.clientX));
-    listen((ev) => seek(localAt(ev.clientX)));
+    listen(
+      (ev) => {
+        setScrubbing(true);
+        seek(localAt(ev.clientX));
+      },
+      () => setScrubbing(false),
+    );
   };
 
   /** 關鍵影格區的空白處：框選（Shift / Ctrl 加選），單擊空白 = 取消選取 */
@@ -713,7 +730,8 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
   };
 
   const toggleSection = (id: string) => useLayout.getState().set({ ecCollapsed: { ...collapsed, [id]: !collapsed[id] } });
-  const ticks = niceTicks(view.a, view.b);
+  // 刻度文字是 mm:ss:ff（比較寬）：依尺規寬度決定最多幾個，每個至少 64px
+  const { ticks, step: tickStep } = frameTicks(view.a, view.b, Math.floor(rulerW / 64));
   const frac = (t: number) => (t - view.a) / span;
   const pct = (t: number) => `${frac(t) * 100}%`;
   /** 範圍外的關鍵影格不畫（留一點邊，邊上的菱形還看得到一半） */
@@ -746,11 +764,11 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
       <div className="ec-row ec-header">
         <div className="ec-left">
           {title}
-          <span className="ec-time">{inside ? `${lc.toFixed(2)}s` : '—'}</span>
+          <span className="ec-time">{inside ? tc(lc) : '—'}</span>
           <div className="ec-split" onPointerDown={dragSplit} title={$t('拖曳調整左右寬度')} />
         </div>
         <div className="ec-right ec-ruler" ref={rulerRef} onPointerDown={scrub} title={$t('拖曳移動播放頭')}>
-          {ticks.map((t) => <span key={t} className={`ec-tick ${frac(t) < 0.01 ? 'first' : ''}`} style={{ left: pct(t) }}>{fmtT(t, span)}</span>)}
+          {ticks.map((t) => <span key={t} className={`ec-tick ${frac(t) < 0.01 ? 'first' : ''}`} style={{ left: pct(t) }}>{tc(t, tickStep < 1 - 1e-9)}</span>)}
           <div
             className={`ec-zoombar ${zoomed ? 'zoomed' : ''}`}
             onPointerDown={(e) => dragZoom(e, 'bar')}
@@ -872,20 +890,6 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
   );
 }
 
-/** span = 目前看得到的長度；越放大小數位越多 */
-function fmtT(t: number, span: number) {
-  const d = span < 0.4 ? 2 : span < 10 ? 1 : 0;
-  return `${d ? +t.toFixed(d) : Math.round(t)}s`;
-}
-
-export function niceTicks(a: number, b: number) {
-  const raw = (b - a) / 4;
-  const p = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 1e-6))));
-  const step = [1, 2, 5, 10].map((m) => m * p).find((s) => s >= raw) ?? raw;
-  const out: number[] = [];
-  for (let i = Math.ceil((a - 1e-6) / step); i * step <= b + 1e-6; i++) out.push(+(i * step).toFixed(4));
-  return out;
-}
 
 // ───────────────────────── 曲線列（展開在屬性下方） ─────────────────────────
 
@@ -1050,7 +1054,7 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
       <div className="ec-left ec-graph-side">
         {a && b ? (
           <>
-            <div className="muted small">{$t('區段')}{' '}{a.t.toFixed(2)}s → {b.t.toFixed(2)}s</div>
+            <div className="muted small">{$t('區段')}{' '}{tc(a.t)} → {tc(b.t)}</div>
             <select className="select wide" value={curEase} onChange={(e) => { const p = EASE_PRESETS.find((x) => x.id === e.target.value); if (p) setSegmentEase(host, ch.id, seg, p.ease); }}>
               {curEase === 'custom' && <option value="custom">{$t('自訂曲線')}</option>}
               {EASE_PRESETS.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}

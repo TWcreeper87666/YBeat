@@ -9,7 +9,9 @@ import { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualR
 export { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualRows, type TrackKind, type TrackState, type Tracks };
 import { ANIM_PROPS, newKey, scaleKeyList, scaleKeyMap, splitKeys, type Ease, type Keyframe, type Keys } from './engine/keyframes';
 import { CURVE_ID, curveToKeys, parseCurve } from './engine/remapCurve';
-import { fitStart, groupFits, resolveShift, type Span } from './engine/overlap';
+import { fitStart, groupFits, resolveShift, overwriteParts, insertParts, type Span } from './engine/overlap';
+import { stillDur, transDur } from './prefs';
+import { PPS_MAX, PPS_MIN } from './engine/rulerTicks';
 import { DEFAULT_TEXT, TEXT_PRESETS, type TextStyle } from './engine/text';
 import type { Mask } from './engine/mask';
 
@@ -111,6 +113,10 @@ export interface Clip extends ItemBase {
 }
 
 export type BlendMode = 'normal' | 'add' | 'screen' | 'multiply' | 'subtract' | 'lighten';
+export type TimelineDropMode = 'overwrite' | 'insert' | 'insertAll' | 'trimFit' | 'speedFit';
+export interface DropFit { duration: number; speed: boolean }
+export interface PlacementGhost { type: ItemType; track: number; start: number; duration: number; label: string; thumb?: string }
+export interface PasteResult { conflict: boolean; fit: DropFit | null; preview: PlacementGhost[] }
 
 export interface FxItem extends ItemBase {
   id: string;
@@ -212,6 +218,8 @@ interface State {
   updateClip(id: string, patch: Partial<Clip>): void;
   updateAudio(id: string, patch: Partial<AudioClip>): void;
   patchItems(patches: Record<string, Partial<AnyItem>>): void;
+  resolveTimelineDrop(keys: string[], mode: TimelineDropMode): void;
+  dropFit(keys: string[]): DropFit | null;
   setTransition(clipId: string, moduleId: string | null, side?: TrSide): void;
   updateTransition(clipId: string, patch: Partial<TransitionRef>, side?: TrSide): void;
   /** 在一條影片軌上批次套用轉場：剪接點 / 片段開頭（從透明轉入）/ 片段結尾（轉到透明） */
@@ -227,11 +235,13 @@ interface State {
   insertMedia(mediaId: string, range?: { in: number; duration: number }): void;
   setRemap(clipId: string, moduleId: string): void;
   addEffect(moduleId: string, start: number, track?: number): void;
-  addText(presetId: string, start?: number, track?: number): void;
+  addText(presetId: string, start?: number, track?: number, duration?: number): void;
   updateEffect(id: string, patch: Partial<FxItem>): void;
   /** 換成另一個特效模組（參數與參數的關鍵影格會清掉，遮罩保留） */
   replaceEffect(id: string, moduleId: string): void;
   relinkMedia(oldId: string, newId: string): void;
+  /** 把單一片段換成另一個素材（位置、長度、變換、特效、轉場都保留）；回傳是否成功 */
+  replaceClipMedia(clipId: string, mediaId: string): boolean;
   /** ripple = true：同一軌往前推；'all'：所有軌道一起往前推（其他軌被擋住時只推到不重疊為止） */
   removeSelection(ripple?: boolean | 'all'): void;
   /** 沒有選取時：移除選中軌道上播放頭所在的空白，後面的項目往前推 */
@@ -243,8 +253,8 @@ interface State {
   nudge(dt: number): void;
   copy(): void;
   cut(): void;
-  paste(at?: { time: number; track: number; kind: TrackKind }): void;
-  duplicate(): void;
+  paste(at?: { time: number; track: number; kind: TrackKind }, mode?: TimelineDropMode): PasteResult | null;
+  duplicate(mode?: TimelineDropMode): PasteResult | null;
   /** level：特效軌放在第幾條影片軌上方（沒給就自動） */
   addTrack(kind: TrackKind, at?: number, level?: number, row?: number): void;
   moveTrack(kind: TrackKind, from: number, to: number): void;
@@ -576,17 +586,46 @@ export const useStore = create<State>()(
         return items.map((it) => (it.link || it.group ? { ...it, link: re(it.link), group: re(it.group) } : it));
       };
 
-      const pasteItems = (items: { type: ItemType; item: AnyItem }[], base: number, at?: { track: number; kind: TrackKind }) => {
-        if (!items.length) return;
+      /** 單一可見片段（含連結原音）到下一個片段之間，是否有可縮入的空隙。 */
+      const dropFit = (items: { type: ItemType; item: AnyItem }[], s: State, exclude = new Set<string>()): DropFit | null => {
+        const clips = items.filter((x) => x.type === 'clip').map((x) => x.item as Clip);
+        const visible = items.filter((x) => x.type !== 'audio' || !x.item.link || !clips.some((c) => c.link === x.item.link));
+        if (visible.length !== 1) return null;
+        const { type, item } = visible[0];
+        const targetLane = laneOf(type, item.track);
+        const attached = attachedAudioIds(s);
+        const clipByLink = new Map(s.clips.filter((c) => c.link).map((c) => [c.link, c]));
+        let gap = Infinity;
+        for (const otherType of ['clip', 'effect', 'audio'] as ItemType[]) {
+          for (const other of s[LIST[otherType]] as AnyItem[]) {
+            if (exclude.has(keyOf(otherType, other.id))) continue;
+            const parent = otherType === 'audio' && attached.has(other.id) ? clipByLink.get(other.link) : undefined;
+            const otherLane = parent ? laneOf('clip', parent.track) : laneOf(otherType, other.track);
+            if (otherLane !== targetLane || other.start + other.duration <= item.start + 1e-4) continue;
+            gap = Math.min(gap, Math.max(0, other.start - item.start));
+          }
+        }
+        if (!Number.isFinite(gap) || gap < 0.05 || gap >= item.duration - 1e-4) return null;
+        const media = type === 'clip' ? s.media.find((m) => m.id === (item as Clip).mediaId) : undefined;
+        const speed = type === 'clip' && media?.kind === 'video' && (item as Clip).remap.moduleId === 'remap-speed'
+          && Number((item as Clip).remap.params.speed ?? 1) * item.duration / gap <= 8 + 1e-4;
+        return { duration: gap, speed };
+      };
+
+      const pasteItems = (items: { type: ItemType; item: AnyItem }[], base: number, at?: { track: number; kind: TrackKind }, mode?: TimelineDropMode): PasteResult | null => {
+        if (!items.length) return null;
         const s = get();
         const minStart = Math.min(...items.map((i) => i.item.start));
         const add: Record<string, AnyItem[]> = { clips: [], effects: [], audios: [] };
         const keys: string[] = [];
+        const targetKind = at?.kind;
+        const sourceTracks = items.filter((x) => KIND_OF[x.type] === targetKind).map((x) => x.item.track);
+        const firstTrack = sourceTracks.length ? Math.min(...sourceTracks) : 0;
         for (const { type, item } of items) {
           const kind = KIND_OF[type];
           let track = item.track;
-          if (at && items.length === 1 && at.kind === kind) track = at.track;
-          track = Math.min(track, s.tracks[kind].length - 1);
+          if (at && at.kind === kind) track += at.track - firstTrack;
+          track = Math.max(0, Math.min(track, s.tracks[kind].length - 1));
           const n = { ...structuredClone(item), id: uid(), start: Math.max(0, base + (item.start - minStart)), track };
           if (type === 'clip' && (n as Clip).effects) (n as Clip).effects = (n as Clip).effects!.map((f) => ({ ...f, id: uid() }));
           add[LIST[type]].push(n);
@@ -599,14 +638,30 @@ export const useStore = create<State>()(
           const byId = new Map(fresh.map((x) => [x.id, x]));
           for (const k of Object.keys(add)) add[k] = add[k].map((x) => byId.get(x.id)!);
         }
-        // 貼上的位置被佔用 → 整組往後挪到放得下的地方
-        const typeOfList = { clips: 'clip', effects: 'effect', audios: 'audio' } as const;
-        const moving: Span[] = [];
-        for (const [list, arr] of Object.entries(add) as [keyof typeof typeOfList, AnyItem[]][]) {
-          for (const it of arr) moving.push({ lane: laneOf(typeOfList[list], it.track), start: it.start, duration: it.duration });
+        const prepared = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((type) => add[LIST[type]].map((item) => ({ type, item })));
+        const linked = new Set((add.clips as Clip[]).map((c) => c.link).filter(Boolean));
+        const visible = prepared.filter(({ type, item }) => type !== 'audio' || !item.link || !linked.has(item.link));
+        const preview: PlacementGhost[] = visible.map(({ type, item }) => {
+          const media = type !== 'effect' ? s.media.find((m) => m.id === (item as Clip | AudioClip).mediaId) : undefined;
+          const module = type === 'effect' ? s.modules.find((m) => m.id === (item as FxItem).moduleId) : undefined;
+          return { type, track: item.track, start: item.start, duration: item.duration, label: item.name ?? media?.name ?? module?.name ?? '', thumb: type === 'clip' ? media?.thumb : undefined };
+        });
+        const moving = visible
+          .map(({ type, item }) => ({ lane: laneOf(type, item.track), start: item.start, duration: item.duration }));
+        const others = spansOf(s);
+        const conflict = moving.some((m) => others.some((o) => m.lane === o.lane && m.start < o.start + o.duration - 1e-4 && o.start < m.start + m.duration - 1e-4));
+        const fit = dropFit(prepared, s);
+        if (!mode && conflict) return { conflict, fit, preview };
+        if ((mode === 'trimFit' || mode === 'speedFit') && (!fit || (mode === 'speedFit' && !fit.speed))) return { conflict, fit, preview };
+        if (mode === 'trimFit' || mode === 'speedFit') {
+          for (const { type, item } of prepared) {
+            if (mode === 'speedFit') Object.assign(item, stretchPatch(type, item, item.start, fit!.duration / item.duration));
+            else {
+              item.duration = fit!.duration;
+              if (type === 'audio') (item as AudioClip).fadeOut = 0;
+            }
+          }
         }
-        const shift = resolveShift(moving, spansOf(s), 0, true);
-        if (shift) for (const arr of Object.values(add)) for (const it of arr) it.start += shift;
         const last = parseKey(keys[keys.length - 1]);
         set({
           clips: [...s.clips, ...(add.clips as Clip[])],
@@ -615,6 +670,8 @@ export const useStore = create<State>()(
           selected: keys,
           selection: last,
         });
+        if (mode === 'overwrite' || mode === 'insert' || mode === 'insertAll') get().resolveTimelineDrop(keys, mode);
+        return { conflict: false, fit: null, preview: [] };
       };
 
       return {
@@ -650,7 +707,7 @@ export const useStore = create<State>()(
           if (!mediaUsable(media)) return;
           if (media.kind === 'audio') return s.addAudio(mediaId, start, undefined, range);
           track = Math.min(track, s.tracks.video.length - 1);
-          const duration = range ? range.duration : media.kind === 'video' ? media.duration : 2; // 影片放完整長度
+          const duration = range ? range.duration : media.kind === 'video' ? media.duration : stillDur(); // 影片放完整長度、圖片用設定的預設長度
           const clip = makeClip({
             mediaId,
             track,
@@ -713,6 +770,84 @@ export const useStore = create<State>()(
             return { clips: apply('clip', s.clips), effects: apply('effect', s.effects), audios: apply('audio', s.audios) };
           }),
 
+        resolveTimelineDrop: (keys, mode) => {
+          const s = get();
+          const moving = new Set(keys);
+          if (mode === 'trimFit' || mode === 'speedFit') {
+            const items = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((type) =>
+              (s[LIST[type]] as AnyItem[]).filter((item) => moving.has(keyOf(type, item.id))).map((item) => ({ type, item })));
+            const fit = dropFit(items, s, moving);
+            if (!fit || (mode === 'speedFit' && !fit.speed)) return;
+            const patches: Record<string, Partial<AnyItem>> = {};
+            for (const { type, item } of items) {
+              patches[keyOf(type, item.id)] = mode === 'speedFit'
+                ? stretchPatch(type, item, item.start, fit.duration / item.duration)
+                : { duration: fit.duration, ...(type === 'audio' ? { fadeOut: 0 } : {}) };
+            }
+            get().patchItems(patches);
+            return;
+          }
+          const attached = attachedAudioIds(s);
+          const clipByLink = new Map(s.clips.filter((c) => c.link).map((c) => [c.link, c]));
+          const lane = (type: ItemType, it: AnyItem) => {
+            const parent = type === 'audio' && attached.has(it.id) ? clipByLink.get(it.link) : undefined;
+            return parent ? laneOf('clip', parent.track) : laneOf(type, it.track);
+          };
+          const dragged = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((type) =>
+            (s[LIST[type]] as AnyItem[]).filter((it) => moving.has(keyOf(type, it.id)))
+              .map((it) => ({ lane: lane(type, it), start: it.start, duration: it.duration })));
+          if (!dragged.length) return;
+          const insertAt = Math.min(...dragged.map((x) => x.start));
+          const insertLength = Math.max(...dragged.map((x) => x.start + x.duration)) - insertAt;
+          const lanes = new Set(dragged.map((x) => x.lane));
+          const lists: Record<string, AnyItem[]> = { clips: [], effects: [], audios: [] };
+          const newBacks: AnyItem[] = [];
+          for (const type of ['clip', 'effect', 'audio'] as ItemType[]) {
+            for (const it of s[LIST[type]] as AnyItem[]) {
+              if (moving.has(keyOf(type, it.id)) || (mode !== 'insertAll' && !lanes.has(lane(type, it)))) {
+                lists[LIST[type]].push(it);
+                continue;
+              }
+              const spans = mode === 'overwrite'
+                ? overwriteParts(it.start, it.duration, dragged.filter((x) => x.lane === lane(type, it)))
+                : insertParts(it.start, it.duration, insertAt, insertLength);
+              if (!spans.length) continue;
+              let pieces: AnyItem[] = [it];
+              const boundaries = [...new Set(mode !== 'overwrite' ? [insertAt] : spans.flatMap((p) => [p.start, p.start + p.duration]))]
+                .filter((t) => t > it.start + 1e-4 && t < it.start + it.duration - 1e-4).sort((a, b) => a - b);
+              for (const t of boundaries) {
+                pieces = pieces.flatMap((p) => t > p.start + 1e-4 && t < p.start + p.duration - 1e-4 ? splitOne(type, p, t) : [p]);
+              }
+              const used = new Set<string>();
+              for (const target of spans) {
+                const piece = pieces.find((p) => Math.abs(p.start - (mode !== 'overwrite' && target.start >= insertAt + insertLength - 1e-4 ? target.start - insertLength : target.start)) < 1e-4 && Math.abs(p.duration - target.duration) < 1e-4 && !used.has(p.id));
+                if (!piece) continue;
+                used.add(piece.id);
+                const result = target.start === piece.start ? piece : { ...piece, start: target.start };
+                lists[LIST[type]].push(result);
+                if (piece.id !== it.id) newBacks.push(result);
+              }
+            }
+          }
+          // New right-hand pieces remain linked to their matching audio, but not to the left-hand pieces.
+          const byStart = new Map<string, AnyItem[]>();
+          for (const it of newBacks) {
+            const k = it.start.toFixed(4);
+            byStart.set(k, [...(byStart.get(k) ?? []), it]);
+          }
+          const fresh = new Map([...byStart.values()].flatMap((g) => freshIds(g)).map((x) => [x.id, x]));
+          for (const k of Object.keys(lists)) lists[k] = lists[k].map((x) => fresh.get(x.id) ?? x);
+          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[] });
+        },
+
+        dropFit: (keys) => {
+          const s = get();
+          const moving = new Set(keys);
+          const items = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((type) =>
+            (s[LIST[type]] as AnyItem[]).filter((item) => moving.has(keyOf(type, item.id))).map((item) => ({ type, item })));
+          return dropFit(items, s, moving);
+        },
+
         setTransition: (clipId, moduleId, side = 'in') =>
           set((s) => {
             const f = side === 'out' ? 'transitionOut' : 'transitionIn';
@@ -720,7 +855,7 @@ export const useStore = create<State>()(
               clips: s.clips.map((c) => {
                 if (c.id !== clipId) return c;
                 const cur = c[f];
-                return { ...c, [f]: moduleId ? { moduleId, params: cur?.moduleId === moduleId ? cur.params : {}, duration: cur?.duration ?? 0.4 } : null };
+                return { ...c, [f]: moduleId ? { moduleId, params: cur?.moduleId === moduleId ? cur.params : {}, duration: cur?.duration ?? transDur() } : null };
               }),
               selection: moduleId ? { type: 'transition', id: trSelId(clipId, side) } : { type: 'clip', id: clipId },
               selected: moduleId ? [] : [keyOf('clip', clipId)],
@@ -737,7 +872,7 @@ export const useStore = create<State>()(
         applyTransitions: (track, scope, tpl) => {
           const s = get();
           const sorted = s.clips.filter((c) => c.track === track).sort((a, b) => a.start - b.start);
-          const ref = (): TransitionRef => ({ moduleId: tpl.moduleId, params: { ...(tpl.params ?? {}) }, duration: tpl.duration ?? 0.4 });
+          const ref = (): TransitionRef => ({ moduleId: tpl.moduleId, params: { ...(tpl.params ?? {}) }, duration: tpl.duration ?? transDur() });
           const patch = new Map<string, Partial<Clip>>();
           const adj = (a: Clip | undefined, b: Clip | undefined) => !!a && !!b && Math.abs(a.start + a.duration - b.start) <= 0.01;
           sorted.forEach((c, i) => {
@@ -784,7 +919,7 @@ export const useStore = create<State>()(
           if (!mediaUsable(media)) return;
           if (media.kind === 'audio' && !media.hasAudio) return;
           const kind: TrackKind = media.kind === 'audio' ? 'audio' : 'video';
-          const dur = range?.duration ?? (media.kind === 'image' ? 2 : media.duration);
+          const dur = range?.duration ?? (media.kind === 'image' ? stillDur() : media.duration);
           const t = s.time;
           const track = s.trackForInsert(kind, t, dur);
           get().addClip(mediaId, t, track, range);
@@ -810,17 +945,18 @@ export const useStore = create<State>()(
           set({ effects: [...s.effects, fx], selection: { type: 'effect', id: fx.id }, selected: [keyOf('effect', fx.id)], leftTab: 'editor' });
         },
 
-        addText: (presetId, start, track) => {
+        addText: (presetId, start, track, duration) => {
           const s = get();
           const p = TEXT_PRESETS.find((x) => x.id === presetId) ?? TEXT_PRESETS[0];
+          const dur = duration ?? stillDur();
           // 預設放在最上面的影片軌
           const tk = Math.max(0, Math.min(track ?? s.tracks.video.length - 1, s.tracks.video.length - 1));
           const t0 = Math.max(0, start ?? s.time);
           const clip = makeClip({
             mediaId: '',
             track: tk,
-            start: fitStart(spansOf(s), laneOf('clip', tk), t0, p.duration),
-            duration: p.duration,
+            start: fitStart(spansOf(s), laneOf('clip', tk), t0, dur),
+            duration: dur,
             fit: 'contain',
             text: { ...DEFAULT_TEXT, ...p.style },
             transform: { ...DEFAULT_TRANSFORM, y: p.y },
@@ -849,6 +985,37 @@ export const useStore = create<State>()(
             audios: s.audios.map((a) => (a.mediaId === oldId ? { ...a, mediaId: newId } : a)),
             media: s.media.filter((m) => !(m.id === oldId && m.missing)),
           })),
+
+        replaceClipMedia: (clipId, mediaId) => {
+          const s = get();
+          const c = s.clips.find((x) => x.id === clipId);
+          const m = s.media.find((x) => x.id === mediaId);
+          if (!c || c.text || !mediaUsable(m) || m.kind === 'audio') return false;
+          // 影片比原本的片段短：長度縮到新影片的長度（照目前速度）
+          let duration = c.duration;
+          if (m.kind === 'video') duration = Math.min(duration, m.duration / (itemSpeed('clip', c) || 1));
+          const old = c.link ? s.audios.find((a) => a.link === c.link) : undefined;
+          const nc: Clip = { ...c, mediaId, in: 0, duration, aiMatte: undefined, link: undefined };
+          let audios = old ? s.audios.filter((a) => a.id !== old.id) : s.audios;
+          let tracks = s.tracks;
+          const selected = [keyOf('clip', clipId)];
+          // 新的是有聲音的影片：一樣放一段連結的音訊（原本那條音訊軌有空就放回去）
+          if (m.kind === 'video' && m.hasAudio) {
+            const spans = spansOf({ ...s, audios });
+            const free = (i: number) => Math.abs(fitStart(spans, laneOf('audio', i), nc.start, nc.duration) - nc.start) < 1e-6;
+            let at = old && free(old.track) ? old.track : s.tracks.audio.findIndex((_, i) => free(i));
+            if (at < 0) {
+              tracks = { ...s.tracks, audio: [...s.tracks.audio, {}] };
+              at = tracks.audio.length - 1;
+            }
+            nc.link = uid();
+            const a = makeAudio({ mediaId, track: at, start: nc.start, duration: nc.duration, in: 0, link: nc.link, volume: old?.volume ?? 1 });
+            audios = [...audios, a];
+            selected.push(keyOf('audio', a.id));
+          }
+          set({ clips: s.clips.map((x) => (x.id === clipId ? nc : x)), audios, tracks, selection: { type: 'clip', id: clipId }, selected, leftTab: 'editor' });
+          return true;
+        },
 
         removeSelection: (ripple = false) => {
           const s = get();
@@ -1050,18 +1217,19 @@ export const useStore = create<State>()(
           get().removeSelection();
         },
 
-        paste: (at) => {
-          const cb = get().clipboard;
-          if (cb) pasteItems(cb.items, at?.time ?? get().time, at);
+        paste: (at, mode) => {
+          const s = get();
+          const target = at ?? (s.activeTrack ? { kind: s.activeTrack.kind, track: s.activeTrack.idx } : undefined);
+          return s.clipboard ? pasteItems(s.clipboard.items, at?.time ?? s.time, target, mode) : null;
         },
 
-        duplicate: () => {
+        duplicate: (mode) => {
           const items = targets()
             .map(({ type, id }) => ({ type, item: findItem(type, id) }))
             .filter((x): x is { type: ItemType; item: AnyItem } => !!x.item);
-          if (!items.length) return;
+          if (!items.length) return null;
           const end = Math.max(...items.map((i) => i.item.start + i.item.duration));
-          pasteItems(items, end);
+          return pasteItems(items, end, undefined, mode);
         },
 
         addTrack: (kind, at, level, row) =>
@@ -1199,13 +1367,17 @@ export const useStore = create<State>()(
           if (!isItem(sel.type)) return set({ selection: sel, selected: [], leftTab: 'editor' });
           const s = get();
           const key = keyOf(sel.type, sel.id);
+          const item = findItem(sel.type, sel.id);
+          const activeTrack = item ? { kind: KIND_OF[sel.type], idx: item.track } : s.activeTrack;
           const family = expand([key]);
           if (mode === 'toggle') {
             if (s.selected.includes(key)) {
               const rest = s.selected.filter((k) => !family.includes(k));
-              return set({ selected: rest, selection: rest.length ? parseKey(rest[rest.length - 1]) : null });
+              const last = rest.length ? parseKey(rest[rest.length - 1]) : null;
+              const lastItem = last ? findItem(last.type, last.id) : null;
+              return set({ selected: rest, selection: last, activeTrack: lastItem ? { kind: KIND_OF[last!.type], idx: lastItem.track } : activeTrack });
             }
-            return set({ selected: Array.from(new Set([...s.selected, ...family])), selection: sel, leftTab: 'editor' });
+            return set({ selected: Array.from(new Set([...s.selected, ...family])), selection: sel, activeTrack, leftTab: 'editor' });
           }
           if (mode === 'range' && s.selection && s.selection.type === sel.type) {
             const anchor = findItem(sel.type, s.selection.id);
@@ -1217,16 +1389,19 @@ export const useStore = create<State>()(
                 .filter((x) => x.track === anchor.track && x.start >= lo - 1e-6 && x.start <= hi + 1e-6)
                 .map((x) => keyOf(sel.type as ItemType, x.id));
               // 保留主選取為 anchor，讓之後 shift 點擊仍以它為起點
-              return set({ selected: expand(keys), leftTab: 'editor' });
+              return set({ selected: expand(keys), activeTrack, leftTab: 'editor' });
             }
           }
-          set({ selection: sel, selected: family, leftTab: 'editor' });
+          set({ selection: sel, selected: family, activeTrack, leftTab: 'editor' });
         },
 
         selectKeys: (keys, additive = false) => {
           const s = get();
           const all = expand(additive ? Array.from(new Set([...s.selected, ...keys])) : keys);
-          set({ selected: all, selection: all.length ? parseKey(all[all.length - 1]) : null });
+          const selection = all.length ? parseKey(all[all.length - 1]) : null;
+          const primary = keys.length ? parseKey(keys[keys.length - 1]) : selection;
+          const item = primary ? findItem(primary.type, primary.id) : null;
+          set({ selected: all, selection, activeTrack: item ? { kind: KIND_OF[primary!.type], idx: item.track } : s.activeTrack });
         },
 
         selectAll: () => {
@@ -1452,7 +1627,7 @@ export const useStore = create<State>()(
           set({ playing: !s.playing });
         },
         setLoop: (l) => set(l ? { loop: l, time: l.a, playing: true } : { loop: null }),
-        setPps: (p) => set({ pps: Math.min(800, Math.max(5, p)) }),
+        setPps: (p) => set({ pps: Math.min(PPS_MAX, Math.max(PPS_MIN, p)) }),
         setSnap: (snap) => set({ snap }),
         setLeftTab: (t) => set({ leftTab: t }),
       };

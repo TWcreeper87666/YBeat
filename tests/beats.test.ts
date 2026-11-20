@@ -1,4 +1,4 @@
-import { beatIndexAtOrAfter, beatTime, estimateBeats, layoutOnBeats } from '../src/engine/beats';
+import { beatIndexAtOrAfter, beatTime, estimateBeats, layoutOnBeats, timelineBeats } from '../src/engine/beats';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -49,6 +49,21 @@ ok(Math.abs(beatTime(grid, 9) - 4.5) < 1e-9, '超出格線照拍長往後推');
 const lay = layoutOnBeats(grid, 1, 2, [Infinity, 0.7, Infinity]);
 const want = [[0.5, 1], [1.5, 0.7], [2.5, 1]];
 ok(lay.length === 3 && lay.every(([a, b], i) => Math.abs(a - want[i][0]) < 1e-9 && Math.abs(b - want[i][1]) < 1e-9), `每段 2 拍、素材不夠長就停在結尾、下一段從下一拍開始：${JSON.stringify(lay)}`);
+
+// 節拍提前：整體往前移，移到 0 之前的拍子拿掉
+{
+  // 120 BPM 的脈衝（每 0.5 秒一下）
+  const peaks = Float32Array.from({ length: 1000 }, (_, i) => (i % 50 === 0 ? 1 : i % 50 < 4 ? 0.5 : 0.05));
+  const media: any = { id: 'm', kind: 'audio', duration: 10, peaks, peaksPerSec: 100 };
+  const a: any = { id: 'a', mediaId: 'm', start: 2, duration: 5, in: 0, rate: 1, volume: 1, fadeIn: 0, fadeOut: 0, track: 0 };
+  const base = timelineBeats({ audios: [a], clips: [], media: [media] }, new Set());
+  const early = timelineBeats({ audios: [a], clips: [], media: [media] }, new Set(), 5 / 60);
+  if (base.length) {
+    ok(early.length === base.length && early.every((b, i) => Math.abs(base[i].t - b.t - 5 / 60) < 1e-9), '節拍提前 5/60 秒：每一拍都早 0.083 秒');
+    const atZero = timelineBeats({ audios: [{ ...a, start: 0 }], clips: [], media: [media] }, new Set(), 0.1);
+    ok(atZero.every((b) => b.t >= 0), '提前後跑到 0 之前的拍子不要');
+  } else ok(false, '節拍提前：測試素材沒有偵測到節拍');
+}
 
 console.log(fails ? `\n${fails} 項失敗` : '\n全部通過');
 if (fails) process.exit(1);

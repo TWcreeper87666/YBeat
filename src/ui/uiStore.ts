@@ -30,6 +30,10 @@ interface Layout {
   previewScale: number;
   /** 循環播放：播到結尾（編輯視窗 = 片段結尾）回到開頭繼續播 */
   repeat: boolean;
+  /** 暫停時拖播放頭也播聲音 */
+  scrubAudio: boolean;
+  /** 節拍提前（1/60 秒）：節拍格線 / 吸附 / 節拍分割都往前移這麼多，畫面先切、聲音後到，看起來才對拍 */
+  beatLead: number;
   /** 時間軸上，上層（蓋在上面的）軌道顯示在下方還是上方 */
   upperLayerAt: 'bottom' | 'top';
   /** 我的最愛（模組 id） */
@@ -46,7 +50,7 @@ interface Layout {
   set(p: Partial<Omit<Layout, 'set' | 'reset'>>): void;
   reset(): void;
 }
-const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], favorites: [] as string[], previewScale: 1, repeat: false, upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300 };
+const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], favorites: [] as string[], previewScale: 1, repeat: false, scrubAudio: true, beatLead: 5, upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300 };
 
 export const useLayout = create<Layout>()(
   persist(
@@ -114,7 +118,7 @@ export type DragPayload =
 
 export type DropTarget =
   | { kind: 'lane'; lane: TrackKind; idx: number; time: number; duration: number; label: string }
-  | { kind: 'clip'; clipId: string; action: 'transition' | 'transitionOut' | 'remap' | 'relink' | 'effect' | 'mask'; valid: boolean }
+  | { kind: 'clip'; clipId: string; action: 'transition' | 'transitionOut' | 'remap' | 'relink' | 'replace' | 'effect' | 'mask'; valid: boolean }
   | { kind: 'effect'; fxId: string }
   | null;
 

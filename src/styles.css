@@ -144,6 +144,10 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
 .timeline { display: grid; grid-template-rows: 34px 1fr auto; background: var(--panel); border-top: 1px solid var(--line); min-height: 0; position: relative; }
 .tl-toolbar { display: flex; align-items: center; gap: 4px; padding: 0 8px; border-bottom: 1px solid var(--line); }
 .tl-toolbar input[type=range] { width: 130px; accent-color: var(--accent); }
+.set-num { width: 90px; margin-left: auto; }
+.info-val { font: 12px ui-monospace, Consolas, monospace; color: #d7dae3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.beat-lead { display: flex; align-items: center; gap: 8px; }
+.beat-lead .drag-number, .beat-lead > :first-child { width: 80px; }
 .tl-toolbar .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
 .tbtn { background: none; border: 1px solid transparent; border-radius: 5px; padding: 3px 8px; cursor: pointer; font-size: 12px; white-space: nowrap; }
 .tbtn:hover:not(:disabled) { background: var(--panel2); border-color: var(--line); }
@@ -170,7 +174,7 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
 .lane { position: relative; flex: 1; }
 .lane.hidden { opacity: .35; }
 .tl-row.fx .lane { background: #ffffff03; }
-.ruler { position: relative; flex: 1; cursor: ew-resize; background: repeating-linear-gradient(90deg, transparent 0 9px, #ffffff08 9px 10px); }
+.ruler { position: relative; flex: 1; cursor: ew-resize; } /* 小刻度：Ruler 依縮放用 background 畫 */
 .tick { position: absolute; top: 0; height: 100%; border-left: 1px solid #3a3f4d; padding-left: 4px; font-size: 10px; color: var(--muted); pointer-events: none; }
 .track-hint { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: #4a5062; pointer-events: none; white-space: nowrap; }
 
@@ -183,6 +187,8 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
 .audioitem .fade.in { left: 0; background: linear-gradient(to bottom right, #000a 50%, transparent 50%); }
 .audioitem .fade.out { right: 0; background: linear-gradient(to bottom left, #000a 50%, transparent 50%); }
 .clip.sel, .fxitem.sel, .audioitem.sel { outline: 2px solid #fff; outline-offset: -1px; z-index: 2; }
+.clip.move-ghost, .fxitem.move-ghost, .audioitem.move-ghost { opacity: .72; z-index: 5; box-shadow: 0 7px 18px #000a; }
+.clip.move-affected::after, .fxitem.move-affected::after, .audioitem.move-affected::after { content: ''; position: absolute; left: var(--overlap-left); width: var(--overlap-width); top: 0; bottom: 0; background: #ffb02e55; border-inline: 1px solid #ffd27a; pointer-events: none; }
 .clip-name { position: relative; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 2px #000; pointer-events: none; }
 .badge { position: relative; font-size: 10px; background: #000a; color: var(--accent2); padding: 0 4px; border-radius: 3px; white-space: nowrap; pointer-events: none; }
 .handle { position: absolute; top: 0; bottom: 0; width: 7px; cursor: ew-resize; z-index: 1; }
@@ -387,6 +393,7 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 
 /* 拖曳預覽：淡淡的、放開後的樣子 */
 .drop-ghost { opacity: .4; pointer-events: none; z-index: 4; outline: 1px dashed #ffffffaa; outline-offset: -1px; }
+.placement-ghost { opacity: .78; z-index: 5; outline: 2px dashed var(--accent2); background-color: #2c5661; }
 .clip.drop-hint { filter: brightness(1.25); }
 .transition.ghost { opacity: .55; background: #ffb02e; border-color: #ffd27a; pointer-events: none; }
 .transition .handle { width: 6px; }
