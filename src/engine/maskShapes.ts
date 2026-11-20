@@ -1,5 +1,5 @@
 /**
- * 遮罩形狀庫：內建形狀（SVG 路徑）＋ 自訂形狀（從圖片匯入），以及「我的最愛」。
+ * 遮罩形狀庫：內建形狀（SVG 路徑）＋ 自訂形狀（從圖片匯入 / 鋼筆工具畫的），以及「我的最愛」。
  *
  * 矩形 / 橢圓在 shader 裡直接算；其他形狀先畫成一張 256×256 的「距離場」貼圖
  * （每個像素 = 到形狀邊界的距離），shader 讀它就能做出平滑的羽化，跟矩形 / 橢圓一樣。
@@ -7,6 +7,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { $t } from '../i18n';
+import type { PenPt } from './penPath';
 
 export type ShapeCat = 'basic' | 'symbol' | 'custom';
 
@@ -22,7 +23,17 @@ export interface ShapeInfo {
   aspect: number;
 }
 
-export interface CustomShape { id: string; name: string; png: string; aspect: number }
+export interface CustomShape {
+  id: string;
+  name: string;
+  aspect: number;
+  /** 從圖片匯入 */
+  png?: string;
+  /** 鋼筆工具畫的：正規化到 200×200 的路徑 */
+  path?: string;
+  /** 鋼筆工具的原始錨點（再次編輯用） */
+  pen?: PenPt[];
+}
 
 // ───────────── 內建形狀 ─────────────
 
@@ -72,6 +83,7 @@ interface MaskLib {
   add(s: Omit<CustomShape, 'id'>): string;
   remove(id: string): void;
   rename(id: string, name: string): void;
+  update(id: string, patch: Partial<Omit<CustomShape, 'id'>>): void;
   toggleFav(id: string): void;
 }
 
@@ -87,6 +99,10 @@ export const useMaskLib = create<MaskLib>()(
       },
       remove: (id) => set({ customs: get().customs.filter((c) => c.id !== id), favorites: get().favorites.filter((f) => f !== id) }),
       rename: (id, name) => set({ customs: get().customs.map((c) => (c.id === id ? { ...c, name } : c)) }),
+      update: (id, patch) => {
+        fields.delete(id); // 形狀改了：距離場重算
+        set({ customs: get().customs.map((c) => (c.id === id ? { ...c, ...patch } : c)) });
+      },
       toggleFav: (id) => set({ favorites: get().favorites.includes(id) ? get().favorites.filter((f) => f !== id) : [...get().favorites, id] }),
     }),
     { name: 'ybeat-masks', partialize: (s) => ({ customs: s.customs, favorites: s.favorites }) },
@@ -100,7 +116,10 @@ export function shapeInfo(id: string): ShapeInfo | undefined {
   return builtinShapes().find((s) => s.id === id) ?? useMaskLib.getState().customs.map((c) => ({ ...c, cat: 'custom' as const })).find((s) => s.id === id);
 }
 /** 遮罩形狀的顯示名稱（找不到 = 自訂形狀被刪掉了） */
-export const shapeName = (id: string) => (id === 'none' ? $t('無') : shapeInfo(id)?.name ?? $t('（形狀遺失）'));
+export const shapeName = (id: string) => (id === 'none' ? $t('無') : id === 'path' ? $t('自訂路徑') : shapeInfo(id)?.name ?? $t('（形狀遺失）'));
+
+/** 遮罩用的距離場 key：遮罩自己的路徑 = `path:<路徑>`，其他 = 形狀 id */
+export const maskFieldKey = (m: { shape: string; path?: string }) => (m.shape === 'path' ? (m.path ? `path:${m.path}` : 'rect') : m.shape);
 
 // ───────────── 距離場 ─────────────
 
@@ -214,6 +233,13 @@ export function getShapeField(id: string): ShapeField | null {
   const cur = fields.get(id);
   if (cur && typeof cur !== 'string') return cur;
   if (cur) return null;
+  if (id.startsWith('path:')) {
+    // 遮罩自己的路徑：改一次就是新的 key，舊的留太多就清掉
+    if (fields.size > 200) for (const k of [...fields.keys()].filter((k) => k.startsWith('path:')).slice(0, 50)) fields.delete(k);
+    const f = buildBuiltin(id.slice(5));
+    fields.set(id, f);
+    return f;
+  }
   const info = shapeInfo(id);
   if (!info) return null;
   if (info.path) {

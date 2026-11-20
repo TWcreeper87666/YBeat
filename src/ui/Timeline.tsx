@@ -1,7 +1,8 @@
+import { matteCoverage, requestMatte, useMatte } from '../engine/matte';
 import { openEditorWindow } from './EditorWindow';
 import { $t, displayName } from '../i18n';
-import { ArrowLeftRight, ArrowRightLeft, CircleDashed, Eye, EyeOff, FastForward, Film, Gauge, Magnet, Minus, MoveHorizontal, Music, Plus, Redo2, Replace, Scissors, Sparkles, TriangleAlert, Undo2, Volume2, VolumeX, Group, Link2, ArrowRightFromLine, ArrowRightToLine } from 'lucide-react';
-import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ArrowLeftRight, ArrowRightLeft, CircleDashed, Eye, EyeOff, FastForward, Film, Gauge, Magnet, Minus, MoveHorizontal, Music, Plus, Redo2, Replace, Scissors, Sparkles, TriangleAlert, Undo2, Volume2, VolumeX, Group, Link2, ArrowRightFromLine, ArrowRightToLine, Drum, ChevronDown } from 'lucide-react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { create } from 'zustand';
 import {
   trSelId, type TrScope, type TrSide,
@@ -17,6 +18,7 @@ import { relinkWithPicker } from '../engine/media';
 import { confirmDialog, openMenu, promptDialog, stopPreviewFx, toast, useDrag, useLayout, useReveal, useSnapLine, type MenuItem } from './uiStore';
 import { itemName } from './names';
 import { useDock } from './Dock';
+import { beatSnapPoints, fitToBeats, getBeats, splitAtBeats, useBeats } from './beatGrid';
 
 const SNAP_PX = 8;
 const LABEL_W = 116;
@@ -39,7 +41,7 @@ function nearest(v: number, pts: number[], pps: number) {
 
 function snapPoints(exclude: Set<string>) {
   const s = useStore.getState();
-  const pts = [0, s.time];
+  const pts = [0, s.time, ...beatSnapPoints()];
   (['clip', 'effect', 'audio'] as ItemType[]).forEach((type) => {
     for (const c of s[LIST[type]] as AnyItem[]) if (!exclude.has(keyOf(type, c.id))) pts.push(c.start, c.start + c.duration);
   });
@@ -201,10 +203,14 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
   const pts = snapPoints(new Set(st.selected)).slice(0);
   pts.splice(1, 1);
   const others = spansOf(st, new Set(st.selected));
-  // 點未選中的片段：播放頭已經在片段裡就不動；點已選中的片段 → 回到片段開頭
-  // 點片段不會移動播放頭；拖曳時，播放頭原本在片段裡才跟著片段一起移動（看到的還是同一格）
-  const inside = st.time >= it.start - 1e-6 && st.time < it.start + it.duration;
-  const head = st.time;
+  // 按下就移動播放頭（不等放開，沒有延遲）：點未選中的片段 → 移到片段開頭，但播放頭已經在片段裡就不動；
+  // 點已選中的片段 → 回到片段開頭。接著拖曳的話，播放頭在片段裡就跟著片段一起移動（看到的還是同一格）
+  let inside = st.time >= it.start - 1e-6 && st.time < it.start + it.duration;
+  if (already || !inside) {
+    st.setTime(it.start);
+    inside = true;
+  }
+  const head = useStore.getState().time;
   const minStart = Math.min(...group.map((g) => g.it.start));
   const kind = KIND_OF[type];
   const x0 = e.clientX, y0 = e.clientY;
@@ -352,6 +358,7 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
     { label: $t('在播放頭分割'), shortcut: 'S', action: S.split },
     { label: $t('修剪開頭到播放頭'), shortcut: 'Q', action: () => S.trim('start') },
     { label: $t('修剪結尾到播放頭'), shortcut: 'W', action: () => S.trim('end') },
+    { label: $t('節拍'), submenu: beatMenuItems() },
     { separator: true },
     { label: n > 1 ? $t('複製 {0} 個項目', n) : $t('複製'), shortcut: 'Ctrl+C', action: S.copy },
     { label: $t('剪下'), shortcut: 'Ctrl+X', action: S.cut },
@@ -398,6 +405,31 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
     { label: $t('波紋刪除（所有軌道）'), shortcut: 'Alt+Del', action: () => S.removeSelection('all'), danger: true },
   );
   openMenu(e.clientX, e.clientY, items);
+}
+
+/** 節拍相關指令（片段右鍵選單、工具列的「節拍」選單共用） */
+function beatMenuItems(): MenuItem[] {
+  const has = getBeats().length > 0;
+  const off = (f: () => void) => (has ? f : undefined);
+  return [
+    {
+      label: $t('在節拍處分割'),
+      submenu: [
+        { label: $t('每拍'), action: off(() => splitAtBeats(1)) },
+        { label: $t('每 2 拍'), action: off(() => splitAtBeats(2)) },
+        { label: $t('每小節'), action: off(() => splitAtBeats(4)) },
+      ],
+    },
+    {
+      label: $t('依節拍排列'),
+      submenu: [
+        { label: $t('每段 1 拍'), action: off(() => fitToBeats(1)) },
+        { label: $t('每段 2 拍'), action: off(() => fitToBeats(2)) },
+        { label: $t('每段 1 小節'), action: off(() => fitToBeats(4)) },
+        { label: $t('每段 2 小節'), action: off(() => fitToBeats(8)) },
+      ],
+    },
+  ];
 }
 
 /** 合併選取的片段；接不起來（不是同一段素材的連續部分）就提示可以用群組 */
@@ -551,6 +583,45 @@ interface ClipViewProps {
   dropThumb?: string;
 }
 
+/** 依片段寬度切幾格檢查（每格約 3px，最多 240 格） */
+const matteCells = (w: number) => Math.max(1, Math.min(240, Math.round(w / 3)));
+
+/**
+ * AI 去背：片段底部顯示哪些地方的遮罩已經好了（跟預覽用同一個查法，所以位置對得上）。
+ * 全部好了就不顯示；失敗時沒好的部分是紅色。
+ */
+function MatteBar({ clip, media, width }: { clip: Clip; media: Media; width: number }) {
+  useMatte((s) => s.ver);
+  const job = useMatte((s) => s.jobs[media.id]);
+  const err = useMatte((s) => s.errors[media.id]);
+  const modules = useStore((s) => s.modules);
+  const map = useMemo(() => new Map(modules.map((m) => [m.id, m])), [modules]);
+  // 開了 AI 去背就開始算（不用等播放頭走到這個片段；同樣的範圍不會重複排）
+  useEffect(() => requestMatte(clip, media, map), [clip, media, map]);
+  const cov = matteCoverage(clip, media, map, matteCells(width));
+  let ready = 0;
+  for (const v of cov) ready += v;
+  if (ready === cov.length) return null;
+  // 連續的格子合併成漸層的一段
+  const stops: string[] = [];
+  const on = 'var(--accent2)', off = err && !job ? 'var(--err)' : 'transparent';
+  for (let k = 0; k < cov.length; ) {
+    let j = k;
+    while (j < cov.length && cov[j] === cov[k]) j++;
+    const c = cov[k] ? on : off;
+    stops.push(`${c} ${((k / cov.length) * 100).toFixed(2)}%`, `${c} ${((j / cov.length) * 100).toFixed(2)}%`);
+    k = j;
+  }
+  const pct = Math.round((ready / cov.length) * 100);
+  return (
+    <div
+      className={`clip-matte ${job ? 'busy' : ''}`}
+      style={{ backgroundImage: `linear-gradient(to right, ${stops.join(', ')})` }}
+      title={err && !job ? err : $t('AI 去背 {0}%', pct)}
+    />
+  );
+}
+
 const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel, remapName, drop, dropThumb }: ClipViewProps) {
   const key = keyOf('clip', c.id);
   const opCls = useOpCls(key);
@@ -576,11 +647,12 @@ const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel,
       <div className="handle l" onPointerDown={(e) => resizeItem(e, 'clip', c, 'l', m?.kind === 'video')} />
       {isText && <span className="text-ico">T</span>}
       {!ok && <TriangleAlert size={12} className="warn-ico" />}
+      {c.aiMatte && m && ok && (m.kind === 'video' || m.kind === 'image') && <MatteBar clip={c} media={m} width={c.duration * pps} />}
       {c.link && <Link2 size={11} className="link-ico" />}
       {c.group && <Group size={11} className="link-ico" />}
       <span className="clip-name" title={name}>{name}</span>
       {remapName && <span className="badge"><Gauge size={10} /> {remapName}</span>}
-      {!!c.effects?.length && <span className="badge" title={$t('片段特效')}><Sparkles size={10} /> {c.effects.length}</span>}
+      {!!c.effects?.some((f) => !f.base) && <span className="badge" title={$t('片段特效')}><Sparkles size={10} /> {c.effects!.filter((f) => !f.base).length}</span>}
       {drop === 'effect' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段特效')}</span>}
       {drop === 'mask' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段遮罩')}</span>}
       {Math.abs(sp - 1) > 1e-3 && <span className="badge">{+sp.toFixed(2)}×</span>}
@@ -1177,6 +1249,7 @@ export function Timeline() {
           </div>
 
           <div className="tl-overlay" style={{ left: LABEL_W }}>
+            <BeatLines pps={pps} />
             <Playhead pps={pps} scrollRef={scrollRef} onPointerDown={scrub} />
             <SnapLine pps={pps} />
           </div>
@@ -1214,6 +1287,7 @@ function TimelineToolbar() {
   const { canUndo, canRedo } = useHistory();
   const snap = useStore((s) => s.snap);
   const pps = useStore((s) => s.pps);
+  const beatsOn = useLayout((s) => s.beats);
   const S = useStore.getState();
   return (
     <div className="tl-toolbar">
@@ -1222,6 +1296,20 @@ function TimelineToolbar() {
       <span className="sep" />
       <button className="tbtn" onClick={S.split} title={$t('在播放頭分割 (S)')}><Scissors size={14} /> {$t('分割')}</button>
       <button className={`tbtn ${snap ? 'on' : ''}`} onClick={() => S.setSnap(!snap)} title={$t('磁吸對齊 (N)')}><Magnet size={14} /> {$t('磁吸')}</button>
+      <button
+        className={`tbtn ${beatsOn ? 'on' : ''}`}
+        title={$t('節拍格線與節拍指令')}
+        onClick={(e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          openMenu(r.left, r.bottom + 2, [
+            { label: $t('顯示節拍格線'), checked: beatsOn, action: () => useLayout.getState().set({ beats: !beatsOn }) },
+            { separator: true },
+            ...beatMenuItems(),
+          ]);
+        }}
+      >
+        <Drum size={14} /> {$t('節拍')} <ChevronDown size={11} />
+      </button>
       <span className="spacer" />
       <input className="zoom" type="range" min={0} max={1000} value={toSlider(pps)} onChange={(e) => S.setPps(fromSlider(+e.target.value))} title={$t('時間軸縮放（Ctrl+滾輪）')} />
       <button className="tbtn" onClick={() => window.dispatchEvent(new Event('timeline-fit'))} title={$t('整個專案符合視窗 (\\)')}><ArrowLeftRight size={14} /> {$t('符合')}</button>
@@ -1268,12 +1356,40 @@ const Ruler = React.memo(function Ruler({ end, pps, onPointerDown }: { end: numb
         </div>
       ))}
       {loop && <div className="loop-region" style={{ left: loop.a * pps, width: (loop.b - loop.a) * pps }} />}
+      <BeatMarks pps={pps} />
       <RulerHead pps={pps} />
     </div>
   );
 });
 
 /** 播放頭在尺規上的頭（覆蓋在刻度上面，可直接拖）；獨立訂閱時間，播放時不用重畫整排刻度 */
+/** 太密的節拍不畫（每拍至少要隔這麼多 px） */
+const BEAT_MIN_PX = 6;
+
+/** 尺規上的節拍刻度：重拍比較長 */
+function BeatMarks({ pps }: { pps: number }) {
+  const beats = useBeats();
+  if (!beats.length) return null;
+  const dense = beats.length > 1 && ((beats[beats.length - 1].t - beats[0].t) / (beats.length - 1)) * pps < BEAT_MIN_PX;
+  return (
+    <>
+      {beats.map((b) => (dense && !b.down ? null : <div key={b.t} className={`beat-mark ${b.down ? 'down' : ''}`} style={{ left: b.t * pps }} />))}
+    </>
+  );
+}
+
+/** 跨過所有軌道的節拍線（重拍；放大到夠寬時每一拍都畫） */
+function BeatLines({ pps }: { pps: number }) {
+  const beats = useBeats();
+  if (!beats.length) return null;
+  const spacing = beats.length > 1 ? ((beats[beats.length - 1].t - beats[0].t) / (beats.length - 1)) * pps : Infinity;
+  return (
+    <>
+      {beats.map((b) => (b.down || spacing >= 24 ? <div key={b.t} className={`beat-line ${b.down ? 'down' : ''}`} style={{ transform: `translateX(${b.t * pps}px)` }} /> : null))}
+    </>
+  );
+}
+
 function RulerHead({ pps }: { pps: number }) {
   const t = useStore((s) => s.time);
   return <div className="ruler-playhead" style={{ transform: `translateX(${t * pps}px)` }} />;

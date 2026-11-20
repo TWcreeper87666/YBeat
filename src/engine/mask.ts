@@ -2,8 +2,9 @@
 
 import { $t } from '../i18n';
 import { evalKeys, type Keyframe } from './keyframes';
+import type { PenPt } from './penPath';
 
-/** 'none' / 'rect' / 'ellipse'，或形狀庫的 id（見 maskShapes.ts，例如 'star'、'custom:…'） */
+/** 'none' / 'rect' / 'ellipse'、'path'（這個遮罩自己的鋼筆路徑），或形狀庫的 id（見 maskShapes.ts，例如 'star'、'custom:…'） */
 export type MaskShape = string;
 
 export interface Mask {
@@ -19,7 +20,14 @@ export interface Mask {
   feather: number;
   /** 旋轉（度） */
   rotation: number;
+  /** shape = 'path'：只屬於這個遮罩的路徑（鋼筆畫的，沒存進形狀庫），正規化到 200×200 */
+  path?: string;
+  /** shape = 'path'：鋼筆的原始錨點（再次編輯用，畫面像素座標） */
+  pen?: PenPt[];
 }
+
+/** 遮罩自己的鋼筆路徑 */
+export const PATH_SHAPE = 'path';
 
 export const DEFAULT_MASK: Mask = { shape: 'none', invert: false, x: 0, y: 0, w: 0.6, h: 0.35, feather: 0.03, rotation: 0 };
 

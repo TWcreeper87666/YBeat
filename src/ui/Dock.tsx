@@ -23,6 +23,7 @@ export const PANELS: { id: PanelId; title: string }[] = [
   { id: 'remap', title: $t('變速') },
   { id: 'inspector', title: $t('屬性') },
   { id: 'code', title: $t('程式碼') },
+  { id: 'ai', title: 'AI' },
   { id: 'preview', title: $t('預覽') },
   { id: 'source', title: $t('素材預覽') },
   { id: 'timeline', title: $t('時間軸') },
@@ -32,10 +33,10 @@ const LIB: PanelId[] = ['media', 'text', 'transition', 'effect', 'mask', 'remap'
 
 /** 內建版面 */
 export const PRESETS: { id: string; name: string; build: () => DockNode }[] = [
-  { id: 'edit', name: $t('剪輯'), build: () => C([R([T(LIB), T(['inspector', 'code'], 'inspector'), T(['preview', 'source'], 'preview')], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
-  { id: 'right', name: $t('預覽在右'), build: () => R([C([R([T(LIB), T(['inspector', 'code'], 'inspector')], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview', 'source'], 'preview')], [0.72, 0.28]) },
-  { id: 'code', name: $t('寫程式'), build: () => R([C([R([T(LIB), T(['inspector', 'code'], 'code')], [0.3, 0.7]), T(['timeline'])], [0.68, 0.32]), T(['preview', 'source'], 'preview')], [0.74, 0.26]) },
-  { id: 'timeline', name: $t('大時間軸'), build: () => C([R([T([...LIB, 'inspector', 'code'], 'media'), T(['preview', 'source'], 'preview')], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
+  { id: 'edit', name: $t('剪輯'), build: () => C([R([T(LIB), T(['inspector', 'code', 'ai'], 'inspector'), T(['preview', 'source'], 'preview')], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
+  { id: 'right', name: $t('預覽在右'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai'], 'inspector')], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview', 'source'], 'preview')], [0.72, 0.28]) },
+  { id: 'code', name: $t('寫程式'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai'], 'code')], [0.3, 0.7]), T(['timeline'])], [0.68, 0.32]), T(['preview', 'source'], 'preview')], [0.74, 0.26]) },
+  { id: 'timeline', name: $t('大時間軸'), build: () => C([R([T([...LIB, 'inspector', 'code', 'ai'], 'media'), T(['preview', 'source'], 'preview')], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
 ];
 
 interface Custom { id: string; name: string; layout: DockNode }
@@ -129,7 +130,12 @@ export const useDock = create<DockState>()(
           l && !panelsIn(l).includes('code')
             ? mapTabs(l, (t) => (t.tabs.includes('inspector') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'inspector' ? ['inspector', 'code'] : [x])) as PanelId[] } : t))
             : l;
-        const fix = (l: DockNode | null | undefined) => addCode(addMask(addSource(addText(l))));
+        // 「AI」加在「程式碼」後面
+        const addAi = (l: DockNode | null | undefined) =>
+          l && !panelsIn(l).includes('ai')
+            ? mapTabs(l, (t) => (t.tabs.includes('code') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'code' ? ['code', 'ai'] : [x])) as PanelId[] } : t))
+            : l;
+        const fix = (l: DockNode | null | undefined) => addAi(addCode(addMask(addSource(addText(l)))));
         return {
           ...current,
           ...p,

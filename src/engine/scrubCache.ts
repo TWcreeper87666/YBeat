@@ -75,7 +75,7 @@ async function run(e: Entry) {
     let i: number;
     while ((i = nextIndex(e)) >= 0) {
       if (cache.get(e.id) !== e) return; // 素材換掉了
-      await seekTo(v, Math.min(v.duration - 0.01, i * e.step));
+      await seekTo(v, frameTime(e, i, v.duration));
       try {
         e.frames[i] = await createImageBitmap(v, { resizeWidth: W, resizeHeight: H, resizeQuality: 'low', imageOrientation: 'flipY' }); // WebGL 對 ImageBitmap 不套 UNPACK_FLIP_Y，這裡先翻好
       } catch {
@@ -89,8 +89,14 @@ async function run(e: Entry) {
   }
 }
 
-/** 取得素材在 t 秒最接近的快取影格（沒有就回傳 null，並開始在背景抽） */
-export function scrubFrame(m: Media, t: number): ImageBitmap | null {
+/** 第 i 張快取影格是在素材的第幾秒抽的（跟 run() 的 seek 位置一樣） */
+const frameTime = (e: Entry, i: number, duration: number) => Math.max(0, Math.min(duration - 0.01, i * e.step));
+
+/**
+ * 取得素材在 t 秒最接近的快取影格，連同它實際的時間（沒有就回傳 null，並開始在背景抽）。
+ * 快取影格之間至少差 0.25 秒：要對齊其他東西（例如 AI 去背的遮罩）時要用回傳的 t，不能用要求的時間。
+ */
+export function scrubFrameAt(m: Media, t: number): { bm: ImageBitmap; t: number } | null {
   if (m.kind !== 'video' || m.missing || !m.url) return null;
   const e = entryFor(m);
   const i = Math.max(0, Math.min(e.frames.length - 1, Math.round(t / e.step)));
@@ -100,10 +106,15 @@ export function scrubFrame(m: Media, t: number): ImageBitmap | null {
   for (let d = 0; d <= 2; d++) {
     for (const j of [i - d, i + d]) {
       const f = e.frames[j];
-      if (f) return f;
+      if (f) return { bm: f, t: frameTime(e, j, m.duration) };
     }
   }
   return null;
+}
+
+/** 取得素材在 t 秒最接近的快取影格（沒有就回傳 null，並開始在背景抽） */
+export function scrubFrame(m: Media, t: number): ImageBitmap | null {
+  return scrubFrameAt(m, t)?.bm ?? null;
 }
 
 /** 快取影格的間距（秒） */

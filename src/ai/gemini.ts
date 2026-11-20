@@ -1,0 +1,128 @@
+/**
+ * Gemini API（Google AI Studio 的免費 / 付費金鑰都能用），直接從瀏覽器呼叫，不經過任何伺服器。
+ * 只用 REST + fetch，不另外裝 SDK。
+ */
+
+const BASE = 'https://generativelanguage.googleapis.com/v1beta';
+
+export interface Turn { role: 'user' | 'model'; text: string }
+
+/** 被限流（免費額度用完 / 每分鐘次數到了）；retryAfter = 建議等幾秒 */
+export class RateLimitError extends Error {
+  constructor(message: string, public retryAfter: number | null) {
+    super(message);
+  }
+}
+export class ApiKeyError extends Error {}
+export class BlockedError extends Error {}
+
+async function fail(res: Response): Promise<never> {
+  let msg = `HTTP ${res.status}`;
+  let retry: number | null = null;
+  try {
+    const j = await res.json();
+    const e = j?.error ?? j?.[0]?.error;
+    if (e?.message) msg = e.message;
+    for (const d of e?.details ?? []) {
+      const m = /^(\d+(?:\.\d+)?)s$/.exec(d?.retryDelay ?? '');
+      if (m) retry = Math.ceil(parseFloat(m[1]));
+    }
+  } catch { /* 不是 JSON */ }
+  if (res.status === 429) throw new RateLimitError(msg, retry);
+  if (res.status === 400 && /api key/i.test(msg)) throw new ApiKeyError(msg);
+  if (res.status === 401 || res.status === 403) throw new ApiKeyError(msg);
+  throw new Error(msg);
+}
+
+export interface ModelInfo { id: string; name: string }
+
+/** 這把金鑰能用的模型（只留能產生文字的 Gemini 模型，新的排前面） */
+export async function listModels(key: string, signal?: AbortSignal): Promise<ModelInfo[]> {
+  const out: ModelInfo[] = [];
+  let page = '';
+  for (let i = 0; i < 5; i++) {
+    const res = await fetch(`${BASE}/models?pageSize=200${page ? `&pageToken=${encodeURIComponent(page)}` : ''}`, { headers: { 'x-goog-api-key': key }, signal });
+    if (!res.ok) await fail(res);
+    const j = await res.json();
+    for (const m of j.models ?? []) {
+      const id = String(m.name ?? '').replace(/^models\//, '');
+      if (!/^gemini/i.test(id)) continue;
+      if (!(m.supportedGenerationMethods ?? []).includes('generateContent')) continue;
+      if (/embedding|image|tts|audio|live/i.test(id)) continue;
+      out.push({ id, name: m.displayName ?? id });
+    }
+    page = j.nextPageToken ?? '';
+    if (!page) break;
+  }
+  return out.sort((a, b) => b.id.localeCompare(a.id, undefined, { numeric: true }));
+}
+
+/** 沒選過模型時的預設：最新的 flash-lite（免費額度最寬鬆），沒有就最新的 flash */
+/** 預設模型：目前免費額度最多 */
+export const DEFAULT_MODEL = 'gemini-3.5-flash-lite';
+
+export function pickDefaultModel(list: ModelInfo[]): string {
+  if (list.some((m) => m.id === DEFAULT_MODEL)) return DEFAULT_MODEL;
+  const stable = list.filter((m) => !/preview|exp/i.test(m.id));
+  const pool = stable.length ? stable : list;
+  return (pool.find((m) => /flash-lite/i.test(m.id)) ?? pool.find((m) => /flash/i.test(m.id)) ?? pool[0])?.id ?? '';
+}
+
+/**
+ * 串流產生回覆：每收到一段文字就呼叫 onText（累積後的全文），結束回傳全文。
+ */
+export async function streamChat(o: {
+  key: string;
+  model: string;
+  system: string;
+  turns: Turn[];
+  signal?: AbortSignal;
+  onText?: (full: string) => void;
+}): Promise<string> {
+  const res = await fetch(`${BASE}/models/${encodeURIComponent(o.model)}:streamGenerateContent?alt=sse`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-goog-api-key': o.key },
+    body: JSON.stringify({
+      systemInstruction: { parts: [{ text: o.system }] },
+      contents: o.turns.map((t) => ({ role: t.role, parts: [{ text: t.text }] })),
+    }),
+    signal: o.signal,
+  });
+  if (!res.ok || !res.body) await fail(res);
+  const reader = res.body!.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  let full = '';
+  let finish = '';
+  let blocked = '';
+  const handle = (line: string) => {
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (!data || data === '[DONE]') return;
+    let j: any;
+    try { j = JSON.parse(data); } catch { return; }
+    if (j.error) throw new Error(j.error.message ?? 'error');
+    if (j.promptFeedback?.blockReason) blocked = j.promptFeedback.blockReason;
+    const c = j.candidates?.[0];
+    if (c?.finishReason) finish = c.finishReason;
+    // 思考型模型的「想法」部分（thought: true）不顯示
+    const text = (c?.content?.parts ?? []).filter((p: any) => !p.thought).map((p: any) => p.text ?? '').join('');
+    if (text) {
+      full += text;
+      o.onText?.(full);
+    }
+  };
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      handle(buf.slice(0, i).replace(/\r$/, ''));
+      buf = buf.slice(i + 1);
+    }
+  }
+  if (buf) handle(buf);
+  if (!full && (blocked || /SAFETY|PROHIBITED|BLOCKLIST|RECITATION/.test(finish))) throw new BlockedError(blocked || finish);
+  return full;
+}

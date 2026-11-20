@@ -1,5 +1,5 @@
 import { $t } from '../i18n';
-import React, { useLayoutEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useStore, type Clip, type ClipFx, type FxItem } from '../store';
 import {
   ANIM_PROPS, EASE_PRESETS, easeId, evalKeys, keyAt, newKey, sortKeys, upsertKey,
@@ -406,6 +406,24 @@ export interface Section {
 /** 屬性表格左欄寬度範圍（px） */
 const LEFT_MIN = 240, LEFT_MAX = 640;
 
+/** 關鍵影格時間軸的可見範圍（片段內時間，秒）；每個片段 / 特效各自記住 */
+export interface View { a: number; b: number }
+const viewMem = new Map<string, View>();
+export function clampView(v: View, dur: number): View {
+  if (!(dur > 0)) return { a: 0, b: 0 };
+  const minSpan = Math.min(dur, Math.max(0.05, dur / 1000));
+  const span = Math.min(dur, Math.max(minSpan, v.b - v.a));
+  const a = Math.min(dur - span, Math.max(0, v.a));
+  return { a, b: a + span };
+}
+/** 以 anchor（秒）為中心縮放 */
+export function zoomView(v: View, anchor: number, factor: number, dur: number): View {
+  const span = v.b - v.a;
+  const next = span * factor;
+  const f = span > 0 ? (anchor - v.a) / span : 0;
+  return clampView({ a: anchor - f * next, b: anchor - f * next + next }, dur);
+}
+
 export function EffectControls({ host, sections, title, extra }: { host: Host; sections: Section[]; title?: React.ReactNode; extra?: React.ReactNode }) {
   const time = useStore((s) => s.time);
   // 左欄固定寬度（px）：不管面板多寬、屬性分頁還是編輯視窗都一樣，面板變窄只縮右邊的時間軸
@@ -425,11 +443,56 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
   const isSel = (ch: string, id: string) => mine && ksel.keys.some((k) => k.ch === ch && k.id === id);
   const primary = mine ? ksel.sel : null;
 
+  const [, bump] = useState(0);
+  const view = clampView(viewMem.get(host.owner) ?? { a: 0, b: dur }, dur);
+  const span = view.b - view.a || 1;
+  const zoomed = span < dur - 1e-6;
+  const setView = (v: View) => {
+    const full = clampView(v, dur);
+    if (full.b - full.a >= dur - 1e-6) viewMem.delete(host.owner);
+    else viewMem.set(host.owner, full);
+    bump((n) => n + 1);
+  };
+  const viewRef = useRef({ view, dur, setView });
+  viewRef.current = { view, dur, setView };
+
   const seek = (l: number) => S.setTime(host.start + Math.min(dur, Math.max(0, l)));
   const localAt = (clientX: number) => {
     const r = rulerRef.current!.getBoundingClientRect();
-    return Math.min(dur, Math.max(0, ((clientX - r.left) / r.width) * dur));
+    return Math.min(dur, Math.max(0, view.a + ((clientX - r.left) / r.width) * span));
   };
+
+  // 時間軸區：Ctrl + 滾輪縮放（以游標為中心）、Shift + 滾輪 / 水平滾動平移
+  useEffect(() => {
+    const el = tableRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest?.('.ec-right') || !rulerRef.current) return;
+      const { view: v, dur: d, setView: sv } = viewRef.current;
+      const r = rulerRef.current.getBoundingClientRect();
+      const sp = v.b - v.a;
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const anchor = v.a + Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * sp;
+        sv(zoomView(v, anchor, Math.exp(e.deltaY * 0.0025), d));
+      } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        if (sp >= d - 1e-6) return;
+        e.preventDefault();
+        const dx = e.deltaX || e.deltaY;
+        sv({ a: v.a + (dx / r.width) * sp, b: v.b + (dx / r.width) * sp });
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  // 播放中播放頭跑出可見範圍：整頁往後翻
+  const playing = useStore((s) => s.playing);
+  useEffect(() => {
+    if (playing && zoomed && inside && (lc > view.b || lc < view.a)) setView({ a: lc, b: lc + span });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, lc]);
   /** 只有上方的尺規可以拖播放頭 */
   const scrub = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
@@ -529,7 +592,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
     selectKeys(host.owner, group, me);
     const { orig, min, max } = snapshot(host.owner, group);
     const r = rulerRef.current!.getBoundingClientRect();
-    const pxPerSec = r.width / dur;
+    const pxPerSec = r.width / span;
     // 吸附點：播放頭、其他沒選到的關鍵影格
     const pts = [lc, 0, dur];
     for (const c of sections.flatMap((s) => s.channels ?? [])) for (const x of c.keys) if (!group.some((g) => g.ch === c.id && g.id === x.id)) pts.push(x.t);
@@ -592,8 +655,32 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
   };
 
   const toggleSection = (id: string) => useLayout.getState().set({ ecCollapsed: { ...collapsed, [id]: !collapsed[id] } });
-  const ticks = niceTicks(dur);
-  const pct = (t: number) => `${(t / dur) * 100}%`;
+  const ticks = niceTicks(view.a, view.b);
+  const frac = (t: number) => (t - view.a) / span;
+  const pct = (t: number) => `${frac(t) * 100}%`;
+  /** 範圍外的關鍵影格不畫（留一點邊，邊上的菱形還看得到一半） */
+  const visible = (t: number) => t >= view.a - span * 0.02 && t <= view.b + span * 0.02;
+
+  /** 尺規下方的縮放條：拖中間平移、拖兩端縮放、點空白處跳過去、雙擊還原 */
+  const dragZoom = (e: React.PointerEvent, mode: 'move' | 'l' | 'r' | 'bar') => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const bar = (e.currentTarget as HTMLElement).closest('.ec-zoombar')!.getBoundingClientRect();
+    let v0 = view;
+    if (mode === 'bar') {
+      const c = ((e.clientX - bar.left) / bar.width) * dur;
+      v0 = clampView({ a: c - span / 2, b: c + span / 2 }, dur);
+      setView(v0);
+    }
+    const x0 = e.clientX;
+    listen((ev) => {
+      const d = ((ev.clientX - x0) / bar.width) * dur;
+      if (mode === 'l') setView({ a: Math.max(0, Math.min(v0.b - 0.05, v0.a + d)), b: v0.b });
+      else if (mode === 'r') setView({ a: v0.a, b: Math.min(dur, Math.max(v0.a + 0.05, v0.b + d)) });
+      else setView({ a: v0.a + d, b: v0.b + d });
+    });
+  };
 
   return (
     <div className="ec" ref={tableRef} style={{ '--ec-left': `${Math.max(LEFT_MIN, leftPx)}px` } as React.CSSProperties}>
@@ -605,7 +692,18 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
           <div className="ec-split" onPointerDown={dragSplit} title={$t('拖曳調整左右寬度')} />
         </div>
         <div className="ec-right ec-ruler" ref={rulerRef} onPointerDown={scrub} title={$t('拖曳移動播放頭')}>
-          {ticks.map((t) => <span key={t} className="ec-tick" style={{ left: pct(t) }}>{fmtT(t, dur)}</span>)}
+          {ticks.map((t) => <span key={t} className={`ec-tick ${frac(t) < 0.01 ? 'first' : ''}`} style={{ left: pct(t) }}>{fmtT(t, span)}</span>)}
+          <div
+            className={`ec-zoombar ${zoomed ? 'zoomed' : ''}`}
+            onPointerDown={(e) => dragZoom(e, 'bar')}
+            onDoubleClick={(e) => { e.stopPropagation(); setView({ a: 0, b: dur }); }}
+            title={$t('拖曳兩端縮放、Ctrl + 滾輪縮放、雙擊還原')}
+          >
+            <div className="ec-zoomthumb" style={{ left: `${(view.a / dur) * 100}%`, width: `${(span / dur) * 100}%` }} onPointerDown={(e) => dragZoom(e, 'move')}>
+              <i className="l" onPointerDown={(e) => dragZoom(e, 'l')} />
+              <i className="r" onPointerDown={(e) => dragZoom(e, 'r')} />
+            </div>
+          </div>
         </div>
       </div>
 
@@ -667,8 +765,11 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
                           onContextMenu={(e) => laneMenu(e, ch)}
                           title={$t('拖曳框選、雙擊加入關鍵影格')}
                         >
-                          {ch.keys.length > 1 && <div className="ec-span" style={{ left: pct(ch.keys[0].t), width: pct(ch.keys[ch.keys.length - 1].t - ch.keys[0].t) }} />}
-                          {ch.keys.map((k) => (
+                          {ch.keys.length > 1 && (() => {
+                            const l = Math.max(0, frac(ch.keys[0].t)), r = Math.min(1, frac(ch.keys[ch.keys.length - 1].t));
+                            return r > l && <div className="ec-span" style={{ left: `${l * 100}%`, width: `${(r - l) * 100}%` }} />;
+                          })()}
+                          {ch.keys.filter((k) => visible(k.t)).map((k) => (
                             <div
                               key={k.id}
                               data-ch={ch.id}
@@ -683,7 +784,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
                           ))}
                         </div>
                       </div>
-                      {isOpen && <GraphRow host={host} ch={ch} lc={lc} selId={primary?.ch === ch.id ? primary.id : undefined} />}
+                      {isOpen && <GraphRow host={host} ch={ch} lc={lc} view={view} selId={primary?.ch === ch.id ? primary.id : undefined} />}
                     </React.Fragment>
                   );
                 })}
@@ -696,7 +797,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
 
       {extra}
       {/* 播放頭（蓋住右側所有列） */}
-      {inside && <div className="ec-playhead" style={{ left: `calc(var(--ec-col) + (100% - var(--ec-col)) * ${lc / dur})` }} />}
+      {inside && lc >= view.a - 1e-6 && lc <= view.b + 1e-6 && <div className="ec-playhead" style={{ left: `calc(var(--ec-col) + (100% - var(--ec-col)) * ${frac(lc)})` }} />}
       {marquee && (
         <div
           className="marquee"
@@ -713,16 +814,18 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
   );
 }
 
-function fmtT(t: number, dur: number) {
-  return dur < 10 ? `${t.toFixed(t % 1 ? 1 : 0)}s` : `${Math.round(t)}s`;
+/** span = 目前看得到的長度；越放大小數位越多 */
+function fmtT(t: number, span: number) {
+  const d = span < 0.4 ? 2 : span < 10 ? 1 : 0;
+  return `${d ? +t.toFixed(d) : Math.round(t)}s`;
 }
 
-function niceTicks(dur: number) {
-  const raw = dur / 4;
+export function niceTicks(a: number, b: number) {
+  const raw = (b - a) / 4;
   const p = Math.pow(10, Math.floor(Math.log10(Math.max(raw, 1e-6))));
   const step = [1, 2, 5, 10].map((m) => m * p).find((s) => s >= raw) ?? raw;
   const out: number[] = [];
-  for (let t = 0; t <= dur + 1e-6; t += step) out.push(+t.toFixed(4));
+  for (let i = Math.ceil((a - 1e-6) / step); i * step <= b + 1e-6; i++) out.push(+(i * step).toFixed(4));
   return out;
 }
 
@@ -731,13 +834,15 @@ function niceTicks(dur: number) {
 const GH = 120;
 const PAD = 10;
 
-function GraphRow({ host, ch, lc, selId }: { host: Host; ch: Channel; lc: number; selId?: string }) {
+function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: number; view: View; selId?: string }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [W, setW] = useState(200);
   const frozen = useRef<{ min: number; max: number } | null>(null);
   const keys = ch.keys;
   const dur = host.duration;
   const mul = ch.display ?? 1;
+  const { a: va, b: vb } = view;
+  const vs = vb - va || 1;
 
   useLayoutEffect(() => {
     const el = wrapRef.current!;
@@ -763,9 +868,9 @@ function GraphRow({ host, ch, lc, selId }: { host: Host; ch: Channel; lc: number
   }, [keys, dur, flatV, ch.step]);
   const range = frozen.current ?? auto;
   const { min, max } = range;
-  const X = (t: number) => (t / dur) * W;
+  const X = (t: number) => ((t - va) / vs) * W;
   const Y = (v: number) => PAD + (1 - (v - min) / (max - min)) * (GH - PAD * 2);
-  const T = (x: number) => Math.min(dur, Math.max(0, (x / W) * dur));
+  const T = (x: number) => Math.min(dur, Math.max(0, va + (x / W) * vs));
   const V = (y: number) => min + (1 - (y - PAD) / (GH - PAD * 2)) * (max - min);
 
   const seg = targetSegment(keys, selId, lc);
@@ -781,12 +886,12 @@ function GraphRow({ host, ch, lc, selId }: { host: Host; ch: Channel; lc: number
     if (!keys.length) return `0,${Y(flatV)} ${W},${Y(flatV)}`;
     const n = Math.max(24, Math.min(400, Math.round(W / 2)));
     for (let i = 0; i <= n; i++) {
-      const t = (i / n) * dur;
+      const t = va + (i / n) * vs;
       out.push(`${X(t).toFixed(1)},${Y(evalKeys(keys, t)).toFixed(1)}`);
     }
     return out.join(' ');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keys, dur, W, min, max, flatV]);
+  }, [keys, dur, W, min, max, flatV, va, vb]);
   // 目前作用中的區段另外加亮
   const segPts = useMemo(() => {
     if (!a || !b) return '';
@@ -797,7 +902,7 @@ function GraphRow({ host, ch, lc, selId }: { host: Host; ch: Channel; lc: number
     }
     return out.join(' ');
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [keys, a, b, dur, W, min, max]);
+  }, [keys, a, b, dur, W, min, max, va, vb]);
 
   const pt = (e: { clientX: number; clientY: number }) => {
     const r = wrapRef.current!.querySelector('svg')!.getBoundingClientRect();

@@ -5,7 +5,7 @@ import { parseDuration } from '../engine/params';
 import { addMediaBlob, colorMedia } from '../engine/media';
 import { fitStart } from '../engine/overlap';
 import { TEXT_PRESETS } from '../engine/text';
-import { addClipMask, setEffectMask } from './MaskPanel';
+import { setClipMask, setEffectMask } from './MaskPanel';
 import { confirmDialog, toast, useDrag, useSnapLine, type DragPayload, type DragState, type DropTarget } from './uiStore';
 
 const SNAP_PX = 10;
@@ -154,7 +154,7 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
     if (target.kind === 'effect') {
       setEffectMask(target.fxId, payload.shape);
       toast($t('已設定特效的遮罩形狀'));
-    } else if (target.kind === 'clip') addClipMask(target.clipId, payload.shape);
+    } else if (target.kind === 'clip') setClipMask(target.clipId, payload.shape);
     return;
   }
   if (target.kind === 'effect') {

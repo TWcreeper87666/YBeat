@@ -1,13 +1,15 @@
 import { $t, displayName } from '../i18n';
-import { AlignCenter, AlignLeft, AlignRight, Bold, CircleCheck, Italic, Music, Palette, Play, Plus, TriangleAlert, Upload, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, Unlink, Link2, Unlink2 } from 'lucide-react';
+import { AlignCenter, AlignLeft, AlignRight, Bold, CircleCheck, Italic, Music, Palette, Pipette, Play, Plus, TriangleAlert, Upload, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2 } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
-import { type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
+import { attachedAudioIds, type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
 import type { Module } from '../modules/builtin';
 import { CATEGORIES, categoryOf } from '../modules/categories';
 import { colorMedia, colorName, importFiles, pickFiles, relinkWithPicker, removeMedia } from '../engine/media';
 import { nextStart } from '../engine/overlap';
 import { FONTS, TEXT_PRESETS, DEFAULT_TEXT, renderText, type TextStyle } from '../engine/text';
 import { DEFAULT_MASK, type Mask } from '../engine/mask';
+import { CLIP_MASK_ID } from '../modules/extra';
+import { mediaBeats } from '../engine/beats';
 import { shapeName } from '../engine/maskShapes';
 import type { Keyframe } from '../engine/keyframes';
 import { parseDuration, parseParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
@@ -27,15 +29,16 @@ const BLENDS = (): Record<BlendMode, string> => ({
 import { useModuleThumb } from '../engine/thumbs';
 import { startLibraryDrag } from './dnd';
 import { itemName } from './names';
+import { ensureMatte, matteCoverage, matteFrames, useMatte } from '../engine/matte';
 import { cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { openSource } from './SourcePanel';
-import { openEditorWindow, useEditorWindow } from './EditorWindow';
 import { openMenu, revealSelection, stopPreviewFx, toast, useLayout, usePreviewFx, type MenuItem } from './uiStore';
 import { DragNumber } from './DragNumber';
 import { ModuleCode } from './ModuleCode';
 import { newModule, openModuleEditor } from './CodePanel';
 import { FavButton, LibFilter, LibToolbar, match, openPicker } from './Library';
-import { MaskLibrary, ShapeThumb, addClipMask, setMaskShape } from './MaskPanel';
+import { MaskLibrary, ShapeThumb, addClipMask, ensureClipBaseMask, setMaskShape } from './MaskPanel';
+import { openShapeDrawer } from './ShapeDrawer';
 import { EffectControls, cfxCh, clipChannels, clipHost, fxChannels, fxHost, maskChannels, type Channel, type Section } from './EffectControls';
 
 // ───────────────────────── 素材 ─────────────────────────
@@ -48,36 +51,135 @@ const SWATCHES = [
   '#2ec4f1', '#3a7bff', '#6a4cff', '#9b6bff', '#f15bb5', '#7a2048',
 ];
 
+// ── 自訂顏色：HSV 內部狀態（灰色時色相不會跑掉） ──
+type Hsv = { h: number; s: number; v: number };
+function hsvToHex({ h, s, v }: Hsv) {
+  const f = (n: number) => {
+    const k = (n + h / 60) % 6;
+    const c = v - v * s * Math.max(0, Math.min(k, 4 - k, 1));
+    return Math.round(c * 255).toString(16).padStart(2, '0');
+  };
+  return `#${f(5)}${f(3)}${f(1)}`;
+}
+function hexToHsv(hex: string, prevH = 0): Hsv | null {
+  const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
+  if (!m) return null;
+  const x = m[1].length === 3 ? m[1].split('').map((c) => c + c).join('') : m[1];
+  const [r, g, b] = [0, 2, 4].map((i) => parseInt(x.slice(i, i + 2), 16) / 255);
+  const mx = Math.max(r, g, b), d = mx - Math.min(r, g, b);
+  let h = prevH;
+  if (d > 0) {
+    h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+    h = (h * 60 + 360) % 360;
+  }
+  return { h, s: mx ? d / mx : 0, v: mx };
+}
+
+const RECENT_KEY = 'ybeat.recentColors';
+function loadRecent(): string[] {
+  try { const a = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]'); return Array.isArray(a) ? a.filter((x) => typeof x === 'string').slice(0, 12) : []; } catch { return []; }
+}
+
+/** 飽和度 / 明度方塊 */
+function SvPad({ hsv, onChange }: { hsv: Hsv; onChange: (h: Hsv) => void }) {
+  const down = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const el = e.currentTarget;
+    const at = (ev: { clientX: number; clientY: number }) => {
+      const r = el.getBoundingClientRect();
+      onChange({ h: hsv.h, s: Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), v: Math.min(1, Math.max(0, 1 - (ev.clientY - r.top) / r.height)) });
+    };
+    at(e);
+    const mv = (ev: PointerEvent) => at(ev);
+    const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', mv);
+    window.addEventListener('pointerup', up);
+  };
+  return (
+    <div className="cpk-pad" style={{ backgroundColor: `hsl(${hsv.h} 100% 50%)` }} onPointerDown={down}>
+      <i style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%`, background: hsvToHex(hsv) }} />
+    </div>
+  );
+}
+
 /** 色板：拖到影片軌、或雙擊加到結尾 */
 function ColorSwatches() {
-  const [custom, setCustom] = useState('#ff3d6e');
+  const [hsv, setHsv] = useState<Hsv>(() => hexToHsv('#ff3d6e')!);
+  const [draft, setDraft] = useState<string | null>(null);
+  const [recent, setRecent] = useState<string[]>(loadRecent);
+  const custom = hsvToHex(hsv);
   const media = useStore((s) => s.media);
   const used = new Set(media.filter((m) => m.name.startsWith(colorName('').trim())).map((m) => m.name));
+  const remember = (c: string) => {
+    if (SWATCHES.includes(c)) return;
+    const next = [c, ...recent.filter((x) => x !== c)].slice(0, 12);
+    setRecent(next);
+    try { localStorage.setItem(RECENT_KEY, JSON.stringify(next)); } catch { /* 無痕模式等 */ }
+  };
+  const pick = (c: string) => { const n = hexToHsv(c, hsv.h); if (n) setHsv(n); };
   const add = async (c: string) => {
+    remember(c);
     const m = await colorMedia(c);
     if (m) {
       useStore.getState().addClip(m.id);
       revealSelection();
     }
   };
-  const swatch = (c: string) => (
+  const swatch = (c: string, cls = '') => (
     <div
       key={c}
-      className={`swatch ${used.has(colorName(c)) ? 'used' : ''}`}
+      className={`swatch ${cls} ${used.has(colorName(c)) ? 'used' : ''} ${c === custom ? 'cur' : ''}`}
       style={{ background: c }}
       title={$t('{0}（拖到影片軌）', c)}
-      onPointerDown={(e) => startLibraryDrag(e, { kind: 'color', color: c }, c)}
+      onPointerDown={(e) => { pick(c); startLibraryDrag(e, { kind: 'color', color: c }, c); }}
+      onDoubleClick={() => add(c)}
     />
   );
+  const commitDraft = () => {
+    if (draft !== null) pick(draft.startsWith('#') ? draft : `#${draft}`);
+    setDraft(null);
+  };
   return (
     <div className="swatches-wrap">
-      <div className="swatches">{SWATCHES.map(swatch)}</div>
-      <div className="swatch-custom">
-        <input type="color" className="color" value={custom} onChange={(e) => setCustom(e.target.value)} />
-        <span className="muted small">{custom}</span>
-        <span className="spacer" />
-        {swatch(custom)}
-        <button className="btn" onClick={() => add(custom)}>{$t('加到結尾')}</button>
+      <div className="swatches">{SWATCHES.map((c) => swatch(c))}</div>
+      <div className="cpk">
+        <SvPad hsv={hsv} onChange={setHsv} />
+        <input
+          type="range"
+          className="cpk-hue"
+          min={0}
+          max={359}
+          value={Math.round(hsv.h)}
+          onChange={(e) => setHsv({ ...hsv, h: +e.target.value })}
+          style={{ '--thumb': `hsl(${hsv.h} 100% 50%)` } as React.CSSProperties}
+        />
+        <div className="cpk-row">
+          <div
+            className="cpk-chip"
+            style={{ background: custom }}
+            title={$t('{0}（拖到影片軌）', custom)}
+            onPointerDown={(e) => { remember(custom); startLibraryDrag(e, { kind: 'color', color: custom }, custom); }}
+          />
+          <label className="cpk-hex">
+            <span>#</span>
+            <input
+              value={draft ?? custom.slice(1).toUpperCase()}
+              maxLength={7}
+              spellCheck={false}
+              onChange={(e) => { setDraft(e.target.value); const n = hexToHsv(e.target.value, hsv.h); if (n && /^#?[0-9a-f]{6}$/i.test(e.target.value.trim())) setHsv(n); }}
+              onBlur={commitDraft}
+              onKeyDown={(e) => { if (e.key === 'Enter') { commitDraft(); (e.target as HTMLInputElement).blur(); } if (e.key === 'Escape') { setDraft(null); (e.target as HTMLInputElement).blur(); } }}
+            />
+          </label>
+          <label className="cpk-native" title={$t('系統顏色選擇器')}>
+            <Pipette size={14} />
+            <input type="color" value={custom} onChange={(e) => pick(e.target.value)} />
+          </label>
+          <span className="spacer" />
+          <button className="btn primary small cpk-add" onClick={() => add(custom)}><Plus size={13} />{$t('加到結尾')}</button>
+        </div>
+        {recent.length > 0 && <div className="cpk-recent">{recent.map((c) => swatch(c, 'mini'))}</div>}
       </div>
     </div>
   );
@@ -102,6 +204,12 @@ export function MediaPanel() {
     return l;
   }, [media, filter, q, sort]);
   const missing = media.filter((m) => m.missing).length;
+  /** 色板分頁：不用先打開分類籤也能直接切過去（素材庫是空的時候也找得到） */
+  const toggleColors = () => {
+    const L = useLayout.getState();
+    if (filter === 'color') L.set({ mediaFilter: 'all' });
+    else L.set({ mediaFilter: 'color', libFilterOpen: { ...L.libFilterOpen, media: true } });
+  };
 
   const itemMenu = (e: React.MouseEvent, m: Media) => {
     e.preventDefault();
@@ -139,6 +247,7 @@ export function MediaPanel() {
     <div className="lib" onContextMenu={bgMenu}>
       <LibToolbar id="media" query={q} setQuery={setQ} filter={{ active: filter !== 'all', reset: () => useLayout.getState().set({ mediaFilter: 'all' }) }}>
         <button className="lib-add" title={$t('匯入媒體 (Ctrl+O)')} onClick={async () => importFiles(await pickFiles())}><Plus size={15} /></button>
+        <button className={`lib-add ${filter === 'color' ? 'on' : ''}`} title={$t('色板')} onClick={toggleColors}><Palette size={14} /></button>
       </LibToolbar>
       <LibFilter
         id="media"
@@ -157,6 +266,7 @@ export function MediaPanel() {
         {media.length === 0 && (
           <div className="lib-empty">
             <button className="btn primary" onClick={async () => importFiles(await pickFiles())}><Upload size={14} /> {$t('匯入影片 / 圖片 / 音樂')}</button>
+            <button className="btn" onClick={toggleColors}><Palette size={14} /> {$t('色板')}</button>
           </div>
         )}
         {media.length > 0 && list.length === 0 && <p className="muted small center">{$t('沒有符合的素材')}</p>}
@@ -480,6 +590,31 @@ const Switch = ({ v, on }: { v: boolean; on: (v: boolean) => void }) => (
   <label className="switch"><input type="checkbox" checked={v} onChange={(e) => on(e.target.checked)} /><span /></label>
 );
 
+/** AI 去背的計算進度 / 失敗重試 */
+function MatteStatus({ clip, media }: { clip: Clip; media: Media }) {
+  useMatte((s) => s.ver);
+  const job = useMatte((s) => s.jobs[media.id]);
+  const err = useMatte((s) => s.errors[media.id]);
+  const modules = useStore((s) => s.modules);
+  const map = useMemo(() => new Map(modules.map((m) => [m.id, m])), [modules]);
+  const retry = () => {
+    useMatte.setState({ errors: { ...useMatte.getState().errors, [media.id]: '' } });
+    void ensureMatte(media, matteFrames(clip, media, map));
+  };
+  // 跟時間軸的進度條、預覽同一個算法：片段裡有多少比例已經有遮罩
+  const cov = matteCoverage(clip, media, map, 100);
+  let ready = 0;
+  for (const v of cov) ready += v;
+  if (ready === cov.length) return <span className="muted small"><CircleCheck size={12} /> {$t('完成')}</span>;
+  if (err && !job) return <button className="btn small" title={err} onClick={retry}><TriangleAlert size={12} /> {$t('重試')}</button>;
+  return (
+    <span className="matte-status">
+      <span className="matte-bar"><i style={{ width: `${ready}%` }} /></span>
+      <span className="muted small">{ready}%</span>
+    </span>
+  );
+}
+
 /** 文字片段的內容與樣式 */
 function textSection(clip: Clip & { text: TextStyle }): Section {
   const set = (p: Partial<TextStyle>) => {
@@ -635,6 +770,16 @@ function ClipInspector({ id }: { id: string }) {
       onReset: () => updateClip(clip.id, { fit: 'cover', flipX: false, transform: { ...DEFAULT_TRANSFORM }, keys: {} }),
     },
   );
+  if (!isText && media && (media.kind === 'video' || media.kind === 'image')) sections.push({
+    id: 'matte',
+    title: $t('AI 去背'),
+    rows: [
+      { label: $t('啟用'), node: <Switch v={!!clip.aiMatte} on={(v) => updateClip(clip.id, { aiMatte: v || undefined })} /> },
+      ...(clip.aiMatte ? [{ label: $t('狀態'), node: <MatteStatus clip={clip} media={media} /> }] : []),
+    ],
+    onReset: () => updateClip(clip.id, { aiMatte: undefined }),
+  });
+  sections.push(clipMaskSection(clip, local));
 
   if (isVideo && remapMod) {
     const defs = parseParams(remapMod.code);
@@ -706,57 +851,55 @@ function ClipInspector({ id }: { id: string }) {
 
 type FxLike = { moduleId: string; params: ParamValues; keys?: Record<string, Keyframe[]>; mask?: Mask; audio?: Record<string, AudioDrive> };
 
-/**
- * 一個特效的屬性區塊：參數、遮罩、音訊反應。特效軌的特效與片段特效共用。
- * compact：遮罩併進參數區塊（片段特效用，比較不佔空間）
- */
-function effectSections(
+/** 遮罩的屬性列：形狀（＋繪製）、在預覽中編輯、反轉，以及位置 / 大小等可打關鍵影格的屬性 */
+function maskBlock(
   f: FxLike,
-  mod: Module | undefined,
   local: number,
   update: (p: Partial<FxLike>) => void,
-  o: { idBase: string; /** 從 store 拿最新的（挑選視窗開著時資料會變） */ fresh: () => FxLike | undefined; maskKey?: string; ch?: (id: string) => string; compact?: boolean; title?: string; actions?: React.ReactNode; badge?: React.ReactNode; dim?: boolean; onFork?: (id: string) => void },
-): Section[] {
-  const ch = o.ch ?? ((x: string) => x);
-  const mapCh = (l: Channel[]) => l.map((c) => ({ ...c, id: ch(c.id) }));
-  const defs = mod ? parseParams(mod.code) : [];
-  const other = defs.filter((d) => d.type === 'bool' || d.type === 'color');
-  const name = o.title ?? (mod ? displayName(mod.name) : $t('特效'));
+  o: { fresh: () => FxLike | undefined; editKey?: string; drawKey?: string; ch: (id: string) => string },
+) {
   const mask = { ...DEFAULT_MASK, ...f.mask };
   const setMask = (p: Partial<typeof mask>) => update({ mask: { ...mask, ...p } });
   // 片段特效的遮罩要按「在預覽中編輯」才會出現可拖曳的框（避免跟片段本身的變換框打架）
-  const editKey = o.maskKey;
+  const editKey = o.editKey;
   const editing = !editKey || useMaskEdit.getState().key === editKey;
-  // 「在預覽中編輯」：還沒開編輯視窗就打開它（遮罩在視窗的預覽裡拖）；已經開著就切換這個遮罩的編輯狀態
+  // 「在預覽中編輯」：切換這個遮罩在預覽畫面上的編輯框（編輯時片段本身的變換框先藏起來）
   const toggleEdit = () => {
     if (!editKey) return;
-    if (!useEditorWindow.getState().open) return openEditorWindow(editKey);
     useMaskEdit.setState({ key: useMaskEdit.getState().key === editKey ? null : editKey });
   };
   const maskRows = [
     {
       label: $t('遮罩'),
       node: (
-        <button
-          className="shape-pick"
-          title={$t('選擇遮罩形狀')}
-          onClick={(e) =>
-            openPicker(e.currentTarget, $t('遮罩形狀'), () => (
-              <MaskLibrary
-                current={o.fresh()?.mask?.shape ?? 'none'}
-                allowNone
-                onPick={(sh) => {
-                  setMaskShape({ ...DEFAULT_MASK, ...o.fresh()?.mask }, sh, update);
-                  if (sh !== 'none' && editKey) useMaskEdit.setState({ key: editKey });
-                }}
-              />
-            ))
-          }
-        >
-          <ShapeThumb id={mask.shape} />
-          <span className="shape-pick-name">{shapeName(mask.shape)}</span>
-          <ChevronDown size={12} />
-        </button>
+        <div className="shape-pick-row">
+          <button
+            className="shape-pick"
+            title={$t('選擇遮罩形狀')}
+            onClick={(e) =>
+              openPicker(e.currentTarget, $t('遮罩形狀'), () => (
+                <MaskLibrary
+                  current={o.fresh()?.mask?.shape ?? 'none'}
+                  allowNone
+                  drawKey={o.drawKey}
+                  onPick={(sh) => {
+                    setMaskShape({ ...DEFAULT_MASK, ...o.fresh()?.mask }, sh, update);
+                    if (sh !== 'none' && editKey) useMaskEdit.setState({ key: editKey });
+                  }}
+                />
+              ))
+            }
+          >
+            <ShapeThumb id={mask.shape} path={mask.path} />
+            <span className="shape-pick-name">{shapeName(mask.shape)}</span>
+            <ChevronDown size={12} />
+          </button>
+        {o.drawKey && (
+          <button className="ec-icon shape-draw" title={$t('在畫面上繪製')} onClick={() => openShapeDrawer({ target: o.drawKey })}>
+            <PenTool size={13} />
+          </button>
+        )}
+        </div>
       ),
     },
     ...(mask.shape !== 'none' && editKey
@@ -775,8 +918,28 @@ function effectSections(
         ]
       : []),
   ];
-  const maskChs = mask.shape !== 'none' ? mapCh(maskChannels(f as FxItem, local)) : [];
-  const resetMask = () => update({ mask: undefined, keys: Object.fromEntries(Object.entries(f.keys ?? {}).filter(([k]) => !k.startsWith('mask.'))) });
+  const chs = mask.shape !== 'none' ? maskChannels(f as FxItem, local).map((c) => ({ ...c, id: o.ch(c.id) })) : [];
+  const reset = () => update({ mask: undefined, keys: Object.fromEntries(Object.entries(f.keys ?? {}).filter(([k]) => !k.startsWith('mask.'))) });
+  return { rows: maskRows, chs, reset };
+}
+
+/**
+ * 一個特效的屬性區塊：參數、遮罩、音訊反應。特效軌的特效與片段特效共用。
+ * compact：遮罩併進參數區塊（片段特效用，比較不佔空間）
+ */
+function effectSections(
+  f: FxLike,
+  mod: Module | undefined,
+  local: number,
+  update: (p: Partial<FxLike>) => void,
+  o: { idBase: string; /** 從 store 拿最新的（挑選視窗開著時資料會變） */ fresh: () => FxLike | undefined; maskKey?: string; drawKey?: string; ch?: (id: string) => string; compact?: boolean; title?: string; actions?: React.ReactNode; badge?: React.ReactNode; dim?: boolean; onFork?: (id: string) => void },
+): Section[] {
+  const ch = o.ch ?? ((x: string) => x);
+  const mapCh = (l: Channel[]) => l.map((c) => ({ ...c, id: ch(c.id) }));
+  const defs = mod ? parseParams(mod.code) : [];
+  const other = defs.filter((d) => d.type === 'bool' || d.type === 'color');
+  const name = o.title ?? (mod ? displayName(mod.name) : $t('特效'));
+  const { rows: maskRows, chs: maskChs, reset: resetMask } = maskBlock(f, local, update, { fresh: o.fresh, editKey: o.maskKey, drawKey: o.drawKey, ch });
 
   const sections: Section[] = [
     {
@@ -843,10 +1006,32 @@ function effectSections(
   return sections;
 }
 
+/** 片段本身的遮罩（一個，排在所有片段特效之後；要疊更多遮罩用「加入片段遮罩…」） */
+function clipMaskSection(clip: Clip, local: number): Section {
+  const S = useStore.getState();
+  const base = clip.effects?.find((f) => f.base);
+  const fresh = () => useStore.getState().clips.find((c) => c.id === clip.id)?.effects?.find((x) => x.base);
+  const update = (p: Partial<FxLike>) => {
+    const id = fresh()?.id ?? ensureClipBaseMask(clip.id);
+    if (id) S.updateClipFx(clip.id, id, p as Partial<ClipFx>);
+  };
+  const f: FxLike = base ?? { moduleId: CLIP_MASK_ID, params: {} };
+  const key = base ? cfxMaskKey(base.id) : undefined;
+  const { rows, chs } = maskBlock(f, local, update, {
+    fresh,
+    editKey: key,
+    drawKey: key ?? `clip:${clip.id}`,
+    ch: (c) => (base ? cfxCh(base.id, c) : c),
+  });
+  return { id: 'clipmask', title: $t('遮罩'), rows: [{ ...rows[0], label: $t('形狀') }, ...rows.slice(1)], channels: chs, onReset: () => {
+    if (base) S.removeClipFx(clip.id, base.id);
+  } };
+}
+
 /** 片段特效的區塊（每個特效一組，可以開關、排序、移除） */
 function clipFxSections(clip: Clip, modules: Module[], local: number): Section[] {
   const S = useStore.getState();
-  const list = clip.effects ?? [];
+  const list = (clip.effects ?? []).filter((f) => !f.base);
   return list.flatMap((f, i) => {
     const mod = modules.find((m) => m.id === f.moduleId);
     const off = f.enabled === false;
@@ -854,6 +1039,7 @@ function clipFxSections(clip: Clip, modules: Module[], local: number): Section[]
       idBase: `cfx.${f.id}`,
       fresh: () => useStore.getState().clips.find((c) => c.id === clip.id)?.effects?.find((x) => x.id === f.id),
       maskKey: cfxMaskKey(f.id),
+      drawKey: cfxMaskKey(f.id),
       ch: (c) => cfxCh(f.id, c),
       compact: true,
       dim: off,
@@ -907,7 +1093,7 @@ function EffectInspector({ id }: { id: string }) {
   const { updateEffect } = useStore.getState();
   const host = fxHost(fx.id)!;
   const local = Math.min(fx.duration, Math.max(0, time - fx.start));
-  const sections = effectSections(fx, mod, local, (p) => updateEffect(id, p as Partial<FxItem>), { idBase: 'fx', fresh: () => useStore.getState().effects.find((e) => e.id === id) });
+  const sections = effectSections(fx, mod, local, (p) => updateEffect(id, p as Partial<FxItem>), { idBase: 'fx', drawKey: `fx:${fx.id}`, fresh: () => useStore.getState().effects.find((e) => e.id === id) });
   return (
     <EffectControls
       host={host}
@@ -992,8 +1178,10 @@ function TransitionInspector({ selId }: { selId: string }) {
 function AudioInspector({ id }: { id: string }) {
   const a = useStore((s) => s.audios.find((c) => c.id === id));
   const media = useStore((s) => s.media.find((m) => m.id === a?.mediaId));
+  const attached = useStore((s) => !!a && attachedAudioIds(s).has(a.id));
   if (!a) return null;
   const { updateAudio } = useStore.getState();
+  const bpm = mediaBeats(media)?.bpm;
   return (
     <PlainControls
       title={<Title kind="k-audio" label={$t('音訊')} name={a.name ?? media?.name ?? $t('（素材遺失）')} onRename={(n) => useStore.getState().renameItem('audio', a.id, n)} />}
@@ -1003,6 +1191,13 @@ function AudioInspector({ id }: { id: string }) {
         { label: $t('淡出'), node: <DragNumber variant="text" value={a.fadeOut} min={0} max={Math.min(10, a.duration)} step={0.01} suffix="s" def={0} onChange={(v) => updateAudio(id, { fadeOut: v })} /> },
         { label: $t('速率'), node: <DragNumber variant="text" value={a.rate ?? 1} min={0.1} max={4} step={0.01} suffix="×" def={1} onChange={(v) => updateAudio(id, { rate: v, duration: Math.min(a.duration * ((a.rate ?? 1) / v), maxDurFor('audio', a)) })} /> },
         { label: $t('保持音調'), node: <PitchSwitch v={a.keepPitch !== false} on={(v) => updateAudio(id, { keepPitch: v })} /> },
+        // 節拍格線的來源（連結在影片上的原音不提供）
+        ...(attached
+          ? []
+          : [
+              { label: $t('節拍格線'), node: <Switch v={a.beats !== false} on={(v) => updateAudio(id, { beats: v ? undefined : false })} /> },
+              ...(a.beats !== false && bpm ? [{ label: 'BPM', node: <span className="muted">{bpm.toFixed(1)}</span> }] : []),
+            ]),
       ]}
     />
   );

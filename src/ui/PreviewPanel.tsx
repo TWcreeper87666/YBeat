@@ -5,7 +5,7 @@ import { projectDuration, useStore } from '../store';
 import { useEditorScope } from './EditorWindow';
 import { Preview } from './Preview';
 import { useLayout } from './uiStore';
-import { DragNumber } from './DragNumber';
+import { GridButton } from './GridOverlay';
 
 const fmt = (t: number) => {
   const m = Math.floor(t / 60);
@@ -30,11 +30,9 @@ function Transport() {
   const dur = useStore((s) => projectDuration(s));
   const clips = useStore((s) => s.clips);
   const floating = useLayout((s) => s.floating);
-  const grid = useLayout((s) => s.grid);
   const S = useStore.getState();
   const barRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<number | null>(null);
-  const [gridPop, setGridPop] = useState<{ x: number; y: number } | null>(null);
   // 編輯視窗開著：播放列只看那個片段（時間從片段開頭算）；否則是整個專案
   const scope = useEditorScope();
   const t0 = scope?.a ?? 0;
@@ -99,19 +97,7 @@ function Transport() {
         <span className="tp-time">{fmt(scope ? local : time)} <span className="muted">/ {fmt(total)}</span></span>
         <span className="spacer" />
         {loop && !scope && <button className="tp on" title={$t('停止循環 (Esc)')} onClick={() => S.setLoop(null)}><Repeat size={15} /></button>}
-        <button
-          className={`tp ${grid ? 'on' : ''}`}
-          title={$t('輔助網格（右鍵設定格數）')}
-          onClick={() => useLayout.getState().set({ grid: !grid })}
-          onContextMenu={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            setGridPop({ x: e.clientX, y: e.clientY });
-          }}
-        >
-          #
-        </button>
-        {gridPop && <GridPopover at={gridPop} close={() => setGridPop(null)} />}
+        <GridButton />
         {!scope && (
         <button
           className="tp"
@@ -126,50 +112,39 @@ function Transport() {
   );
 }
 
-/** 網格設定（右鍵網格按鈕） */
-function GridPopover({ at, close }: { at: { x: number; y: number }; close: () => void }) {
-  const L = useLayout();
-  const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState(at);
-  useLayoutEffect(() => {
-    const r = ref.current!.getBoundingClientRect();
-    setPos({ x: Math.max(8, Math.min(at.x - r.width, innerWidth - r.width - 8)), y: Math.max(8, Math.min(at.y - r.height - 8, innerHeight - r.height - 8)) });
-  }, [at]);
-  useEffect(() => {
-    const down = (e: PointerEvent) => !ref.current?.contains(e.target as Node) && close();
-    const key = (e: KeyboardEvent) => e.key === 'Escape' && close();
-    window.addEventListener('pointerdown', down, true);
-    window.addEventListener('keydown', key);
-    return () => {
-      window.removeEventListener('pointerdown', down, true);
-      window.removeEventListener('keydown', key);
-    };
-  }, [close]);
-  const presets: [number, number][] = [[3, 3], [4, 4], [2, 2], [6, 6], [8, 4], [12, 6]];
-  return (
-    <div ref={ref} className="popover" style={{ left: pos.x, top: pos.y }} onContextMenu={(e) => e.preventDefault()}>
-      <div className="pop-title">{$t('輔助網格')}</div>
-      <div className="pop-row"><span>{$t('列')}</span><DragNumber value={L.gridRows} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridRows: Math.round(v), grid: true })} /></div>
-      <div className="pop-row"><span>{$t('欄')}</span><DragNumber value={L.gridCols} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridCols: Math.round(v), grid: true })} /></div>
-      <div className="chips">
-        {presets.map(([r, c]) => (
-          <button key={`${r}x${c}`} className={L.gridRows === r && L.gridCols === c ? 'on' : ''} onClick={() => L.set({ gridRows: r, gridCols: c, grid: true })}>{c}×{r}</button>
-        ))}
-      </div>
-      <label className="check"><input type="checkbox" checked={L.gridCenter} onChange={(e) => L.set({ gridCenter: e.target.checked })} />{' '}{$t('中心十字')}</label>
-      <label className="check"><input type="checkbox" checked={L.gridSafe} onChange={(e) => L.set({ gridSafe: e.target.checked })} />{' '}{$t('短影音安全區')}</label>
-    </div>
-  );
+/** 把同一個 DOM 節點搬進這個位置（停駐 / 浮動切換時預覽不會重建） */
+/** 面板搬家前記下裡面各個捲動區的位置（DOM 節點一搬動，捲軸就會回到最上面） */
+const scrolls = new WeakMap<HTMLElement, [Element, number, number][]>();
+function saveScroll(host: HTMLElement) {
+  if (!host.isConnected) return;
+  const list: [Element, number, number][] = [];
+  for (const el of [host, ...host.querySelectorAll('*')]) if (el.scrollTop || el.scrollLeft) list.push([el, el.scrollTop, el.scrollLeft]);
+  scrolls.set(host, list);
+}
+function restoreScroll(host: HTMLElement) {
+  const list = scrolls.get(host);
+  if (!list) return;
+  for (const [el, t, l] of list) {
+    el.scrollTop = t;
+    el.scrollLeft = l;
+  }
 }
 
-/** 把同一個 DOM 節點搬進這個位置（停駐 / 浮動切換時預覽不會重建） */
 export function Slot({ host }: { host: HTMLElement }) {
   const ref = useRef<HTMLDivElement>(null);
   useLayoutEffect(() => {
     const el = ref.current!;
+    saveScroll(host);
     el.appendChild(host);
+    restoreScroll(host);
+    // 新位置的大小可能下一幀才定：再補一次
+    const raf = requestAnimationFrame(() => restoreScroll(host));
     return () => {
-      if (host.parentElement === el) el.removeChild(host);
+      cancelAnimationFrame(raf);
+      if (host.parentElement === el) {
+        saveScroll(host);
+        el.removeChild(host);
+      }
     };
   }, [host]);
   return <div ref={ref} className="slot" />;

@@ -64,6 +64,8 @@ export interface ClipFx {
   audio?: Record<string, AudioDrive>;
   /** false = 暫時關閉 */
   enabled?: boolean;
+  /** 片段本身的遮罩（每個片段最多一個，屬性面板的「遮罩」區塊；渲染時排在所有片段特效之後） */
+  base?: boolean;
 }
 
 export interface Clip extends ItemBase {
@@ -99,6 +101,8 @@ export interface Clip extends ItemBase {
   blend?: BlendMode;
   /** 原音已分離成獨立音訊片段（影片本身不再出聲，屬性面板不顯示「聲音」） */
   audioSplit?: boolean;
+  /** AI 去背（U²-Netp，遮罩預先逐格算好） */
+  aiMatte?: boolean;
   /** 舊版欄位，載入時會轉成 keys */
   transformEnd?: Transform | null;
   ease?: EaseName;
@@ -135,6 +139,8 @@ export interface AudioClip extends ItemBase {
   rate: number;
   /** 變速時保持音調（沒設定 = 保持） */
   keepPitch?: boolean;
+  /** false = 不提供時間軸的節拍格線（音效之類的） */
+  beats?: boolean;
 }
 
 /** 輸出畫面大小（比例） */
@@ -227,6 +233,8 @@ interface State {
   /** 沒有選取時：移除選中軌道上播放頭所在的空白，後面的項目往前推 */
   removeGap(): boolean;
   split(): void;
+  /** 把選取的項目在這些時間點全部切開（節拍分割）；回傳切了幾刀 */
+  splitAtTimes(times: number[]): number;
   trim(side: 'start' | 'end'): void;
   nudge(dt: number): void;
   copy(): void;
@@ -888,6 +896,48 @@ export const useStore = create<State>()(
           set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[], selected: newKeys, selection: last });
         },
 
+        splitAtTimes: (times) => {
+          const s = get();
+          const list = targets();
+          if (!list.length) return 0;
+          const ts = [...times].sort((a, b) => a - b);
+          const lists: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios };
+          const newKeys: string[] = [];
+          const backs: AnyItem[] = [];
+          let cuts = 0;
+          for (const { type, id } of list) {
+            const key = LIST[type];
+            let cur = lists[key].find((x) => x.id === id);
+            if (!cur) continue;
+            newKeys.push(keyOf(type, cur.id));
+            const pieces: AnyItem[] = [];
+            for (const t of ts) {
+              if (!inside(cur, t)) continue;
+              const [a, b] = splitOne(type, cur, t);
+              pieces.push(a);
+              newKeys.push(keyOf(type, b.id));
+              cur = b;
+              cuts++;
+            }
+            if (!pieces.length) continue;
+            pieces.push(cur);
+            // 新的連結 / 群組 id 要用「切完的最後版本」：中間的段落後來又被切過，id 相同但長度不一樣
+            backs.push(...pieces.slice(1));
+            lists[key] = lists[key].flatMap((x) => (x.id === id ? pieces : [x]));
+          }
+          if (!cuts) return 0;
+          // 切出來的每一段各自一組連結 / 群組（同一個時間點切開的影片跟原音還是連在一起）
+          const byStart = new Map<string, AnyItem[]>();
+          for (const b of backs) {
+            const k = b.start.toFixed(4);
+            byStart.set(k, [...(byStart.get(k) ?? []), b]);
+          }
+          const fresh = new Map([...byStart.values()].flatMap((g) => freshIds(g)).map((x) => [x.id, x]));
+          for (const k of Object.keys(lists)) lists[k] = lists[k].map((x) => fresh.get(x.id) ?? x);
+          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[], selected: newKeys, selection: parseKey(newKeys[0]) });
+          return cuts;
+        },
+
         trim: (side) => {
           const t = get().time;
           const list = cutTargets();
@@ -1144,7 +1194,9 @@ export const useStore = create<State>()(
               if (c.id !== clipId || !c.effects) return c;
               const l = [...c.effects];
               const i = l.findIndex((f) => f.id === fxId);
-              const j = i + dir;
+              // 片段本身的遮罩不在排序裡：跳過它
+              let j = i + dir;
+              while (j >= 0 && j < l.length && l[j].base) j += dir;
               if (i < 0 || j < 0 || j >= l.length) return c;
               [l[i], l[j]] = [l[j], l[i]];
               return { ...c, effects: l };

@@ -26,15 +26,15 @@
 - [x] 點選片段前方的空白處按下delete或backspace，應該要可以移除空白並將後面內容往前推，其實應該就是根據選中的track以及playhead位置並且沒有選取片段來判斷之類的。
 - [x] 為什麼軌道沒辦法隨心所欲的移動順序啊?軌道就是軌道沒有在分什麼audio/video/effect之類的啦
 - [x] alt+delete片段時，其他軌道也要一起往前推，就像威力導演那樣
-- [ ] 額外UI用於自定義遮罩形狀，片段的屬性本身就要有mask（片段遮罩已完成：屬性面板「＋遮罩」；自訂形狀（鋼筆 / 多邊形）還沒做）
+- [x] 額外UI用於自定義遮罩形狀，片段的屬性本身就要有mask（片段遮罩：屬性面板「＋遮罩」；自訂形狀：遮罩分頁的鋼筆工具）
 - [x] 片段的混合模式property，加法、色減等等啥的
 - [x] zoom blur transition, 放大位置應該要可以自定義
 - [x] 按ctrl時timeline tab的所有片段不需要有那個黃色的顯示，只有按著ctrl並且滑鼠處於某個片段的開頭或結尾時再出現
-- [ ] 融入AI，自行輸入gemini api key，使用gemini-3.5-flash-lite，可以介紹怎麼使用，並幫忙生成轉場代碼
+- [x] 融入AI，自行輸入gemini api key，使用gemini-3.5-flash-lite，可以介紹怎麼使用，並幫忙生成轉場代碼
 
-- [ ] 色板custom color ui 優化
+- [x] 色板custom color ui 優化
 - [x] editor window, property panel, 跟preview panel水平排時, property內部的property field min-width size也應該固定成最小值，而不是等到property panel本身也變窄了才跟著改變min-width size
 - [x] 滑鼠的旋轉icon可以再小一些
 - [x] timeline, 播放時拖曳某個片段，音訊會卡卡的，即使跟我拖曳的東西完全沒有關係(例如只是拖曳色板)
 - [x] contextMenu可以再小一些
-- [ ] properties tab 的關鍵影格時間軸可以縮放（scale）
+- [x] properties tab 的關鍵影格時間軸可以縮放（scale）

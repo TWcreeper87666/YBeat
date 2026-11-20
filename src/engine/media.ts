@@ -1,3 +1,4 @@
+import { dropMatte } from './matte';
 import { $t } from '../i18n';
 import { uid, useStore, type Media } from '../store';
 import { PEAKS_PER_SEC, computePeaks, getAudioBuffer } from './audio';
@@ -146,6 +147,7 @@ export function removeMedia(id: string) {
   const used = s.clips.some((c) => c.mediaId === id) || s.audios.some((a) => a.mediaId === id);
   if (m.url) URL.revokeObjectURL(m.url);
   deleteMediaBlob(id);
+  dropMatte(id);
   if (used) {
     useStore.setState({ media: s.media.map((x) => (x.id === id ? { ...x, url: '', thumb: x.kind === 'image' ? '' : x.thumb, missing: true } : x)) });
     toast($t('「{0}」已移除，使用中的片段標記為遺失', m.name));

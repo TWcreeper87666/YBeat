@@ -11,7 +11,8 @@ import { syncAudioPreview, stopAudioPreview } from '../engine/audio';
 import { parseDuration } from '../engine/params';
 import { clipTransformAt, fitSize, isAnimated, setPropsAt, type Transform } from '../engine/transform';
 import { textSize } from '../engine/text';
-import { MaskGizmos } from './MaskEditor';
+import { MaskGizmos, cfxMaskKey, useMaskEdit } from './MaskEditor';
+import { GridOverlay } from './GridOverlay';
 import { stopPreviewFx, useLayout, usePreviewFx } from './uiStore';
 import { hasSourcePanel } from './SourcePanel';
 import { useEditorWindow } from './EditorWindow';
@@ -253,8 +254,6 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
   const clip = useStore((s) => (sel?.type === 'clip' ? s.clips.find((c) => c.id === sel.id) : undefined));
   const media = useStore((s) => (clip ? s.media.find((m) => m.id === clip.mediaId) : undefined));
   const time = useStore((s) => s.time);
-  const grid = useLayout((s) => s.grid);
-  const gridCfg = { rows: useLayout((s) => s.gridRows), cols: useLayout((s) => s.gridCols), center: useLayout((s) => s.gridCenter), safe: useLayout((s) => s.gridSafe) };
 
   useEffect(() => {
     const c = canvasRef.current;
@@ -280,7 +279,10 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
   const W = rect.width, H = rect.height;
   const local = clip ? time - clip.start : -1;
   const visible = !!clip && (!!clip.text || (!!media && media.kind !== 'audio')) && local >= 0 && local < clip.duration;
-  const box = visible ? boxOf(clip!, media, local, W, H) : null;
+  // 正在預覽上編輯這個片段的遮罩：片段本身的變換框先藏起來，免得搶到滑鼠
+  const maskKey = useMaskEdit((st) => st.key);
+  const editingMask = !!maskKey && !!clip?.effects?.some((f) => cfxMaskKey(f.id) === maskKey && f.enabled !== false && (f.mask?.shape ?? 'none') !== 'none');
+  const box = visible && !editingMask ? boxOf(clip!, media, local, W, H) : null;
 
   const pt = (ev: { clientX: number; clientY: number }) => {
     const r = layerRef.current!.getBoundingClientRect();
@@ -383,6 +385,8 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
   const onLayerDown = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     stopPreviewFx();
+    // 編輯遮罩中：點遮罩框外面 = 結束編輯（不會拖到片段）
+    if (editingMask) return useMaskEdit.setState({ key: null });
     const s = useStore.getState();
     const ctx = makeCtx(s);
     const p = pt(e);
@@ -422,20 +426,7 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
 
   return (
     <div ref={layerRef} className="gizmo-layer" style={{ left: rect.left, top: rect.top, width: W, height: H }} onPointerDown={onLayerDown} onWheel={onWheel}>
-      {grid && (
-        <svg className="grid-overlay" width={W} height={H}>
-          {Array.from({ length: gridCfg.cols - 1 }, (_, i) => (i + 1) / gridCfg.cols).map((f) => <line key={'c' + f} x1={f * W} y1={0} x2={f * W} y2={H} />)}
-          {Array.from({ length: gridCfg.rows - 1 }, (_, i) => (i + 1) / gridCfg.rows).map((f) => <line key={'r' + f} x1={0} y1={f * H} x2={W} y2={f * H} />)}
-          {gridCfg.center && (
-            <>
-              <line className="center" x1={W / 2} y1={H / 2 - 10} x2={W / 2} y2={H / 2 + 10} />
-              <line className="center" x1={W / 2 - 10} y1={H / 2} x2={W / 2 + 10} y2={H / 2} />
-            </>
-          )}
-          {/* 短影音安全區：右側按鈕、下方標題 */}
-          {gridCfg.safe && <rect className="safe" x={W * 0.04} y={H * 0.08} width={W * 0.8} height={H * 0.7} />}
-        </svg>
-      )}
+      <GridOverlay W={W} H={H} />
       {(guides.x !== null || guides.y !== null) && (
         <svg className="snap-guides" width={W} height={H}>
           {guides.x !== null && <line x1={guides.x * W} y1={0} x2={guides.x * W} y2={H} />}

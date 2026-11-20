@@ -1,13 +1,14 @@
 import { $t } from '../i18n';
 import { audioSignal, type AudioSignal } from './audioReact';
-import { scrubFrame } from './scrubCache';
+import { scrubFrameAt } from './scrubCache';
 import { fxLevel, type BlendMode, type TransitionRef, type AudioClip, type AudioDrive, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
 import { maskAt, type Mask } from './mask';
-import { FIELD_RANGE, getShapeField, type ShapeField } from './maskShapes';
+import { FIELD_RANGE, getShapeField, maskFieldKey, type ShapeField } from './maskShapes';
 import { CLIP_MASK_ID } from '../modules/extra';
 import { renderText, textKey } from './text';
 import { hexToRgb, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
 import { clipSource, plainSpeed } from './remap';
+import { MATTE_SIZE, matteAt, requestMatte } from './matte';
 import { clipTransformAt } from './transform';
 import { evalKeys, type Keyframe } from './keyframes';
 
@@ -84,7 +85,7 @@ export function computeFrame(sorted: Clip[], t: number): FrameInfo {
 
 // ───────────────────────── GLSL ─────────────────────────
 
-const VS = `#version 300 es
+export const VS = `#version 300 es
 in vec2 a_pos;
 out vec2 v_uv;
 void main() { v_uv = a_pos * 0.5 + 0.5; gl_Position = vec4(a_pos, 0.0, 1.0); }`;
@@ -154,6 +155,8 @@ uniform float u_opacity;
 uniform int u_fit;       // 0 cover, 1 contain, 2 contain + blur bg, 3 原始大小（文字）
 uniform vec2 u_native;   // 原始大小（以畫面高度為 1）
 uniform float u_flip;
+uniform sampler2D u_matte;  // AI 去背遮罩（沒翻轉，第 0 列 = 最上面）
+uniform float u_useMatte;
 #define ASPECT (u_resolution.x / u_resolution.y)
 vec2 fitSize(bool cover) {
   if (u_fit == 3) return u_native;
@@ -177,8 +180,9 @@ void main() {
     vec4 s = texture(u_tex, vec2(uv.x, 1.0 - uv.y));
     // 文字有透明度（premultiplied）；一般素材當作不透明
     col = (u_fit == 3 ? vec4(s.rgb * s.a, s.a) : vec4(s.rgb, 1.0)) * inside;
+    if (u_useMatte > 0.5) col *= texture(u_matte, uv).r;
   }
-  if (u_fit == 2) {
+  if (u_fit == 2 && u_useMatte < 0.5) {
     vec2 bu = (v_uv - 0.5) * vec2(ASPECT, 1.0) / fitSize(true) + 0.5;
     vec3 bg = vec3(0.0);
     for (int i = -2; i <= 2; i++)
@@ -522,6 +526,40 @@ export class Renderer {
         root.set(b.id, root.get(a.id) ?? a.id);
       }
     }
+    /**
+     * 不同軌上「同一個影片、同一時間播的是同一個位置」的片段（例如下面原片、上面 AI 去背的複本）也共用：
+     * 各自一個 <video> 的話，播放時兩個解碼器會差 1～2 格，上下疊起來就對不上（看起來像遮罩慢半拍）。
+     */
+    const find = (id: string) => {
+      let r = id;
+      while (root.has(r)) r = root.get(r)!;
+      return r;
+    };
+    const byMedia = new Map<string, { c: Clip; sp: number; off: number }[]>();
+    for (const c of ctx.clips) {
+      if (!c.mediaId || c.text || ctx.media.get(c.mediaId)?.kind !== 'video') continue;
+      const sp = plainSpeed(c, ctx.modules);
+      if (sp === null || sp <= 0) continue;
+      // 素材時間 = off + 時間軸時間 × sp
+      const off = c.in - c.start * sp;
+      if (!byMedia.has(c.mediaId)) byMedia.set(c.mediaId, []);
+      byMedia.get(c.mediaId)!.push({ c, sp, off });
+    }
+    for (const list of byMedia.values()) {
+      for (let i = 0; i < list.length; i++) {
+        for (let j = i + 1; j < list.length; j++) {
+          const a = list[i], b = list[j];
+          if (a.c.track === b.c.track) continue;
+          if (Math.abs(a.sp - b.sp) > 1e-6 || Math.abs(a.off - b.off) > 1e-3) continue;
+          const overlap = Math.min(a.c.start + a.c.duration, b.c.start + b.c.duration) - Math.max(a.c.start, b.c.start);
+          if (overlap <= 0) continue;
+          const ra = find(a.c.id), rb = find(b.c.id);
+          if (ra !== rb) root.set(rb, ra);
+        }
+      }
+    }
+    // 壓平：每個片段直接指到最終的代表
+    for (const id of [...root.keys()]) root.set(id, find(id));
     this.chain = { clips: ctx.clips, root };
   }
 
@@ -536,11 +574,23 @@ export class Renderer {
       v.preload = 'auto';
       v.src = media.url;
       v.dataset.src = media.url;
-      const vv = v as HTMLVideoElement & { _dirty?: boolean };
+      const vv = v as HTMLVideoElement & { _dirty?: boolean; _mt?: number };
       vv._dirty = true;
       if ('requestVideoFrameCallback' in v) {
-        const mark = () => {
-          vv._dirty = true;
+        /**
+         * 新影格出來時，直接在這個 callback 裡上傳貼圖：只有在這裡，上傳到的那格才保證是 meta 說的那格。
+         * 等到下一次畫面迴圈再上傳的話，解碼器可能已經換到下一格，貼圖會比記下的時間超前一格
+         * （AI 去背的遮罩看起來就慢一格）。
+         */
+        const texKey = 'vid:' + key;
+        const mark = (_: number, meta: VideoFrameCallbackMetadata) => {
+          vv._mt = meta.mediaTime;
+          if (this.videos.get(key) !== v) return; // 已經換成別的 <video>
+          if (this.textures.has(texKey) && v!.readyState >= 2) {
+            this.upload(texKey, v!, this.mipState.get(texKey) ?? false);
+            this.texTime.set(texKey, meta.mediaTime);
+            vv._dirty = false;
+          } else vv._dirty = true;
           vv.requestVideoFrameCallback(mark);
         };
         vv.requestVideoFrameCallback(mark);
@@ -556,15 +606,19 @@ export class Renderer {
   }
 
   /** 影片貼圖：只有新影格才重新上傳（rVFC 標記）；匯出時一律上傳 */
-  private videoTex(clipId: string, v: HTMLVideoElement, mip: boolean, force: boolean): WebGLTexture | null {
+  private videoTex(clipId: string, v: HTMLVideoElement, mip: boolean, force: boolean, playing = false): WebGLTexture | null {
     const key = 'vid:' + clipId;
-    const vv = v as HTMLVideoElement & { _dirty?: boolean };
+    const vv = v as HTMLVideoElement & { _dirty?: boolean; _mt?: number };
     const has = this.textures.get(key);
     const hasRvfc = 'requestVideoFrameCallback' in v;
+    // seek 中：currentTime 已經是新的時間，畫面卻還是舊的那格 → 這時上傳會把舊畫面記成新時間（遮罩就對不上）。
+    // 先沿用上一張貼圖與它的時間，seek 完成後（seeked / rVFC）再更新
+    if (v.seeking && has && !force) return has;
     if (v.readyState >= 2 && (force || !has || !hasRvfc || vv._dirty || this.mipState.get(key) !== mip)) {
       vv._dirty = false;
       this.mipState.set(key, mip);
-      this.texTime.set(key, v.currentTime);
+      // 貼圖裡是哪一格：播放中用 rVFC 給的那格時間；暫停 / 匯出時 seek 到哪就是哪
+      this.texTime.set(key, playing && !v.paused && vv._mt !== undefined ? vv._mt : v.currentTime);
       return this.upload(key, v, mip);
     }
     return has ?? null;
@@ -617,7 +671,9 @@ export class Renderer {
 
   /** 把片段畫到 target；blend=true 時疊在現有內容上 */
   private drawClip(target: Target, clip: Clip, t: number, ctx: RenderCtx, mode: 'preview' | 'export', playing: boolean, blend: Blend) {
-    const fxs = (clip.effects ?? []).filter((f) => f.enabled !== false);
+    const on = (clip.effects ?? []).filter((f) => f.enabled !== false);
+    // 片段本身的遮罩一律最後套用（切出片段的形狀）
+    const fxs = [...on.filter((f) => !f.base), ...on.filter((f) => f.base)];
     const progs = fxs.map((f) => {
       const m = ctx.modules.get(f.moduleId);
       return m && m.kind === 'effect' ? this.moduleProg(m) : null;
@@ -652,26 +708,61 @@ export class Renderer {
       const fake = { ...(media ?? { width: 1080, height: 1920 }), width: media?.width || 1080, height: media?.height || 1920 } as Media;
       return this.drawTex(target, clip, local, this.missingTex(), fake, blend);
     }
+    let matteSrc = 0;
     if (media.kind === 'image') tex = this.imageTex(media);
     else if (media?.kind === 'video') {
       const { src, rate } = clipSource(clip, local, media, ctx.modules);
+      matteSrc = src;
       const v = this.videoFor(clip, media);
       if (mode === 'preview') {
         this.syncVideo(v, src, rate, playing);
         v.muted = true; // 聲音一律由 audio.ts（Web Audio）播放
       }
-      tex = this.videoTex(this.rootOf(clip.id), v, clip.fit === 'blur', mode === 'export');
+      tex = this.videoTex(this.rootOf(clip.id), v, clip.fit === 'blur', mode === 'export', mode === 'preview' && playing);
+      // AI 去背的遮罩要對準「貼圖裡實際的那一格」，不是目標時間（播放中影片會稍微超前 / 落後）
+      matteSrc = this.texTime.get('vid:' + this.rootOf(clip.id)) ?? src;
       // 暫停中拖播放頭：精準的 seek 還沒完成（長 GOP 影片很慢）就先用快取的小張影格
       if (mode === 'preview' && !playing) {
         const shown = this.texTime.get('vid:' + this.rootOf(clip.id));
         if (shown === undefined || Math.abs(shown - src) > 0.1) {
-          const bm = scrubFrame(media, src);
-          if (bm) tex = this.bitmapTex('scrub:' + clip.id, bm);
+          const sf = scrubFrameAt(media, src);
+          if (sf) {
+            tex = this.bitmapTex('scrub:' + clip.id, sf.bm);
+            // 快取影格不一定剛好在 src（間隔至少 0.25 秒）：遮罩要用這張影格自己的時間，才會跟畫面對上
+            matteSrc = sf.t;
+          }
         }
       }
     }
     if (!tex) return;
-    this.drawTex(target, clip, local, tex, media, blend);
+    this.drawTex(target, clip, local, tex, media, blend, undefined, clip.aiMatte ? this.matteTex(clip, media, matteSrc, ctx) : null);
+  }
+
+  private matteIdx = new Map<string, string>();
+  /** AI 去背遮罩貼圖：遮罩還沒算好就先排進背景計算，這一格照原樣畫 */
+  private matteTex(clip: Clip, media: Media, src: number, ctx: RenderCtx): WebGLTexture | null {
+    if (media.kind !== 'video' && media.kind !== 'image') return null;
+    const m = matteAt(media, src);
+    if (!m) {
+      requestMatte(clip, media, ctx.modules);
+      return null;
+    }
+    const gl = this.gl;
+    const key = 'matte:' + clip.id;
+    const stamp = `${media.id}:${m.idx}`;
+    let tex = this.textures.get(key);
+    if (tex && this.matteIdx.get(key) === stamp) return tex;
+    if (!tex) {
+      tex = this.newTexture(false);
+      this.textures.set(key, tex);
+    }
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, MATTE_SIZE, MATTE_SIZE, 0, gl.RED, gl.UNSIGNED_BYTE, m.data);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    this.matteIdx.set(key, stamp);
+    return tex;
   }
 
   private missing: WebGLTexture | null = null;
@@ -702,7 +793,7 @@ export class Renderer {
     return this.missing;
   }
 
-  private drawTex(target: Target, clip: Clip, local: number, tex: WebGLTexture, media: Media, blend: Blend, native?: [number, number]) {
+  private drawTex(target: Target, clip: Clip, local: number, tex: WebGLTexture, media: Media, blend: Blend, native?: [number, number], matte?: WebGLTexture | null) {
     const xf = clipTransformAt(clip, Math.min(local, clip.duration));
     const fit = native ? 3 : clip.fit === 'cover' ? 0 : clip.fit === 'contain' ? 1 : 2;
     this.pass(
@@ -720,6 +811,8 @@ export class Renderer {
         gl.uniform1i(this.loc(p, 'u_fit'), fit);
         gl.uniform2f(this.loc(p, 'u_native'), native?.[0] ?? 1, native?.[1] ?? 1);
         gl.uniform1f(this.loc(p, 'u_flip'), clip.flipX ? 1 : 0);
+        if (matte) this.bindTex(p, 'u_matte', matte, 1);
+        gl.uniform1f(this.loc(p, 'u_useMatte'), matte ? 1 : 0);
       },
       blend,
     );
@@ -823,6 +916,15 @@ export class Renderer {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    // 遮罩自己的路徑每改一次就是新的 key：舊的貼圖別一直留著
+    if (!cur && id.startsWith('path:') && this.shapeTexs.size > 64) {
+      for (const [k, v] of this.shapeTexs) {
+        if (!k.startsWith('path:')) continue;
+        this.gl.deleteTexture(v.tex);
+        this.shapeTexs.delete(k);
+        break;
+      }
+    }
     this.shapeTexs.set(id, { field, tex });
     return tex;
   }
@@ -832,7 +934,8 @@ export class Renderer {
       const gl = this.gl;
       this.bindTex(p, 'u_src', src.tex, 0);
       this.bindTex(p, 'u_fx', fxTex.tex, 1);
-      const tex = m.shape === 'rect' || m.shape === 'ellipse' ? null : this.shapeTex(m.shape);
+      const key = maskFieldKey(m);
+      const tex = key === 'rect' || key === 'ellipse' ? null : this.shapeTex(key);
       gl.uniform1i(this.loc(p, 'u_shape'), m.shape === 'ellipse' ? 2 : tex ? 3 : 1);
       if (tex) this.bindTex(p, 'u_shapeTex', tex, 2);
       gl.uniform4f(this.loc(p, 'u_box'), m.x, m.y, Math.max(0, m.w), Math.max(0, m.h));

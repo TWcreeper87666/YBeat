@@ -7,6 +7,7 @@ import { InspectorPanel, MediaPanel, ModulePanel, TextPanel } from './ui/LeftPan
 import { isTextField } from './ui/focus';
 import { MaskPanel } from './ui/MaskPanel';
 import { CodePanel } from './ui/CodePanel';
+import { AiPanel } from './ui/AiPanel';
 import { PickerHost } from './ui/Library';
 import { Timeline, mergeOrHint } from './ui/Timeline';
 import { SourcePanel, sourceHotkey } from './ui/SourcePanel';
@@ -14,6 +15,8 @@ import { FloatingWindow, PreviewPanel, Slot } from './ui/PreviewPanel';
 import { DockRoot, PANELS, layoutMenuItems, panelMenuItems, useDock, type PanelId } from './ui/Dock';
 import { ConfirmHost, DragGhost, MenuBar, MenuHost, Toasts } from './ui/Menu';
 import { copyKeys, deleteSelectedKey, keysFocused, nudgeKeys, pasteKeys, selectAllKeys } from './ui/EffectControls';
+import { ShapeDrawerHost } from './ui/ShapeDrawer';
+import { SHORTCUTS, TUTORIAL } from './ui/helpText';
 import { useLayout, toast, stopPreviewFx, confirmDialog, openMenu, type MenuItem } from './ui/uiStore';
 import { Globe, Settings } from 'lucide-react';
 import { downloadBlob, exportMp4 } from './engine/exporter';
@@ -76,122 +79,6 @@ function ExportDialog({ close }: { close: () => void }) {
     </div>
   );
 }
-
-const SHORTCUTS: [string, string][] = [
-  ['Space', $t('播放 / 暫停')],
-  ['← / →', $t('上 / 下一格（Shift = 1 秒）')],
-  ['↑ / ↓', $t('跳到上 / 下一個剪接點')],
-  ['Home / End', $t('跳到開頭 / 結尾（有選取時跳到選取片段的頭尾）')],
-  ['Ctrl+J', $t('合併相接的片段')],
-  ['Ctrl+G / Ctrl+Shift+G', $t('建立 / 解除群組')],
-  [$t('S、Ctrl+B'), $t('在播放頭分割')],
-  ['Q / W', $t('修剪開頭 / 結尾到播放頭')],
-  ['Ctrl+C / X / V', $t('複製 / 剪下 / 貼上到播放頭')],
-  ['Ctrl+D', $t('再製')],
-  ['Delete', $t('刪除')],
-  ['Shift+Delete', $t('波紋刪除')],
-  ['Enter', $t('在編輯視窗中編輯選取的片段 / 特效')],
-  ['Alt+Delete', $t('波紋刪除，所有軌道一起往前推')],
-  ['Alt+← / →', $t('選取的項目移動一格（Shift = 10 格）')],
-  ['Ctrl+A', $t('全選')],
-  ['Esc', $t('取消選取 / 停止循環')],
-  [$t('Ctrl+點擊'), $t('加選 / 取消選取')],
-  [$t('Shift+點擊'), $t('選取同軌範圍')],
-  [$t('空白處拖曳'), $t('框選')],
-  [$t('Ctrl+Z / Ctrl+Shift+Z、Ctrl+Y'), $t('復原 / 重做')],
-  ['N', $t('磁吸開關')],
-  [$t('= / -、\\'), $t('時間軸放大 / 縮小、符合視窗')],
-  [$t('Ctrl+滾輪'), $t('時間軸縮放')],
-  ['Ctrl+O', $t('匯入媒體')],
-  ['Ctrl+E', $t('匯出影片')],
-  ['Ctrl+S', $t('立即存檔（平常會自動存）')],
-  ['F1', $t('快捷鍵一覽')],
-  [$t('數值欄'), $t('左右拖曳改值（Shift 微調、Ctrl 對齊）；單擊輸入，可輸入算式')],
-];
-
-/** 說明 → 使用教學：介面上不放教學文字，統一寫在這裡 */
-const TUTORIAL: { title: string; items: string[] }[] = [
-  {
-    title: $t('基本流程'),
-    items: [
-      $t('從「素材」匯入影片、圖片、音樂（也可以直接把檔案拖進視窗），再拖到時間軸。'),
-      $t('在時間軸選取片段，到「屬性」調整位置、大小、速度、聲音與特效。'),
-      $t('按右上角「匯出影片」輸出 MP4。'),
-    ],
-  },
-  {
-    title: $t('素材、色板與文字'),
-    items: [
-      $t('單擊素材在「素材預覽」打開，可以設定入點 / 出點後按「插入片段」。'),
-      $t('素材遺失時（紅色）：點素材重新選檔，或把新素材拖到時間軸上的紅色片段。'),
-      $t('色板是純色背景素材：拖到影片軌，或選好顏色後按「加到結尾」。'),
-      $t('文字樣式拖到影片軌，或按文字分頁右上角的 ＋ 加在播放頭；選取後在「屬性」修改內容與樣式。'),
-    ],
-  },
-  {
-    title: $t('特效、轉場、變速'),
-    items: [
-      $t('在素材庫單擊模組可以試看（顯示在「素材預覽」），拖曳到時間軸套用，右鍵有更多套用方式。'),
-      $t('特效拖到特效軌 = 調整圖層（作用在它下面的影片軌）；拖到影片 / 文字片段上 = 只作用在那個片段的片段特效。'),
-      $t('也可以直接拖到「屬性」面板，套用到目前選取的片段；或按屬性面板最下面的「加入片段特效…」從特效庫挑。'),
-      $t('轉場拖到兩個片段的剪接點、片段開頭或片段結尾；變速模組拖到影片片段上。'),
-      $t('片段前面沒有緊貼的片段時，進場轉場是從透明轉入（在最底層軌道看起來就是從黑畫面轉入）；結尾的轉出是轉到透明。後面緊貼著片段時轉出不會生效，請改用下一個片段的進場轉場。'),
-      $t('自訂模組在「程式碼」分頁編輯：改完按「儲存」（Ctrl+S）才會套用，⋯ 選單可以捨棄變更。內建模組不能直接改，請先「複製為新模組」。'),
-      $t('新增的模組第一次儲存後才會出現在素材庫。程式碼分頁可以同時開好幾個模組（中鍵關閉），關閉還沒儲存的分頁會先詢問。'),
-    ],
-  },
-  {
-    title: $t('編輯視窗'),
-    items: [
-      $t('在時間軸上雙擊片段或特效（或選取後按 Enter、右鍵選單）打開編輯視窗，專心編輯這一個片段：直接在預覽上拖變換框與遮罩、同時看關鍵影格。'),
-      $t('視窗裡的預覽只播這個片段（進度條與時間從片段開頭算，播到結尾會回到開頭循環）。'),
-      $t('橫式輸出（例如 16:9）時預覽在上、屬性在下，關鍵影格時間軸會很寬；直式輸出（例如 9:16）時屬性在左、預覽在右。右上角可以固定其中一種，中間的分隔線可以拖曳調整大小（雙擊恢復）。'),
-      $t('在視窗的預覽上滾動滑鼠滾輪會縮放整個輸出畫面（以滑鼠位置為中心）；拖曳畫面外的空白處或按住中鍵拖曳可以平移，點右下角的百分比或雙擊空白處回到符合視窗。'),
-      $t('按「完成」或 Esc 關閉，屬性和預覽會回到原本的位置。'),
-    ],
-  },
-  {
-    title: $t('變換（位置、縮放、旋轉）'),
-    items: [
-      $t('在預覽上拖曳片段移動；拖四個角等比縮放，拖上下左右四個邊只拉一個方向，拖上方圓點旋轉。'),
-      $t('按住 Shift：移動時吸附到中線與邊緣；縮放時框的邊吸附到畫面四邊、中線（開了輔助網格也會吸網格線）；旋轉時每 15° 一格。'),
-      $t('縮放分成 X / Y，負數就是翻轉（把邊的把手拉過中心也會翻轉）。屬性「運動」右邊的鎖鏈是等比例：鎖上時改其中一個，另一個依比例跟著變，各自保留正負號。'),
-    ],
-  },
-  {
-    title: $t('遮罩'),
-    items: [
-      $t('每個特效都有遮罩，限制它只作用在某個區域；片段本身也可以加片段遮罩，只保留遮罩內的畫面。'),
-      $t('特效軌的遮罩直接在預覽上拖；片段特效的遮罩按「在預覽中編輯」會打開編輯視窗。'),
-      $t('在預覽畫面上拖曳遮罩框：框內移動、把手縮放（角 = 等比，Ctrl 自由縮放；Shift 吸附到網格線）、上方圓點旋轉、右側菱形羽化。'),
-      $t('「遮罩」分頁是形狀庫：點一下套用到選取的片段（加片段遮罩）或特效（換形狀），也可以拖到時間軸的片段 / 特效上。滑到形狀上點星號加入我的最愛。'),
-      $t('右上角 ＋ 可以匯入自訂形狀（PNG / SVG）：透明背景的圖用透明度，沒有透明背景就用亮度（白色 = 保留）。'),
-    ],
-  },
-  {
-    title: $t('聲音'),
-    items: [
-      $t('有聲音的影片會自動帶一段連結的音訊（畫在影片片段下半部）；右鍵「取消影音連結」可以分開成獨立的音訊片段。'),
-      $t('變速時預設保持音調（人聲不會變尖）；在「屬性 → 聲音」關掉「保持音調」就會像錄音帶一樣音調跟著變。'),
-    ],
-  },
-  {
-    title: $t('時間軸與軌道'),
-    items: [
-      $t('同一條軌道上的項目不會重疊；拖曳、拉長時會吸附到其他片段的頭尾（N 開關磁吸）。'),
-      $t('軌道標籤可以拖到任何位置調整順序，下緣拖曳調整高度，右鍵有更多選項。'),
-      $t('沒有選取任何東西時按 Delete，會移除選中軌道上播放頭所在的空白；Alt+Delete 刪除時所有軌道一起往前推。'),
-    ],
-  },
-  {
-    title: $t('關鍵影格與音訊反應'),
-    items: [
-      $t('屬性左側的碼錶開啟動畫，◇ 在播放頭加關鍵影格；右側可以框選、拖曳關鍵影格，展開曲線可以調緩動。'),
-      $t('任一數值參數可以設定「跟著音量 / 跟著節拍」，音量與節拍來自整個專案正在播放的聲音。'),
-      $t('自己寫 GLSL 時也可以直接用 u_level（音量 0~1）與 u_beat（節拍脈衝）。'),
-    ],
-  },
-];
 
 function TutorialDialog({ close }: { close: () => void }) {
   return (
@@ -540,6 +427,8 @@ function onKey(e: KeyboardEvent) {
     else if (k === 'j') { e.preventDefault(); mergeOrHint(); }
     else if (k === 'g') { e.preventDefault(); if (e.shiftKey) s.ungroupSelected(); else if (!s.groupSelected()) toast($t('至少選兩個項目才能建立群組'), 'error'); }
     else if (k === ',') { e.preventDefault(); openDialog('settings'); }
+    // Ctrl+Delete / Backspace = 波紋刪除（同 Shift+Delete）
+    else if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); s.removeSelection(e.altKey ? 'all' : true); }
     return;
   }
   if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
@@ -640,11 +529,13 @@ export default function App() {
       {createPortal(<ModulePanel kind="remap" />, hosts.remap)}
       {createPortal(<InspectorPanel />, hosts.inspector)}
       {createPortal(<CodePanel />, hosts.code)}
+      {createPortal(<AiPanel />, hosts.ai)}
       {createPortal(<PreviewPanel />, hosts.preview)}
       {createPortal(<Timeline />, hosts.timeline)}
 
       <ExportOverlay />
       <Dialogs />
+      <ShapeDrawerHost />
       <PickerHost />
       <MenuHost />
       <ConfirmHost />

@@ -1,6 +1,6 @@
 import { $t, displayName } from '../i18n';
-import { ArrowRightLeft, CircleAlert, Gauge, MoreHorizontal, Save, Plus, Sparkles, X } from 'lucide-react';
-import React, { useEffect, useMemo } from 'react';
+import { ArrowRightLeft, CircleAlert, Gauge, MoreHorizontal, Save, Plus, Sparkles, Wand2, X } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { create } from 'zustand';
 import CodeMirror from '@uiw/react-codemirror';
 import { javascript } from '@codemirror/lang-javascript';
@@ -10,6 +10,7 @@ import { useStore, type ModuleKind } from '../store';
 import { useDock } from './Dock';
 import { closeEditorWindow, useEditorWindow } from './EditorWindow';
 import { confirmDialog, openMenu, toast } from './uiStore';
+import { AiEditBar } from './AiEdit';
 
 /**
  * 「程式碼」分頁：編輯自訂模組（轉場 / 特效 / 變速），可以同時開好幾個（分頁內的分頁）。
@@ -78,6 +79,29 @@ export function newModule(kind: ModuleKind) {
   const s = useCodeEditor.getState();
   useCodeEditor.setState({ pending: { ...s.pending, [id]: { kind, name: NEW_NAME()[kind], code: NEW_MODULE_TEMPLATES[kind] } } });
   openTab(id);
+}
+
+/** 用指定的程式碼開一個新模組（AI 產生的）：跟「新增」一樣，儲存後才加進模組庫 */
+export function openNewModule(kind: ModuleKind, name: string | null, code: string) {
+  const id = `new:${kind}:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 5)}`;
+  const s = useCodeEditor.getState();
+  useCodeEditor.setState({ pending: { ...s.pending, [id]: { kind, name: name || NEW_NAME()[kind], code } } });
+  openTab(id);
+}
+
+/** 把程式碼放進某個分頁的草稿（還沒儲存） */
+export function setModuleCode(id: string, code: string) {
+  if (!resolve(id)) return toast($t('找不到這個模組'), 'error');
+  setDraft(id, { ...useCodeEditor.getState().drafts[id], code });
+  openTab(id);
+}
+
+/** 程式碼分頁目前打開的模組（含還沒儲存的修改） */
+export function currentModule(): { id: string; kind: ModuleKind; name: string; code: string } | null {
+  const { active, drafts } = useCodeEditor.getState();
+  const r = active ? resolve(active) : null;
+  if (!r) return null;
+  return { id: r.id, kind: r.kind, name: displayName(drafts[r.id]?.name ?? r.name), code: drafts[r.id]?.code ?? r.code };
 }
 
 /** 把分頁拿掉（不詢問） */
@@ -219,6 +243,7 @@ function Editor({ id }: { id: string }) {
   const ext = useMemo(() => [r.kind === 'remap' ? javascript() : cpp()], [r.kind]);
   const dirty = isDirty(id);
   const name = draft?.name ?? r.name;
+  const [ai, setAi] = useState(false);
 
   const more = (e: React.MouseEvent) => {
     const rc = (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -255,6 +280,7 @@ function Editor({ id }: { id: string }) {
         />
         {dirty && <span className="cp-dirty">● {r.isNew ? $t('尚未加入模組庫') : $t('未儲存')}</span>}
         <span className="spacer" />
+        <button className={`btn small-h ${ai ? 'on-accent' : ''}`} onClick={() => setAi(!ai)}><Wand2 size={12} /> {$t('AI 修改')}</button>
         <button className="btn primary small-h" disabled={!dirty} onClick={() => save(id)} title={$t('儲存 (Ctrl+S)')}><Save size={12} /> {$t('儲存')}</button>
         <button className="ec-icon" title={$t('更多')} onClick={more}><MoreHorizontal size={14} /></button>
       </div>
@@ -263,6 +289,15 @@ function Editor({ id }: { id: string }) {
         {users > 0 && <span className="muted">{$t('{0} 處使用中', users)}</span>}
         {error && <span className="err-dot" title={error}><CircleAlert size={12} /> {$t('編譯錯誤')}</span>}
       </div>
+      {ai && (
+        <AiEditBar
+          kind={r.kind}
+          name={displayName(name)}
+          code={draft?.code ?? r.code}
+          onApply={(code) => setDraft(id, { ...useCodeEditor.getState().drafts[id], code })}
+          onClose={() => setAi(false)}
+        />
+      )}
       <div className="cp-editor">
         <CodeMirror
           value={draft?.code ?? r.code}

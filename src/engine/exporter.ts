@@ -1,4 +1,5 @@
 import { ensureShapes } from './maskShapes';
+import { prepareMattes } from './matte';
 import { $t } from '../i18n';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { projectDuration, useStore } from '../store';
@@ -50,6 +51,8 @@ export async function exportMp4(fps: number, range?: { a: number; b: number }): 
   // 自訂遮罩形狀要先解碼好（預覽時是背景載入）
   const fxs = [...st0.effects, ...st0.clips.flatMap((c) => c.effects ?? [])];
   await ensureShapes(fxs.map((f) => f.mask?.shape ?? 'none'));
+  // AI 去背：遮罩要先全部算好
+  await prepareMattes(st0.clips, ctx.media, ctx.modules);
 
   const { w: FW, h: FH } = st0.format;
   const vConfig = await pickVideoConfig(FW, FH, fps);

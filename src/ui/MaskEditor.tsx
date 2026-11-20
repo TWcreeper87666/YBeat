@@ -2,7 +2,8 @@ import React from 'react';
 import { create } from 'zustand';
 import { useStore } from '../store';
 import { $t, displayName } from '../i18n';
-import { maskAt, maskKey, type Mask } from '../engine/mask';
+import { DEFAULT_MASK, PATH_SHAPE, maskAt, maskKey, type Mask } from '../engine/mask';
+import { CLIP_MASK_ID } from '../modules/extra';
 import { upsertKey } from '../engine/keyframes';
 import { shapeInfo } from '../engine/maskShapes';
 import { axisAligned, gridSnapLines, rotatedHalf, snapMoveAxis } from '../engine/snap';
@@ -11,6 +12,7 @@ import { useLayout } from './uiStore';
 /** 吸附距離（px），跟片段變換框一樣 */
 const SNAP_PX = 8;
 import { cfxCh, clipHost, fxHost } from './EffectControls';
+import { ensureClipBaseMask } from './MaskPanel';
 
 /** 正在預覽畫面上編輯的片段特效遮罩（特效軌的特效選取時一律可以編輯） */
 export const useMaskEdit = create<{ key: string | null }>(() => ({ key: null }));
@@ -43,16 +45,7 @@ function useTargets(): Target[] {
           label: name(fx.moduleId),
           mask: m,
           active: true,
-          set: (vals) => {
-            const host = fxHost(fx.id);
-            if (!host) return;
-            for (const [p, v] of Object.entries(vals)) {
-              const cur = useStore.getState().effects.find((x) => x.id === fx.id);
-              const k = cur?.keys?.[maskKey(p)];
-              if (k?.length) host.setKeys(maskKey(p), upsertKey(k, local, v));
-              else host.setBase(maskKey(p), v);
-            }
-          },
+          set: (vals) => writeMask(`fx:${fx.id}`, local, vals),
         });
       }
     }
@@ -70,21 +63,134 @@ function useTargets(): Target[] {
           label: name(f.moduleId),
           mask: m,
           active: editKey === cfxMaskKey(f.id),
-          set: (vals) => {
-            const host = clipHost(c.id);
-            if (!host) return;
-            for (const [p, v] of Object.entries(vals)) {
-              const cur = useStore.getState().clips.find((x) => x.id === c.id)?.effects?.find((x) => x.id === f.id);
-              const k = cur?.keys?.[maskKey(p)];
-              if (k?.length) host.setKeys(cfxCh(f.id, maskKey(p)), upsertKey(k, local, v));
-              else host.setBase(cfxCh(f.id, maskKey(p)), v);
-            }
-          },
+          set: (vals) => writeMask(cfxMaskKey(f.id), local, vals),
         });
       }
     }
   }
   return out;
+}
+
+type S = ReturnType<typeof useStore.getState>;
+
+/** 遮罩 key（`fx:<特效 id>` / `cfx:<片段特效 id>`）屬於哪個片段 / 特效 */
+function ownerOf(key: string, s: S = useStore.getState()) {
+  if (key.startsWith('fx:')) {
+    const fx = s.effects.find((f) => f.id === key.slice(3));
+    return fx ? { kind: 'fx' as const, fx } : null;
+  }
+  if (key.startsWith('cfx:')) {
+    const id = key.slice(4);
+    for (const c of s.clips) {
+      const f = c.effects?.find((x) => x.id === id);
+      if (f) return { kind: 'cfx' as const, clip: c, f };
+    }
+  }
+  return null;
+}
+
+/** 寫入遮罩的數值：有關鍵影格的屬性在 local 打 key，沒有就改固定值 */
+function writeMask(key: string, local: number, vals: Vals) {
+  const o = ownerOf(key);
+  if (!o) return;
+  const host = o.kind === 'fx' ? fxHost(o.fx.id) : clipHost(o.clip.id);
+  if (!host) return;
+  for (const [p, v] of Object.entries(vals)) {
+    const cur = ownerOf(key);
+    if (!cur) return;
+    const k = (cur.kind === 'fx' ? cur.fx.keys : cur.f.keys)?.[maskKey(p)];
+    const ch = cur.kind === 'fx' ? maskKey(p) : cfxCh(cur.f.id, maskKey(p));
+    if (k?.length) host.setKeys(ch, upsertKey(k, local, v));
+    else host.setBase(ch, v);
+  }
+}
+
+/** 片段在畫面上看不到（不透明度 0），其他都不變（影片照常同步） */
+const hideClip = (s: S, id: string): S => ({
+  ...s,
+  clips: s.clips.map((c) => {
+    if (c.id !== id) return c;
+    const keys = { ...c.keys };
+    delete keys.opacity;
+    return { ...c, keys, transform: { ...c.transform, opacity: 0 } };
+  }),
+});
+const patchCfx = (s: S, clipId: string, fxId: string, patch: object): S => ({
+  ...s,
+  clips: s.clips.map((c) => (c.id === clipId ? { ...c, effects: c.effects?.map((f) => (f.id === fxId ? { ...f, ...patch } : f)) } : c)),
+});
+
+/** 在畫面上繪製遮罩形狀時的對象 */
+export interface DrawTarget {
+  /** 這一格的遮罩；null = 還沒有遮罩 */
+  mask: Mask | null;
+  /** true = 片段遮罩（遮罩外變透明）；false = 特效遮罩（只在遮罩內套特效） */
+  cut: boolean;
+  /** 渲染用：這個遮罩的對象完全沒作用 / 不受遮罩限制（全畫面作用）時的專案 */
+  off(s: S): S;
+  on(s: S): S;
+  /** 套用畫好的形狀（遮罩自己的路徑，不存進形狀庫），遮罩框 = 形狀在畫面上的範圍（旋轉歸零） */
+  apply(shape: Pick<Mask, 'path' | 'pen'>, box: { x: number; y: number; w: number; h: number }): void;
+}
+
+/** key：`fx:<特效 id>`、`cfx:<片段特效 id>`、`clip:<片段 id>`（片段本身的遮罩，還沒有就在套用時建立） */
+export function drawTarget(key: string): DrawTarget | null {
+  const s = useStore.getState();
+  if (key.startsWith('clip:')) {
+    const clip = s.clips.find((c) => c.id === key.slice(5));
+    if (!clip) return null;
+    const base = clip.effects?.find((f) => f.base);
+    if (base) return drawTarget(cfxMaskKey(base.id));
+    return {
+      mask: null,
+      cut: true,
+      off: (st) => hideClip(st, clip.id),
+      on: (st) => st,
+      apply: (shape, box) => {
+        const id = ensureClipBaseMask(clip.id);
+        if (id) drawTarget(cfxMaskKey(id))?.apply(shape, box);
+      },
+    };
+  }
+  const o = ownerOf(key, s);
+  if (!o) return null;
+  const item = o.kind === 'fx' ? o.fx : o.f;
+  const start = o.kind === 'fx' ? o.fx.start : o.clip.start;
+  const dur = o.kind === 'fx' ? o.fx.duration : o.clip.duration;
+  const local = Math.min(Math.max(0, s.time - start), Math.max(0, dur - 1e-4));
+  const cut = o.kind === 'cfx' && o.f.moduleId === CLIP_MASK_ID;
+  const noMask = { mask: { ...DEFAULT_MASK, ...item.mask, shape: 'none' } };
+  return {
+    mask: maskAt(item.mask, item.keys, local),
+    cut,
+    off: (st) =>
+      o.kind === 'fx' ? { ...st, effects: st.effects.filter((f) => f.id !== o.fx.id) } : cut ? hideClip(st, o.clip.id) : patchCfx(st, o.clip.id, o.f.id, { enabled: false }),
+    on: (st) => (o.kind === 'fx' ? { ...st, effects: st.effects.map((f) => (f.id === o.fx.id ? { ...f, ...noMask } : f)) } : patchCfx(st, o.clip.id, o.f.id, noMask)),
+    apply: (shape, box) => {
+      const cur = ownerOf(key);
+      if (!cur) return;
+      const m: Mask = { ...DEFAULT_MASK, ...(cur.kind === 'fx' ? cur.fx.mask : cur.f.mask), shape: PATH_SHAPE, ...shape };
+      if (cur.kind === 'fx') useStore.getState().updateEffect(cur.fx.id, { mask: m });
+      else useStore.getState().updateClipFx(cur.clip.id, cur.f.id, { mask: m });
+      writeMask(key, local, { ...box, rotation: 0 });
+    },
+  };
+}
+
+/** 編輯中的時間要在項目範圍內（繪製前把播放頭移進來） */
+export function timeInside(key: string): number | null {
+  const s = useStore.getState();
+  let a: number, b: number;
+  if (key.startsWith('clip:')) {
+    const c = s.clips.find((x) => x.id === key.slice(5));
+    if (!c) return null;
+    [a, b] = [c.start, c.start + c.duration];
+  } else {
+    const o = ownerOf(key, s);
+    if (!o) return null;
+    [a, b] = o.kind === 'fx' ? [o.fx.start, o.fx.start + o.fx.duration] : [o.clip.start, o.clip.start + o.clip.duration];
+  }
+  return s.time >= a && s.time < b ? s.time : a;
 }
 
 const HANDLES: { k: string; sx: -1 | 0 | 1; sy: -1 | 0 | 1 }[] = [
@@ -93,8 +199,8 @@ const HANDLES: { k: string; sx: -1 | 0 | 1; sy: -1 | 0 | 1 }[] = [
 ];
 
 /** 形狀庫的形狀：在框裡畫出輪廓（框本身是外接矩形） */
-function ShapeOutline({ id }: { id: string }) {
-  const info = shapeInfo(id);
+function ShapeOutline({ id, path }: { id: string; path?: string }) {
+  const info = id === 'path' ? (path ? { path, png: undefined } : undefined) : shapeInfo(id);
   if (!info) return null;
   if (info.path)
     return (
@@ -225,7 +331,7 @@ function MaskBox({ t, W, H, setGuides }: { t: Target; W: number; H: number; setG
       title={t.active ? $t('拖曳移動、拖把手調整大小（角 = 等比，Ctrl 自由縮放、Alt 以中心縮放；Shift 吸附到中線 / 邊緣 / 網格線）、上方圓點旋轉、右側菱形羽化') : t.label}
       onPointerDown={(e) => t.active && begin(e, 'move')}
     >
-      {kind === 'shape' && <ShapeOutline id={m.shape} />}
+      {kind === 'shape' && <ShapeOutline id={m.shape} path={m.path} />}
       {f > 0.5 && <div className={`mask-feather ${kind}`} style={{ inset: -f }} />}
       {f > 0.5 && <div className={`mask-feather in ${kind}`} style={{ inset: Math.min(f, Math.min(w, h) / 2 - 1) }} />}
       <span className="mask-tag">
