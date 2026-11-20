@@ -9,6 +9,27 @@ export interface Span {
 
 const EPS = 1e-4;
 
+export function selectedItemsAtEdge<T extends { id: string; start: number; duration: number }>(
+  items: T[],
+  selectedIds: string[],
+  primaryId: string,
+  side: 'start' | 'end',
+): T[] {
+  const primary = items.find((item) => item.id === primaryId);
+  if (!primary) return [];
+  return selectedItemsAtTime(items, [...selectedIds, primaryId], side === 'start' ? primary.start : primary.start + primary.duration, side);
+}
+
+export function selectedItemsAtTime<T extends { id: string; start: number; duration: number }>(
+  items: T[],
+  selectedIds: string[],
+  edge: number,
+  side: 'start' | 'end',
+): T[] {
+  const selected = new Set(selectedIds);
+  return items.filter((item) => selected.has(item.id) && Math.abs((side === 'start' ? item.start : item.start + item.duration) - edge) <= EPS);
+}
+
 export const spansOverlap = (a: Span, b: Span) => a.lane === b.lane && a.start < b.start + b.duration - EPS && b.start < a.start + a.duration - EPS;
 
 /** Parts of an existing span that survive an overwrite. */

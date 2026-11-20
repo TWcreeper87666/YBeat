@@ -1,9 +1,10 @@
 import { $t, displayName } from '../i18n';
 import type React from 'react';
-import { useStore, mediaUsable, spansOf, type TrackKind } from '../store';
+import { attachedAudioIds, useStore, mediaUsable, spansOf, type TrackKind } from '../store';
 import { parseDuration } from '../engine/params';
 import { addMediaBlob, colorMedia } from '../engine/media';
 import { fitInGap, fitStart } from '../engine/overlap';
+import { laneSnapPoints } from '../engine/snap';
 import { stillDur } from '../prefs';
 import { applyMediaBatch, planMediaBatch } from '../engine/mediaBatch';
 import { TEXT_PRESETS } from '../engine/text';
@@ -139,7 +140,7 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
   const info = laneDuration(payload);
   if (!info || !info.accepts(lane)) return null;
 
-  // 時間：游標位置，吸附到同軌片段的頭尾
+  // Ghost placement snaps to visible timeline items across every track.
   const pps = s.pps;
   let time = Math.max(0, (x - laneEl.getBoundingClientRect().left) / pps);
   if (payload.kind === 'mediaBatch') {
@@ -147,15 +148,20 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
     if (!items?.length) return null;
     return { kind: 'lane', lane, idx, time: items[0].start, duration: info.dur, label: info.label, items };
   }
-  const list = lane === 'video' ? s.clips : lane === 'fx' ? s.effects : s.audios;
-  const pts = [0, s.time];
-  for (const it of list) if (it.track === idx) pts.push(it.start, it.start + it.duration, it.start - info.dur);
+  const attached = attachedAudioIds(s);
+  const snapItems = [
+    ...s.clips,
+    ...s.effects,
+    ...s.audios.filter((a) => !attached.has(a.id)),
+  ];
+  const pts = laneSnapPoints(snapItems, s.time, info.dur);
   let best = SNAP_PX / pps;
   let snapped: number | null = null;
-  for (const p of pts) {
-    if (p >= 0 && Math.abs(p - time) < best) { best = Math.abs(p - time); time = p; snapped = p; }
+  if (s.snap) {
+    for (const p of pts) {
+      if (p >= 0 && Math.abs(p - time) < best) { best = Math.abs(p - time); time = p; snapped = p; }
+    }
   }
-  if (!s.snap) snapped = null;
   useSnapLine.setState({ t: snapped });
   // 同一軌不能重疊：放到最近的空位；圖片 / 色板 / 文字放進空隙時縮短到剛好填滿
   const flexible = payload.kind === 'color' || payload.kind === 'text' || (payload.kind === 'media' && s.media.find((m) => m.id === payload.id)?.kind === 'image');

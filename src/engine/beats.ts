@@ -23,6 +23,26 @@ export interface BeatInfo {
   beats: Beat[];
 }
 
+/** Add evenly spaced grid points between detected beats without changing the detected downbeats. */
+export function subdivideBeats(beats: Beat[], division: number): Beat[] {
+  if (division <= 1 || beats.length < 2) return beats;
+  const steps = division === 4 ? 4 : 2;
+  const out: Beat[] = [];
+  for (let i = 0; i < beats.length; i++) {
+    const current = beats[i], next = beats[i + 1];
+    out.push(current);
+    if (!next) continue;
+    for (let j = 1; j < steps; j++) {
+      out.push({
+        t: current.t + ((next.t - current.t) * j) / steps,
+        s: current.s + ((next.s - current.s) * j) / steps,
+        down: false,
+      });
+    }
+  }
+  return out;
+}
+
 const MIN_BPM = 70, MAX_BPM = 180;
 
 /** 起音包絡：音量上升的量，減掉附近的平均（只留下突出的起音） */

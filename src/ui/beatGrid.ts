@@ -3,7 +3,7 @@
  */
 import { $t } from '../i18n';
 import { attachedAudioIds, keyOf, laneOf, parseKey, spansOf, useStore, type AnyItem, type Clip } from '../store';
-import { beatIndexAtOrAfter, layoutOnBeats, timelineBeats, type Beat } from '../engine/beats';
+import { beatIndexAtOrAfter, layoutOnBeats, subdivideBeats, timelineBeats, type Beat } from '../engine/beats';
 import { spansOverlap, type Span } from '../engine/overlap';
 import { plainSpeed } from '../engine/remap';
 import { makeCtx } from '../engine/renderer';
@@ -11,15 +11,15 @@ import { toast, useLayout } from './uiStore';
 
 type S = ReturnType<typeof useStore.getState>;
 
-let memo: { audios: S['audios']; clips: S['clips']; media: S['media']; lead: number; beats: Beat[] } | null = null;
+let memo: { audios: S['audios']; clips: S['clips']; media: S['media']; lead: number; division: number; beats: Beat[] } | null = null;
 /** 節拍提前（秒）：設定裡是 1/60 秒為單位 */
 export const beatLead = () => Math.max(0, useLayout.getState().beatLead ?? 5) / 60;
 /** 目前專案的節拍（時間軸秒數，已經往前移「節拍提前」）；音訊 / 素材沒變就用上次算好的 */
-export function getBeats(s: S = useStore.getState()): Beat[] {
+export function getBeats(s: S = useStore.getState(), division = useLayout.getState().beatDivision): Beat[] {
   const lead = beatLead();
-  if (memo && memo.audios === s.audios && memo.clips === s.clips && memo.media === s.media && memo.lead === lead) return memo.beats;
-  const beats = timelineBeats(s, attachedAudioIds(s), lead);
-  memo = { audios: s.audios, clips: s.clips, media: s.media, lead, beats };
+  if (memo && memo.audios === s.audios && memo.clips === s.clips && memo.media === s.media && memo.lead === lead && memo.division === division) return memo.beats;
+  const beats = subdivideBeats(timelineBeats(s, attachedAudioIds(s), lead), division);
+  memo = { audios: s.audios, clips: s.clips, media: s.media, lead, division, beats };
   return beats;
 }
 
@@ -27,6 +27,7 @@ export function getBeats(s: S = useStore.getState()): Beat[] {
 export function useBeats(): Beat[] {
   const on = useLayout((l) => l.beats);
   useLayout((l) => l.beatLead); // 改了節拍提前要重畫
+  useLayout((l) => l.beatDivision);
   const audios = useStore((s) => s.audios);
   const clips = useStore((s) => s.clips);
   const media = useStore((s) => s.media);
@@ -50,7 +51,7 @@ function noBeats() {
 
 /** 選取的項目在節拍處切開（every：每幾拍切一刀） */
 export function splitAtBeats(every: number) {
-  const beats = getBeats();
+  const beats = getBeats(useStore.getState(), 1);
   if (!beats.length) return noBeats();
   if (!useStore.getState().selected.length) return toast($t('先選取要分割的片段'), 'error');
   const n = useStore.getState().splitAtTimes(pick(beats, every).map((b) => b.t));
@@ -70,7 +71,7 @@ function maxDurOf(c: Clip, s: S): number {
  * 連結的原音跟著移動 / 修剪。排不下（會撞到沒選的片段）就不動。
  */
 export function fitToBeats(every: number) {
-  const beats = getBeats();
+  const beats = getBeats(useStore.getState(), 1);
   if (!beats.length) return noBeats();
   const s = useStore.getState();
   const clips = s.selected.map(parseKey).filter((k) => k.type === 'clip').map((k) => s.clips.find((c) => c.id === k.id)).filter((c): c is Clip => !!c);

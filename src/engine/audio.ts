@@ -27,6 +27,45 @@ export function getAudioBuffer(url: string): Promise<AudioBuffer | null> {
 }
 
 export const PEAKS_PER_SEC = 100;
+const audioPeak = new WeakMap<AudioBuffer, number>();
+
+export function audioBufferPeak(buf: AudioBuffer) {
+  const cached = audioPeak.get(buf);
+  if (cached !== undefined) return cached;
+  let peak = 1e-6;
+  for (let ch = 0; ch < buf.numberOfChannels; ch++) {
+    const data = buf.getChannelData(ch);
+    for (let i = 0; i < data.length; i += 4) peak = Math.max(peak, Math.abs(data[i]));
+  }
+  audioPeak.set(buf, peak);
+  return peak;
+}
+
+/** Per-pixel waveform maxima sampled from decoded audio, for zoom levels beyond stored timeline peaks. */
+export function waveformLevels(
+  channels: ArrayLike<ArrayLike<number>>,
+  sampleRate: number,
+  inT: number,
+  duration: number,
+  width: number,
+  peak: number,
+): number[] {
+  const n = Math.max(1, Math.floor(width));
+  const length = channels[0]?.length ?? 0;
+  const out = new Array<number>(n);
+  for (let x = 0; x < n; x++) {
+    const a = Math.max(0, Math.min(length, Math.floor((inT + (x / n) * duration) * sampleRate)));
+    const b = Math.max(a, Math.min(length, Math.ceil((inT + ((x + 1) / n) * duration) * sampleRate)));
+    const stride = Math.max(1, Math.ceil((b - a) / 512));
+    let value = 0;
+    for (let i = a; i < b; i += stride) {
+      for (let ch = 0; ch < channels.length; ch++) value = Math.max(value, Math.abs(channels[ch][i] ?? 0));
+    }
+    out[x] = Math.min(1, value / peak);
+  }
+  return out;
+}
+
 export function computePeaks(buf: AudioBuffer): number[] {
   const n = Math.ceil(buf.duration * PEAKS_PER_SEC);
   const step = buf.sampleRate / PEAKS_PER_SEC;

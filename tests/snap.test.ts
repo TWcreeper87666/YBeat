@@ -1,4 +1,4 @@
-import { axisAligned, rotatedHalf, snapMoveAxis, snapScaleAxis } from '../src/engine/snap';
+import { axisAligned, laneSnapPoints, rotatedHalf, snapMoveAxis, snapScaleAxis, snapTargetIfApplied } from '../src/engine/snap';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -30,6 +30,8 @@ ok(axisAligned(0)?.swapped === false, '0° 對齊、寬高不對調');
 ok(axisAligned(90.2)?.swapped === true, '90° 附近對齊、寬高對調');
 ok(axisAligned(-180)?.swapped === false, '-180° 對齊');
 ok(axisAligned(30) === null, '30° 不對齊 → 不吸附');
+ok(snapTargetIfApplied({ v: 10, d: 2 }, 9) === null, '受素材長度限制時不顯示未套用的吸附線');
+ok(snapTargetIfApplied({ v: 10, d: 2 }, 10) === 10, '實際吸附到素材尾端時顯示吸附線');
 
 // 移動吸附：中心、兩邊都能吸到每一條線
 {
@@ -46,6 +48,10 @@ ok(axisAligned(30) === null, '30° 不對齊 → 不吸附');
 {
   const h = rotatedHalf(100, 40, 90);
   ok(Math.abs(h.hx - 20) < 1e-9 && Math.abs(h.hy - 50) < 1e-9, '旋轉 90° 半寬半高對調');
+}
+{
+  const points = laneSnapPoints([{ start: 5, duration: 2 }], 8, 3);
+  ok(points.includes(5) && points.includes(7) && points.includes(2), 'Ghost 對齊其他軌道片段的頭尾與接續位置');
 }
 
 console.log(fails ? `\n${fails} 項失敗` : '\n全部通過');

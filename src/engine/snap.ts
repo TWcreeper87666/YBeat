@@ -43,6 +43,18 @@ export interface MoveSnap {
   line: number | null;
 }
 
+/** Only show a snap guide when the constrained result actually lands on its target. */
+export function snapTargetIfApplied(snap: { v: number; d: number }, actual: number): number | null {
+  return Number.isFinite(snap.d) && Math.abs(snap.v - actual) <= 1e-6 ? snap.v : null;
+}
+
+/** Timeline placement snap targets for another item's start, end, or end-to-start alignment. */
+export function laneSnapPoints(items: { start: number; duration: number }[], time: number, duration: number) {
+  const points = [0, time];
+  for (const item of items) points.push(item.start, item.start + item.duration, item.start - duration);
+  return points;
+}
+
 /**
  * 移動的吸附（一個軸）：框的中心、兩個邊（center ± half）都可以吸到任何一條線，取最近的。
  * half 是框在畫面上（含旋轉）的半寬 / 半高。

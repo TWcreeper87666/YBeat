@@ -5,7 +5,7 @@ import { create } from 'zustand';
 import { flushSync } from 'react-dom';
 import { axisAligned, gridSnapLines, rotatedHalf, snapMoveAxis, snapScaleAxis } from '../engine/snap';
 import { projectDuration, remapFor, srcAvail, useStore, type Clip, type Media } from '../store';
-import { Renderer, computeFrame, makeCtx, setRenderer } from '../engine/renderer';
+import { getRenderer, Renderer, computeFrame, makeCtx, setRenderer } from '../engine/renderer';
 import { setRemapErrorReporter } from '../engine/remap';
 import { syncAudioPreview, stopAudioPreview } from '../engine/audio';
 import { parseDuration } from '../engine/params';
@@ -14,7 +14,7 @@ import { clipTransformAt, fitSize, isAnimated, setPropsAt, type Transform } from
 import { textSize } from '../engine/text';
 import { MaskGizmos, cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { GridOverlay } from './GridOverlay';
-import { stopPreviewFx, useLayout, usePreviewFx } from './uiStore';
+import { stopPreviewFx, toast, useColorPick, useLayout, usePreviewFx } from './uiStore';
 import { useEditorWindow } from './EditorWindow';
 
 const frameAspect = () => useStore.getState().format.w / useStore.getState().format.h;
@@ -33,6 +33,7 @@ const TRANSITION_PREVIEW = 0.8;
 export function Preview() {
   const ref = useRef<HTMLCanvasElement>(null);
   const [err, setErr] = useState<string | null>(null);
+  const pickingColor = useColorPick((s) => !!s.pick);
 
   useEffect(() => {
     let r: Renderer;
@@ -159,6 +160,29 @@ export function Preview() {
   const availW = Math.max(1, box.w - PAD * 2), availH = Math.max(1, box.h - PAD * 2);
   const fitW = Math.min(availW, availH * aspect), fitH = fitW / aspect;
   const zoomed = editor && (view.z !== 1 || view.px !== 0 || view.py !== 0);
+  useEffect(() => {
+    if (!pickingColor) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') useColorPick.setState({ pick: null });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [pickingColor]);
+
+  const sampleColor = (e: React.PointerEvent) => {
+    const pick = useColorPick.getState().pick;
+    if (!pick || e.button !== 0) return false;
+    const canvas = ref.current;
+    const rect = canvas?.getBoundingClientRect();
+    if (!canvas || !rect || e.clientX < rect.left || e.clientX >= rect.right || e.clientY < rect.top || e.clientY >= rect.bottom) return false;
+    e.preventDefault();
+    e.stopPropagation();
+    const color = getRenderer()?.sampleColor((e.clientX - rect.left) / rect.width, (e.clientY - rect.top) / rect.height);
+    useColorPick.setState({ pick: null });
+    if (color) pick(color);
+    else toast($t('無法取樣顏色'), 'error');
+    return true;
+  };
   const canvasStyle: React.CSSProperties | undefined = zoomed
     ? { position: 'absolute', maxWidth: 'none', maxHeight: 'none', width: fitW * view.z, height: fitH * view.z, left: (box.w - fitW * view.z) / 2 + view.px, top: (box.h - fitH * view.z) / 2 + view.py }
     : undefined;
@@ -201,8 +225,8 @@ export function Preview() {
   return (
     <div
       ref={boxRef}
-      className={`preview ${editor ? 'pannable' : ''}`}
-      onPointerDownCapture={(e) => e.button === 1 && startPan(e)}
+      className={`preview ${editor ? 'pannable' : ''} ${pickingColor ? 'color-picking' : ''}`}
+      onPointerDownCapture={(e) => { if (!sampleColor(e) && e.button === 1) startPan(e); }}
       onPointerDown={(e) => e.button === 0 && startPan(e)}
       onDoubleClick={(e) => editor && e.target === e.currentTarget && resetView()}
     >

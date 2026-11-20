@@ -303,6 +303,19 @@ export class Renderer {
     this.targets = [0, 1, 2, 3, 4, 5, 6].map(() => this.makeTarget());
   }
 
+  sampleColor(x: number, y: number): string | null {
+    if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || x > 1 || y < 0 || y > 1) return null;
+    const gl = this.gl;
+    const pixel = new Uint8Array(4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.readPixels(
+      Math.min(this.w - 1, Math.floor(x * this.w)),
+      Math.max(0, this.h - 1 - Math.floor(y * this.h)),
+      1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel,
+    );
+    return `#${[pixel[0], pixel[1], pixel[2]].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+  }
+
   private makeTarget(): Target {
     const gl = this.gl;
     const tex = this.newTexture(false);

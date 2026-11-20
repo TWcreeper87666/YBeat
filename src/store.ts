@@ -283,6 +283,8 @@ interface State {
   linkSelected(): boolean;
   /** 取消選取項目的影音連結 */
   unlinkSelected(): void;
+  /** 移除影片片段的原音與連結音訊；回傳是否成功 */
+  removeClipAudio(clipId: string): boolean;
   groupSelected(): boolean;
   ungroupSelected(): void;
   /** 合併選取中、首尾相接而且素材連續的片段；回傳合併了幾組 */
@@ -1664,6 +1666,28 @@ export const useStore = create<State>()(
         setPps: (p) => set({ pps: Math.min(PPS_MAX, Math.max(PPS_MIN, p)) }),
         setSnap: (snap) => set({ snap }),
         setLeftTab: (t) => set({ leftTab: t }),
+
+        removeClipAudio: (clipId) => {
+          const before = get();
+          const clip = before.clips.find((c) => c.id === clipId);
+          const media = clip && before.media.find((m) => m.id === clip.mediaId);
+          if (!clip || !media?.hasAudio || clip.audioSplit) return false;
+          const linkedClips = clip.link ? before.clips.filter((c) => c.link === clip.link) : [];
+          const linkedAudios = clip.link ? before.audios.filter((a) => a.link === clip.link) : [];
+          const removeLinked = linkedClips.length <= 1;
+          if (
+            before.tracks.video[clip.track]?.locked ||
+            (removeLinked && linkedAudios.some((a) => before.tracks.audio[a.track]?.locked))
+          ) return false;
+          const removedAudioIds = new Set(removeLinked ? linkedAudios.map((a) => a.id) : []);
+          set({
+            clips: before.clips.map((c) => c.id === clipId ? { ...c, link: undefined, volume: 0, audioSplit: true } : c),
+            audios: removedAudioIds.size ? before.audios.filter((a) => !removedAudioIds.has(a.id)) : before.audios,
+            selected: removedAudioIds.size ? before.selected.filter((k) => !removedAudioIds.has(parseKey(k).id)) : before.selected,
+            selection: before.selection?.type === 'audio' && removedAudioIds.has(before.selection.id) ? { type: 'clip', id: clip.id } : before.selection,
+          });
+          return true;
+        },
       };
     },
     {

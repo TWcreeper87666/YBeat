@@ -1,4 +1,4 @@
-import { fitInGap, fitStart, groupFits, nextStart, prevEnd, resolveShift, overwriteParts, insertParts, type Span } from '../src/engine/overlap';
+import { fitInGap, fitStart, groupFits, nextStart, prevEnd, resolveShift, overwriteParts, insertParts, selectedItemsAtEdge, selectedItemsAtTime, type Span } from '../src/engine/overlap';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -7,6 +7,21 @@ const ok = (cond: boolean, msg: string) => {
 };
 const near = (a: number, b: number) => Math.abs(a - b) < 1e-6;
 const V = (start: number, duration: number, track = 0): Span => ({ lane: `video:${track}`, start, duration });
+
+{
+  const clips = [
+    { id: 'a', start: 2, duration: 4 },
+    { id: 'b', start: 2, duration: 2 },
+    { id: 'c', start: 1, duration: 5 },
+    { id: 'd', start: 3, duration: 2 },
+  ];
+  ok(selectedItemsAtEdge(clips, ['a', 'b', 'c'], 'a', 'start').map((x) => x.id).join() === 'a,b', '多選時只同步相同起點的片段');
+  ok(selectedItemsAtEdge(clips, ['a', 'c', 'd'], 'a', 'end').map((x) => x.id).join() === 'a,c', '多選時只同步相同終點的片段');
+  const selectedAudio = selectedItemsAtTime([{ id: 'a', start: 2, duration: 4 }, { id: 'b', start: 2, duration: 2 }, { id: 'c', start: 1, duration: 2 }], ['a', 'b', 'c'], 2, 'start');
+  const selectedEffects = selectedItemsAtTime([{ id: 'd', start: 1, duration: 5 }, { id: 'e', start: 3, duration: 3 }, { id: 'f', start: 3, duration: 2 }], ['d', 'e', 'f'], 6, 'end');
+  ok(selectedAudio.map((x) => x.id).join() === 'a,b', '音訊軌只同步相同起點的已選項目');
+  ok(selectedEffects.map((x) => x.id).join() === 'd,e', '特效軌只同步相同終點的已選項目');
+}
 
 const others = [V(0, 2), V(4, 2), V(10, 1)];
 

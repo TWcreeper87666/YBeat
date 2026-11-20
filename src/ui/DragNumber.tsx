@@ -1,6 +1,6 @@
 import { $t } from '../i18n';
 import React, { useEffect, useRef, useState } from 'react';
-import { openMenu } from './uiStore';
+import { openMenu, toast } from './uiStore';
 
 /**
  * Blender 風格數值欄：
@@ -118,7 +118,22 @@ export function DragNumber({
         e.stopPropagation();
         openMenu(e.clientX, e.clientY, [
           { label: $t('重設為預設值'), action: def !== undefined ? () => onChange(def) : undefined },
-          { label: $t('複製數值'), action: () => navigator.clipboard?.writeText(String(value)) },
+          { label: $t('複製數值'), action: () => navigator.clipboard?.writeText(String(Number((value * mul).toFixed(dec + 2)))) },
+          {
+            label: $t('貼上數值'),
+            action: async () => {
+              try {
+                const pasted = evalExpr(await navigator.clipboard.readText());
+                if (pasted === null) {
+                  toast($t('剪貼簿內容不是有效數值'), 'error');
+                  return;
+                }
+                onChange(round(clamp(pasted / mul)));
+              } catch {
+                toast($t('無法讀取剪貼簿'), 'error');
+              }
+            },
+          },
         ]);
       }}
     >

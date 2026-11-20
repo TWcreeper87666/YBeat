@@ -20,6 +20,8 @@ interface Layout {
   gridSafe: boolean;
   /** 時間軸顯示節拍格線（也會吸附到節拍） */
   beats: boolean;
+  /** 節拍格線細分：每拍、半拍或四分之一拍 */
+  beatDivision: 1 | 2 | 4;
   codeOpen: boolean;
   clipTab: 'frame' | 'speed' | 'sound';
   /** 效果控制：收合的區塊 */
@@ -51,7 +53,7 @@ interface Layout {
   set(p: Partial<Omit<Layout, 'set' | 'reset'>>): void;
   reset(): void;
 }
-const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], favorites: [] as string[], previewScale: 1, repeat: false, scrubAudio: true, beatLead: 5, upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300 };
+const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, beatDivision: 1 as const, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], favorites: [] as string[], previewScale: 1, repeat: false, scrubAudio: true, beatLead: 5, upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300 };
 
 export const useLayout = create<Layout>()(
   persist(
@@ -138,6 +140,8 @@ export const useDrag = create<{ drag: DragState | null }>(() => ({ drag: null })
 
 export const usePreviewFx = create<{ fx: { moduleId: string; t0: number } | null }>(() => ({ fx: null }));
 export const stopPreviewFx = () => usePreviewFx.getState().fx && usePreviewFx.setState({ fx: null });
+
+export const useColorPick = create<{ pick: ((hex: string) => void) | null }>(() => ({ pick: null }));
 
 // ───────────── 屬性面板中選取的關鍵影格 ─────────────
 

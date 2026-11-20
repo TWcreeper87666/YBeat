@@ -11,9 +11,10 @@ import {
   type AnyItem, type AudioClip, type Clip, type DropFit, type FxItem, type ItemType, type Media, type PasteResult, type PlacementGhost, type TrackKind, type Tracks, type TimelineDropMode,
 } from '../store';
 import { sortClips, transitionWindow, makeCtx, type TrWindow } from '../engine/renderer';
-import { nextStart, prevEnd, spansOverlap, type Span } from '../engine/overlap';
+import { nextStart, prevEnd, selectedItemsAtTime, spansOverlap, type Span } from '../engine/overlap';
+import { snapTargetIfApplied } from '../engine/snap';
 import { plainSpeed } from '../engine/remap';
-import { setScrubbing } from '../engine/audio';
+import { audioBufferPeak, getAudioBuffer, setScrubbing, waveformLevels } from '../engine/audio';
 import { PPS_MAX, PPS_MIN, rulerLabel, rulerSteps, snapFrame } from '../engine/rulerTicks';
 import { undo, redo, useHistory, beginHistoryTransaction, endHistoryTransaction } from '../engine/history';
 import { relinkWithPicker } from '../engine/media';
@@ -408,26 +409,77 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
   if (e.button !== 0) return;
   e.stopPropagation();
   e.preventDefault();
-  const S = useStore.getState();
+  const before = useStore.getState();
   const key = keyOf(type, it.id);
-  if ((e.ctrlKey || e.metaKey) && (type !== 'clip' || (S.selected.includes(key) && S.selected.length > 1))) return stretchItems(e, type, it, side);
-  S.select({ type, id: it.id });
+  if ((e.ctrlKey || e.metaKey) && (type !== 'clip' || (before.selected.includes(key) && before.selected.length > 1))) return stretchItems(e, type, it, side);
+  if (!before.selected.includes(key)) before.select({ type, id: it.id });
+  else useStore.setState({ selection: { type, id: it.id }, activeTrack: { kind: KIND_OF[type], idx: it.track }, leftTab: 'editor' });
+  const S = useStore.getState();
+  const edge0 = side === 'r' ? it.start + it.duration : it.start;
+  const showEffectiveSnap = (snap: { v: number; d: number }, edge: number) => {
+    showSnap(snapTargetIfApplied(snap, edge));
+  };
+  const trimItems = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((itemType) => {
+    const selectedIds = S.selected.map(parseKey).filter((selected) => selected.type === itemType).map((selected) => selected.id);
+    if (itemType === type) selectedIds.push(it.id);
+    return selectedItemsAtTime(S[LIST[itemType]] as AnyItem[], selectedIds, edge0, side === 'r' ? 'end' : 'start')
+      .map((item) => ({ type: itemType, item }));
+  });
   const pps = S.pps;
-  const pts = snapPoints(new Set([keyOf(type, it.id)]));
+  const movingKeys = new Set<string>();
+  const addLinkedItems = (itemType: ItemType, item: AnyItem) => {
+    movingKeys.add(keyOf(itemType, item.id));
+    if (item.link) {
+      for (const t of ['clip', 'audio'] as ItemType[]) {
+        for (const linked of S[LIST[t]] as AnyItem[]) if (linked.link === item.link) movingKeys.add(keyOf(t, linked.id));
+      }
+    }
+  };
+  trimItems.forEach(({ type: itemType, item }) => addLinkedItems(itemType, item));
+  const pts = snapPoints(movingKeys);
   const end = it.start + it.duration;
   const inT = (it as Clip).in ?? 0;
   const x0 = e.clientX;
-  const movingKeys = new Set([key]);
-  if (it.link) {
-    for (const t of ['clip', 'audio'] as ItemType[]) {
-      for (const linked of S[LIST[t]] as AnyItem[]) if (linked.link === it.link) movingKeys.add(keyOf(t, linked.id));
-    }
-  }
   const timeBeforeDrag = S.time;
   const others = spansOf(S, movingKeys);
   const lane = laneOf(type, it.track);
   const limitR = nextStart(others, lane, end);
   const limitL = prevEnd(others, lane, it.start);
+  const itemHasIn = (itemType: ItemType, item: AnyItem) => itemType === 'clip'
+    ? item.id === it.id && itemType === type ? hasIn : S.media.find((media) => media.id === (item as Clip).mediaId)?.kind === 'video'
+    : itemType === 'audio';
+  const itemStartBounds = (itemType: ItemType, item: AnyItem) => {
+    const speed = itemSpeed(itemType, item) ?? 1;
+    return {
+      min: itemHasIn(itemType, item) ? Math.max(0, item.start - ((item as Clip | AudioClip).in ?? 0) / speed) : 0,
+      max: item.start + item.duration - 0.05,
+    };
+  };
+  const itemEndBounds = (itemType: ItemType, item: AnyItem) => {
+    const sourceMax = itemType === 'clip'
+      ? item.id === it.id && itemType === type ? maxEnd : clipMaxDur(item as Clip)
+      : itemType === 'audio'
+        ? item.id === it.id && itemType === type ? maxEnd : S.media.find((media) => media.id === (item as AudioClip).mediaId)?.duration ?? Infinity
+        : Infinity;
+    const inPoint = itemType === 'effect' ? 0 : (item as Clip | AudioClip).in ?? 0;
+    return { min: item.start + 0.05, max: item.start + sourceMax - inPoint };
+  };
+  const addLinkedAudioPatch = (patches: Record<string, Partial<AnyItem>>, clip: Clip, edge: number, reset = false) => {
+    const audio = linkedAudioOf(S, clip);
+    if (!audio) return;
+    let patch: Partial<AudioClip>;
+    if (side === 'r') {
+      patch = { duration: Math.max(0.05, edge - audio.start) };
+    } else {
+      const delta = edge - clip.start;
+      patch = {
+        start: audio.start + delta,
+        duration: Math.max(0.05, audio.duration - delta),
+        in: Math.max(0, audio.in + delta * (audio.rate ?? 1)),
+      };
+    }
+    patches[keyOf('audio', audio.id)] = reset ? { ...audio, ...patch } : patch;
+  };
   let moved = false;
   let speedMode = false;
   let lastClientX = x0;
@@ -437,49 +489,107 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
     if (!moved) beginHistoryTransaction();
     moved = true;
     const d = (ev.clientX - x0) / pps;
-    let patch: Partial<Clip>;
+    let patch: Partial<Clip> = {};
+    const patches: Record<string, Partial<AnyItem>> = {};
+    const resizedSpans: Span[] = [];
     const speeding = type === 'clip' && (ev.ctrlKey || ev.metaKey);
     if (speeding) {
       const anchor = side === 'r' ? it.start : end;
       const edge0 = side === 'r' ? end : it.start;
       const sn = nearest(edge0 + d, pts, pps);
-      showSnap(sn.d !== Infinity ? sn.v : null);
       const edge = side === 'r' ? Math.max(anchor + 0.05, sn.v) : Math.max(0, Math.min(anchor - 0.05, sn.v));
+      showEffectiveSnap(sn, edge);
       const sc = Math.min(10, Math.max(0.1, (edge - anchor) / (edge0 - anchor || 1e-6)));
       patch = stretchPatch(type, it, anchor, sc) as Partial<Clip>;
+      if (trimItems.length > 1) {
+        for (const { type: itemType, item } of trimItems) {
+          const itemPatch = stretchPatch(itemType, item, anchor, sc);
+          patches[keyOf(itemType, item.id)] = speedMode !== speeding ? { ...item, ...itemPatch } : itemPatch;
+          resizedSpans.push({ lane: laneOf(itemType, item.track), start: itemPatch.start!, duration: itemPatch.duration! });
+          if (itemType === 'clip') {
+            const audio = linkedAudioOf(S, item as Clip);
+            if (!audio) continue;
+            const audioPatch = stretchPatch('audio', audio, anchor, sc) as Partial<AudioClip>;
+            patches[keyOf('audio', audio.id)] = speedMode !== speeding ? { ...audio, ...audioPatch } : audioPatch;
+          }
+        }
+        patch = patches[key] as Partial<Clip>;
+      } else {
+        patches[key] = speedMode !== speeding ? { ...it, ...patch } : patch;
+        resizedSpans.push({ lane, start: patch.start!, duration: patch.duration! });
+      }
       useOp.setState({ op: { key, kind: 'stretch', text: `${((itemSpeed(type, it) ?? 1) / sc).toFixed(2)}×`, keys: [key] } });
       document.body.classList.add('stretching');
       useStore.getState().setTime(side === 'r' ? patch.start! + patch.duration! - 1 / 60 : patch.start!);
+    } else if (trimItems.length > 1) {
+      const sn = nearest(edge0 + d, pts, pps);
+      const bounds = trimItems.map(({ type: itemType, item }) => side === 'r' ? itemEndBounds(itemType, item) : itemStartBounds(itemType, item));
+      const minEdge = Math.max(...bounds.map((bound) => bound.min));
+      const maxEdge = Math.min(...bounds.map((bound) => bound.max));
+      const edge = Math.max(minEdge, Math.min(maxEdge, sn.v));
+      showEffectiveSnap(sn, edge);
+      for (const { type: itemType, item } of trimItems) {
+        const itemEnd = item.start + item.duration;
+        if (side === 'r') {
+          const duration = Math.max(0.05, Math.min(itemEndBounds(itemType, item).max - item.start, edge - item.start));
+          const itemPatch = { duration };
+          patches[keyOf(itemType, item.id)] = speedMode !== speeding ? { ...item, ...itemPatch } : itemPatch;
+          resizedSpans.push({ lane: laneOf(itemType, item.track), start: item.start, duration });
+          if (itemType === 'clip') addLinkedAudioPatch(patches, item as Clip, edge, speedMode !== speeding);
+        } else {
+          const minStart = itemStartBounds(itemType, item).min;
+          const start = Math.min(itemEnd - 0.05, Math.max(minStart, edge));
+          const speed = itemSpeed(itemType, item) ?? 1;
+          const itemPatch: Partial<AnyItem> = {
+            start,
+            duration: itemEnd - start,
+            ...(itemHasIn(itemType, item) ? { in: Math.max(0, ((item as Clip | AudioClip).in ?? 0) + (start - item.start) * speed) } : {}),
+          };
+          patches[keyOf(itemType, item.id)] = speedMode !== speeding ? { ...item, ...itemPatch } : itemPatch;
+          resizedSpans.push({ lane: laneOf(itemType, item.track), start, duration: itemPatch.duration! });
+          if (itemType === 'clip') addLinkedAudioPatch(patches, item as Clip, start, speedMode !== speeding);
+        }
+      }
+      patch = patches[key] as Partial<Clip>;
+      useStore.getState().setTime(side === 'r' ? it.start + patch.duration! - 1 / 60 : patch.start!);
     } else if (side === 'r') {
       const sn = nearest(Math.max(it.start + 0.05, end + d), pts, pps);
-      showSnap(sn.d !== Infinity ? sn.v : null);
       patch = { duration: Math.min(maxEnd - inT, Math.max(0.05, sn.v - it.start)) };
+      showEffectiveSnap(sn, it.start + patch.duration!);
       useStore.getState().setTime(it.start + patch.duration! - 1 / 60);
+      patches[key] = speedMode !== speeding ? { ...it, ...patch } : patch;
+      resizedSpans.push({ lane, start: it.start, duration: patch.duration! });
     } else {
       const sn = nearest(it.start + d, pts, pps);
-      showSnap(sn.d !== Infinity ? sn.v : null);
       let s = sn.v;
       const minS = hasIn ? Math.max(0, it.start - inT / (itemSpeed(type, it) ?? 1)) : 0;
       s = Math.min(end - 0.05, Math.max(minS, s));
+      showEffectiveSnap(sn, s);
       patch = { start: s, duration: end - s };
       // 素材起點跟著移動（考慮速度：2× 時拉 1 秒 = 素材 2 秒）
       if (hasIn) patch.in = Math.max(0, inT + (s - it.start) * (itemSpeed(type, it) ?? 1));
       useStore.getState().setTime(s);
+      patches[key] = speedMode !== speeding ? { ...it, ...patch } : patch;
+      resizedSpans.push({ lane, start: patch.start!, duration: patch.duration! });
     }
     if (!speeding) {
       useOp.setState({ op: null });
       document.body.classList.remove('stretching');
     }
-    useStore.getState().patchItems({ [key]: speedMode !== speeding ? { ...it, ...patch } : patch });
+    useStore.getState().patchItems(patches);
     speedMode = speeding;
-    const span = { lane, start: patch.start ?? it.start, duration: patch.duration! };
     const affected: Record<string, { left: number; width: number }> = {};
-    for (const other of useStore.getState()[LIST[type]] as AnyItem[]) {
-      const otherKey = keyOf(type, other.id);
-      if (movingKeys.has(otherKey) || !spansOverlap(span, { lane: laneOf(type, other.track), start: other.start, duration: other.duration })) continue;
-      const left = Math.max(span.start, other.start);
-      const right = Math.min(span.start + span.duration, other.start + other.duration);
-      affected[otherKey] = { left: (left - other.start) * pps, width: (right - left) * pps };
+    for (const itemType of ['clip', 'effect', 'audio'] as ItemType[]) {
+      for (const other of useStore.getState()[LIST[itemType]] as AnyItem[]) {
+        const otherKey = keyOf(itemType, other.id);
+        if (movingKeys.has(otherKey)) continue;
+        for (const span of resizedSpans) {
+          if (!spansOverlap(span, { lane: laneOf(itemType, other.track), start: other.start, duration: other.duration })) continue;
+          const left = Math.max(span.start, other.start);
+          const right = Math.min(span.start + span.duration, other.start + other.duration);
+          affected[otherKey] = { left: (left - other.start) * pps, width: (right - left) * pps };
+        }
+      }
     }
     useMovePreview.setState({ moving: movingKeys, affected });
   };
@@ -508,7 +618,33 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
       decided = true;
       unsub();
       if (mode === 'trimFit') {
-        if (side === 'r') {
+        if (trimItems.length > 1) {
+          const patches: Record<string, Partial<AnyItem>> = {};
+          const edge = side === 'r'
+            ? Math.min(...trimItems.map(({ type: itemType, item }) => Math.min(itemEndBounds(itemType, item).max, nextStart(others, laneOf(itemType, item.track), item.start + item.duration))))
+            : Math.max(...trimItems.map(({ type: itemType, item }) => Math.max(itemStartBounds(itemType, item).min, prevEnd(others, laneOf(itemType, item.track), item.start))));
+          for (const { type: itemType, item } of trimItems) {
+            const itemEnd = item.start + item.duration;
+            if (side === 'r') {
+              const duration = Math.max(0.05, Math.min(itemEndBounds(itemType, item).max - item.start, edge - item.start));
+              patches[keyOf(itemType, item.id)] = { ...item, duration };
+              if (itemType === 'clip') addLinkedAudioPatch(patches, item as Clip, item.start + duration, true);
+            } else {
+              const speed = itemSpeed(itemType, item) ?? 1;
+              const start = Math.max(edge, itemStartBounds(itemType, item).min);
+              patches[keyOf(itemType, item.id)] = {
+                ...item,
+                start,
+                duration: itemEnd - start,
+                ...(itemHasIn(itemType, item) ? { in: Math.max(0, ((item as Clip | AudioClip).in ?? 0) + (start - item.start) * speed) } : {}),
+              };
+              if (itemType === 'clip') addLinkedAudioPatch(patches, item as Clip, start, true);
+            }
+          }
+          useStore.getState().patchItems(patches);
+          const primary = patches[key] as AnyItem;
+          useStore.getState().setTime(side === 'r' ? it.start + primary.duration - 1 / 60 : primary.start);
+        } else if (side === 'r') {
           const duration = Math.max(0.05, Math.min(maxEnd - inT, limitR - it.start));
           useStore.getState().patchItems({ [key]: { ...it, duration } });
           useStore.getState().setTime(it.start + duration - 1 / 60);
@@ -631,6 +767,14 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
   const grouped = sel.some(({ type: t, id }) => (st[LIST[t]] as AnyItem[]).find((x) => x.id === id)?.group);
   if (linked) items.push({ label: $t('取消影音連結'), action: () => S.unlinkSelected() });
   else if (sel.some((x) => x.type === 'clip') && sel.some((x) => x.type === 'audio')) items.push({ label: $t('連結影片與音訊'), action: () => S.linkSelected() });
+  if (type === 'clip' && media?.kind === 'video' && media.hasAudio && !(it as Clip).audioSplit) {
+    items.push({
+      label: $t('移除聲音'),
+      action: () => {
+        if (!useStore.getState().removeClipAudio(it.id)) toast($t('鎖定軌道無法移除聲音'), 'error');
+      },
+    });
+  }
   if (n > 1) items.push({ label: $t('合併片段'), shortcut: 'Ctrl+J', action: () => mergeOrHint() });
   if (grouped) items.push({ label: $t('解除群組'), shortcut: 'Ctrl+Shift+G', action: () => S.ungroupSelected() });
   else if (n > 1) items.push({ label: $t('建立群組'), shortcut: 'Ctrl+G', action: () => S.groupSelected() });
@@ -1592,6 +1736,14 @@ function TimelineToolbar() {
           const r = e.currentTarget.getBoundingClientRect();
           openMenu(r.left, r.bottom + 2, [
             { label: $t('顯示節拍格線'), checked: beatsOn, action: () => useLayout.getState().set({ beats: !beatsOn }) },
+            {
+              label: $t('節拍間隔'),
+              submenu: [
+                { label: $t('每拍'), checked: useLayout.getState().beatDivision === 1, action: () => useLayout.getState().set({ beatDivision: 1 }) },
+                { label: $t('半拍'), checked: useLayout.getState().beatDivision === 2, action: () => useLayout.getState().set({ beatDivision: 2 }) },
+                { label: $t('四分之一拍'), checked: useLayout.getState().beatDivision === 4, action: () => useLayout.getState().set({ beatDivision: 4 }) },
+              ],
+            },
             { separator: true },
             ...beatMenuItems(),
           ]);
@@ -1622,24 +1774,40 @@ function Waveform({ media, inT, dur, width, gain }: { media: Media; inT: number;
   useEffect(() => {
     const c = ref.current;
     const peaks = media.peaks;
-    if (!c || !peaks || !media.peaksPerSec) return;
-    const W = Math.max(1, Math.min(4096, Math.round(width)));
+    if (!c) return;
+    const W = Math.max(1, Math.min(8192, Math.round(width)));
     const H = 40;
     c.width = W;
     c.height = H;
     const g = c.getContext('2d')!;
-    g.clearRect(0, 0, W, H);
-    g.fillStyle = 'rgba(110, 231, 200, 0.75)';
-    const ps = media.peaksPerSec;
-    for (let x = 0; x < W; x++) {
-      const i0 = Math.floor((inT + (x / W) * dur) * ps);
-      const i1 = Math.max(i0, Math.floor((inT + ((x + 1) / W) * dur) * ps));
-      let m = 0;
-      for (let i = i0; i <= i1 && i < peaks.length; i++) m = Math.max(m, peaks[i]);
-      const k = gainAt(gain, gain ? ((x + 0.5) / W) * gain.len : 0);
-      const h = Math.max(1, Math.min(1, m * k) * H);
-      g.fillRect(x, (H - h) / 2, 1, h);
+    const draw = (levels: ArrayLike<number>) => {
+      g.clearRect(0, 0, W, H);
+      g.fillStyle = 'rgba(110, 231, 200, 0.75)';
+      for (let x = 0; x < W; x++) {
+        const k = gainAt(gain, gain ? ((x + 0.5) / W) * gain.len : 0);
+        const h = Math.max(1, Math.min(1, (levels[x] ?? 0) * k) * H);
+        g.fillRect(x, (H - h) / 2, 1, h);
+      }
+    };
+    if (peaks && media.peaksPerSec) {
+      const ps = media.peaksPerSec;
+      const levels = new Array<number>(W);
+      for (let x = 0; x < W; x++) {
+        const i0 = Math.floor((inT + (x / W) * dur) * ps);
+        const i1 = Math.max(i0, Math.floor((inT + ((x + 1) / W) * dur) * ps));
+        let m = 0;
+        for (let i = i0; i <= i1 && i < peaks.length; i++) m = Math.max(m, peaks[i]);
+        levels[x] = m;
+      }
+      draw(levels);
     }
+    let alive = true;
+    void getAudioBuffer(media.url).then((buf) => {
+      if (!alive || !buf) return;
+      const channels = Array.from({ length: buf.numberOfChannels }, (_, i) => buf.getChannelData(i));
+      draw(waveformLevels(channels, buf.sampleRate, inT, dur, W, audioBufferPeak(buf)));
+    });
+    return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [media, inT, dur, width, gv, gi, go, gl]);
   return <canvas ref={ref} className="wave" />;

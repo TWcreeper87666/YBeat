@@ -36,7 +36,7 @@ import { itemName } from './names';
 import { ensureMatte, matteCoverage, matteFrames, useMatte } from '../engine/matte';
 import { cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { closeSource, openSource, useSource } from './SourcePanel';
-import { confirmDialog, openMenu, promptDialog, revealSelection, stopPreviewFx, toast, useLayout, usePreviewFx, type MenuItem } from './uiStore';
+import { confirmDialog, openMenu, promptDialog, revealSelection, stopPreviewFx, toast, useColorPick, useLayout, usePreviewFx, type MenuItem } from './uiStore';
 import { DragNumber } from './DragNumber';
 import { ModuleCode } from './ModuleCode';
 import { newModule, openModuleEditor } from './CodePanel';
@@ -661,14 +661,27 @@ function ModuleSelect({ kind, value, onChange, allowNone }: { kind: ModuleKind; 
 }
 
 /** 參數的單一控制項（不打 key 的） */
-function ParamWidget({ d, v, onChange }: { d: ParamDef; v: ParamValue; onChange: (v: ParamValue) => void }) {
+function ColorParamWidget({ value, onChange, onSample }: { value: string; onChange: (v: string) => void; onSample?: (hex: string) => void }) {
+  const picking = useColorPick((s) => !!s.pick);
+  return (
+    <div className="color-pick-row">
+      <input type="color" className="color" value={value} onChange={(e) => onChange(e.target.value)} />
+      {onSample && <button className={`btn small-h ${picking ? 'on-accent' : ''}`} title={$t('吸取預覽顏色')} onClick={() => {
+        const active = useColorPick.getState().pick;
+        useColorPick.setState({ pick: active ? null : onSample });
+      }}><Pipette size={13} /></button>}
+    </div>
+  );
+}
+
+function ParamWidget({ d, v, onChange, sampleColor }: { d: ParamDef; v: ParamValue; onChange: (v: ParamValue) => void; sampleColor?: boolean }) {
   if (d.type === 'bool') return <label className="switch"><input type="checkbox" checked={Boolean(v)} onChange={(e) => onChange(e.target.checked)} /><span /></label>;
-  if (d.type === 'color') return <input type="color" className="color" value={String(v)} onChange={(e) => onChange(e.target.value)} />;
+  if (d.type === 'color') return <ColorParamWidget value={String(v)} onChange={onChange} onSample={sampleColor ? onChange : undefined} />;
   return <DragNumber variant="text" value={Number(v)} step={d.type === 'int' ? 1 : undefined} min={d.min} max={d.max} decimals={d.type === 'int' ? 0 : undefined} def={Number(d.def)} onChange={(x) => onChange(d.type === 'int' ? Math.round(x) : x)} />;
 }
 
-const paramRows = (defs: ParamDef[], values: ParamValues, set: (p: ParamValues) => void) =>
-  defs.map((d) => ({ label: $t(d.label), node: <ParamWidget d={d} v={values[d.name] ?? d.def} onChange={(v) => set({ ...values, [d.name]: v })} /> }));
+const paramRows = (defs: ParamDef[], values: ParamValues, set: (p: ParamValues) => void, sampleColor = false) =>
+  defs.map((d) => ({ label: $t(d.label), node: <ParamWidget d={d} v={values[d.name] ?? d.def} onChange={(v) => set({ ...values, [d.name]: v })} sampleColor={sampleColor && d.name === 'key'} /> }));
 
 
 /**
@@ -896,6 +909,7 @@ function ClipInspector({ id }: { id: string }) {
       onReset: () => updateClip(clip.id, { fit: 'cover', flipX: false, transform: { ...DEFAULT_TRANSFORM }, keys: {} }),
     },
   );
+  sections.push(clipMaskSection(clip, local));
   if (!isText && media && (media.kind === 'video' || media.kind === 'image')) sections.push({
     id: 'matte',
     title: $t('AI 去背'),
@@ -905,7 +919,6 @@ function ClipInspector({ id }: { id: string }) {
     ],
     onReset: () => updateClip(clip.id, { aiMatte: undefined }),
   });
-  sections.push(clipMaskSection(clip, local));
 
   if (isVideo && remapMod && clip.remap.moduleId === CURVE_ID) {
     // 曲線模式：素材時間本身是一條關鍵影格曲線（往上正播、往下倒播、平的定格）
@@ -1078,7 +1091,7 @@ function effectSections(
   mod: Module | undefined,
   local: number,
   update: (p: Partial<FxLike>) => void,
-  o: { idBase: string; /** 從 store 拿最新的（挑選視窗開著時資料會變） */ fresh: () => FxLike | undefined; maskKey?: string; drawKey?: string; ch?: (id: string) => string; compact?: boolean; title?: string; actions?: React.ReactNode; badge?: React.ReactNode; dim?: boolean; onFork?: (id: string) => void },
+  o: { idBase: string; /** 從 store 拿最新的（挑選視窗開著時資料會變） */ fresh: () => FxLike | undefined; maskKey?: string; drawKey?: string; ch?: (id: string) => string; compact?: boolean; title?: string; actions?: React.ReactNode; badge?: React.ReactNode; dim?: boolean; onFork?: (id: string) => void; sampleColor?: boolean },
 ): Section[] {
   const ch = o.ch ?? ((x: string) => x);
   const mapCh = (l: Channel[]) => l.map((c) => ({ ...c, id: ch(c.id) }));
@@ -1094,7 +1107,7 @@ function effectSections(
       badge: o.badge,
       actions: o.actions,
       dim: o.dim,
-      rows: [...paramRows(other, f.params, (p) => update({ params: p })), ...(o.compact ? maskRows : [])],
+      rows: [...paramRows(other, f.params, (p) => update({ params: p }), o.sampleColor), ...(o.compact ? maskRows : [])],
       channels: [...(mod ? mapCh(fxChannels(f as FxItem, mod.code, local)) : []), ...(o.compact ? maskChs : [])],
       onReset: () => update({ params: {}, keys: {}, ...(o.compact ? { mask: undefined } : {}) }),
       footer: mod && <ModuleCode module={mod} onFork={(nid) => (o.onFork ?? ((x: string) => update({ moduleId: x })))(nid)} />,
@@ -1188,6 +1201,7 @@ function clipFxSections(clip: Clip, modules: Module[], local: number): Section[]
       drawKey: cfxMaskKey(f.id),
       ch: (c) => cfxCh(f.id, c),
       compact: true,
+      sampleColor: mod?.id === 'fx-chromakey',
       dim: off,
       badge: <span className="kind k-fx cfx-badge">{$t('片段特效')} {i + 1}</span>,
       actions: (

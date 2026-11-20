@@ -44,8 +44,11 @@
 - [ ] stupid lyrics UI and function fix, should have a lyrics tab
 - [x] 鎖住軌道後就無法選取track的任何片段(選中該軌道也不行)，右鍵會出現解鎖選項，鎖住的UI簡化，就是變深色，鎖頭顏色變亮，不需要bg什麼的
 - [x] undo時media card遺失，我說的自動移除是只有missing的片段才會自動剔除
-- [ ] ghost item can't snap other track
-- [ ] video clip contextMenu add: remove sound from video
-- [ ] 吸色去背
-- [ ] AI去背，在遮罩之後?
-- [ ] beat偵測後應該要可以手動改變取樣間隔，不然有些都太大根本沒用
+- [x] ghost item can't snap other track
+- [x] video clip contextMenu add: remove sound from video
+- [x] 吸色去背
+- [x] AI去背，在遮罩之後?
+- [x] beat偵測後應該要可以手動改變取樣間隔，不然有些都太大根本沒用
+- [x] waveform放大後畫質變很差
+- [x] round value like property
+- [x] multiselect items across track types, resize matching edges together

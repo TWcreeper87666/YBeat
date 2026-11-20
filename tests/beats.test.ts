@@ -1,4 +1,4 @@
-import { beatIndexAtOrAfter, beatTime, estimateBeats, layoutOnBeats, timelineBeats } from '../src/engine/beats';
+import { beatIndexAtOrAfter, beatTime, estimateBeats, layoutOnBeats, subdivideBeats, timelineBeats } from '../src/engine/beats';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -41,6 +41,15 @@ ok(Math.abs(jit.bpm - 120) < 0.5, `有一點點不穩也估得出來（${jit.bpm
 
 ok(estimateBeats(new Array(3000).fill(0.2), 100) === null, '沒有起音 → null');
 ok(estimateBeats(clicks(120, 0, 2), 100) === null, '太短 → null');
+{
+  const subdivided = subdivideBeats([
+    { t: 1, s: 1, down: true },
+    { t: 1.5, s: 0.5, down: false },
+    { t: 2, s: 1, down: false },
+  ], 4);
+  ok(subdivided.length === 9 && subdivided[1].t === 1.125 && subdivided[3].t === 1.375, '四分之一拍間隔可細分節拍格線');
+  ok(subdivided[0].down && !subdivided[1].down && subdivided[8].t === 2, '細分格線保留重拍與原始節拍');
+}
 
 // 排版
 const grid = [0, 0.5, 1, 1.5, 2, 2.5, 3].map((t) => ({ t }));
