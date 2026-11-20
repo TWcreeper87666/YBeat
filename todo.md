@@ -35,4 +35,6 @@
 - [ ] 色板custom color ui 優化
 - [x] editor window, property panel, 跟preview panel水平排時, property內部的property field min-width size也應該固定成最小值，而不是等到property panel本身也變窄了才跟著改變min-width size
 - [x] 滑鼠的旋轉icon可以再小一些
-- [ ] 
+- [x] timeline, 播放時拖曳某個片段，音訊會卡卡的，即使跟我拖曳的東西完全沒有關係(例如只是拖曳色板)
+- [x] contextMenu可以再小一些
+- [ ] properties tab 的關鍵影格時間軸可以縮放（scale）

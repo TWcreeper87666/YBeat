@@ -32,6 +32,8 @@ interface Layout {
   favorites: string[];
   /** 特效 / 轉場 / 變速分頁目前選的分類 */
   modCat: Record<string, string>;
+  /** 素材庫的分類籤有沒有展開（搜尋列右邊的篩選按鈕；收起來 = 全部） */
+  libFilterOpen: Record<string, boolean>;
   /** 編輯視窗：排版（auto = 依視窗比例；stacked = 預覽上、屬性下；side = 屬性左、預覽右）與分隔比例（預覽 / 屬性所佔比例） */
   editorLayout: 'auto' | 'stacked' | 'side';
   editorSplit: { stacked: number; side: number };
@@ -40,7 +42,7 @@ interface Layout {
   set(p: Partial<Omit<Layout, 'set' | 'reset'>>): void;
   reset(): void;
 }
-const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], favorites: [] as string[], previewScale: 1, upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300 };
+const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], favorites: [] as string[], previewScale: 1, upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300 };
 
 export const useLayout = create<Layout>()(
   persist(
@@ -67,7 +69,7 @@ export function toast(text: string, kind: Toast['kind'] = 'info') {
 // ───────────── 右鍵選單 / 下拉選單 ─────────────
 
 export type MenuItem =
-  | { label: string; shortcut?: string; action?: () => void; disabled?: boolean; checked?: boolean; danger?: boolean }
+  | { label: string; shortcut?: string; action?: () => void; disabled?: boolean; checked?: boolean; danger?: boolean; /** 子選單（滑過去展開） */ submenu?: MenuItem[] }
   | { separator: true };
 export interface MenuState { x: number; y: number; items: MenuItem[]; owner?: string }
 export const useMenu = create<{ menu: MenuState | null }>(() => ({ menu: null }));
@@ -103,11 +105,12 @@ export type DragPayload =
   | { kind: 'module'; id: string; moduleKind: 'effect' | 'transition' | 'remap' }
   | { kind: 'color'; color: string }
   | { kind: 'text'; preset: string }
+  | { kind: 'mask'; shape: string }
   | { kind: 'files'; count: number };
 
 export type DropTarget =
   | { kind: 'lane'; lane: TrackKind; idx: number; time: number; duration: number; label: string }
-  | { kind: 'clip'; clipId: string; action: 'transition' | 'transitionOut' | 'remap' | 'relink' | 'effect'; valid: boolean }
+  | { kind: 'clip'; clipId: string; action: 'transition' | 'transitionOut' | 'remap' | 'relink' | 'effect' | 'mask'; valid: boolean }
   | { kind: 'effect'; fxId: string }
   | null;
 

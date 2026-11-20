@@ -1,20 +1,14 @@
 import { $t } from '../i18n';
-import { Check } from 'lucide-react';
+import { Check, ChevronRight } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { closeMenu, openMenu, useConfirm, useDrag, useMenu, useToast, type MenuItem } from './uiStore';
+import { installFocusGuard, isTextField } from './focus';
 
 // ───────────── 右鍵 / 下拉選單 ─────────────
 
 export function MenuHost() {
   const menu = useMenu((s) => s.menu);
   const ref = useRef<HTMLDivElement>(null);
-  const [pos, setPos] = useState({ x: 0, y: 0 });
-
-  useLayoutEffect(() => {
-    if (!menu || !ref.current) return;
-    const r = ref.current.getBoundingClientRect();
-    setPos({ x: Math.max(4, Math.min(menu.x, innerWidth - r.width - 6)), y: Math.max(4, Math.min(menu.y, innerHeight - r.height - 6)) });
-  }, [menu]);
 
   useEffect(() => {
     if (!menu) return;
@@ -38,27 +32,79 @@ export function MenuHost() {
 
   if (!menu) return null;
   return (
-    <div ref={ref} className="ctxmenu" style={{ left: pos.x, top: pos.y }} onContextMenu={(e) => e.preventDefault()}>
-      {menu.items.map((it, i) =>
-        'separator' in it ? (
-          <div key={i} className="menu-sep" />
-        ) : (
-          <button
-            key={i}
-            disabled={it.disabled || !it.action}
-            className={it.danger ? 'danger' : ''}
-            onClick={() => {
-              closeMenu();
-              it.action?.();
-            }}
-          >
-            <span className="mcheck">{it.checked ? <Check size={13} /> : ''}</span>
-            <span className="mlabel">{it.label}</span>
-            <kbd>{it.shortcut ?? ''}</kbd>
-          </button>
-        ),
-      )}
+    <div ref={ref} className="ctxmenu-root" onContextMenu={(e) => e.preventDefault()}>
+      <MenuList key={`${menu.x},${menu.y}`} items={menu.items} at={{ x: menu.x, y: menu.y }} />
     </div>
+  );
+}
+
+/** 一層選單；有子選單的項目滑過去（或點一下）在旁邊展開，右邊放不下就往左 */
+function MenuList({ items, at, from }: { items: MenuItem[]; at: { x: number; y: number }; from?: DOMRect }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState(at);
+  const [sub, setSub] = useState<{ i: number; rect: DOMRect } | null>(null);
+  const timer = useRef<number>();
+
+  useLayoutEffect(() => {
+    const r = ref.current!.getBoundingClientRect();
+    let x = at.x;
+    // 子選單：右邊放不下 → 放到父項目左邊
+    if (from && x + r.width > innerWidth - 6) x = from.left - r.width + 2;
+    setPos({ x: Math.max(4, Math.min(x, innerWidth - r.width - 6)), y: Math.max(4, Math.min(at.y, innerHeight - r.height - 6)) });
+  }, [at, from]);
+  useEffect(() => () => clearTimeout(timer.current), []);
+
+  const openSub = (i: number, el: HTMLElement, delay: number) => {
+    clearTimeout(timer.current);
+    const go = () => setSub({ i, rect: el.getBoundingClientRect() });
+    if (delay) timer.current = window.setTimeout(go, delay);
+    else go();
+  };
+
+  return (
+    <>
+      <div ref={ref} className="ctxmenu" style={{ left: pos.x, top: pos.y }}>
+        {items.map((it, i) =>
+          'separator' in it ? (
+            <div key={i} className="menu-sep" />
+          ) : it.submenu ? (
+            <button
+              key={i}
+              disabled={it.disabled || !it.submenu.length}
+              className={`has-sub ${sub?.i === i ? 'open' : ''}`}
+              onPointerEnter={(e) => openSub(i, e.currentTarget, 120)}
+              onClick={(e) => openSub(i, e.currentTarget, 0)}
+            >
+              <span className="mcheck" />
+              <span className="mlabel">{it.label}</span>
+              <ChevronRight size={12} className="msub" />
+            </button>
+          ) : (
+            <button
+              key={i}
+              disabled={it.disabled || !it.action}
+              className={it.danger ? 'danger' : ''}
+              onPointerEnter={() => {
+                clearTimeout(timer.current);
+                timer.current = window.setTimeout(() => setSub(null), 120);
+              }}
+              onClick={() => {
+                closeMenu();
+                it.action?.();
+              }}
+            >
+              <span className="mcheck">{it.checked ? <Check size={11} /> : ''}</span>
+              <span className="mlabel">{it.label}</span>
+              <kbd>{it.shortcut ?? ''}</kbd>
+            </button>
+          ),
+        )}
+      </div>
+      {sub && (() => {
+        const it = items[sub.i];
+        return it && !('separator' in it) && it.submenu ? <MenuList key={sub.i} items={it.submenu} at={{ x: sub.rect.right - 2, y: sub.rect.top - 4 }} from={sub.rect} /> : null;
+      })()}
+    </>
   );
 }
 
@@ -113,12 +159,14 @@ export function DragGhost() {
       <em>
         {!drag.target
           ? $t('拖到時間軸上')
+          : drag.payload.kind === 'mask'
+            ? drag.target.kind === 'effect' ? $t('設為這個特效的遮罩形狀') : $t('加上片段遮罩')
           : drag.target.kind === 'effect'
             ? $t('取代這個特效')
             : drag.target.kind === 'clip' && drag.target.action === 'effect'
               ? $t('加到這個片段的特效')
             : drag.target.kind === 'clip'
-              ? drag.target.action === 'relink' ? $t('重新連結素材') : drag.target.action === 'transition' ? $t('設為進場轉場') : drag.target.action === 'transitionOut' ? $t('設為轉出（到透明）') : $t('套用變速')
+              ? drag.target.action === 'relink' ? $t('重新連結素材') : drag.target.action === 'transition' ? $t('設為進場轉場') : drag.target.action === 'transitionOut' ? $t('設為轉出') : $t('套用變速')
               : $t('放開以加入')}
       </em>
       </div>
@@ -138,7 +186,7 @@ export function ConfirmHost() {
       if (e.key === 'Escape') done(false);
       else if (e.key === 'Enter') done(true);
       // 輸入框要能打字；其他按鍵不要觸發編輯器快捷鍵
-      else if ((e.target as HTMLElement).tagName === 'INPUT') return;
+      else if (isTextField(e.target)) return;
       e.stopPropagation();
     };
     window.addEventListener('keydown', k, true);
@@ -181,7 +229,6 @@ export function Toasts() {
 
 // ───────────── 像真正的 App：攔截瀏覽器預設行為 ─────────────
 
-const isTextField = (el: Element | null) => !!el?.closest('input:not([type=range]):not([type=checkbox]):not([type=color]), textarea, .cm-editor, [contenteditable]');
 
 /** 文字欄位 / 程式碼編輯器的右鍵選單（取代瀏覽器的） */
 function textMenu(x: number, y: number) {
@@ -226,11 +273,8 @@ export function installAppBehavior() {
   });
   // 單按 Alt 不要讓瀏覽器把焦點移到選單列（Alt+拖曳 = 滑移素材）
   window.addEventListener('keyup', (e) => e.key === 'Alt' && e.preventDefault());
-  // 按鈕點完就失焦，避免 Space / Enter 再次觸發按鈕
-  window.addEventListener('pointerup', () => {
-    const a = document.activeElement as HTMLElement | null;
-    if (a && (a.tagName === 'BUTTON' || (a.tagName === 'INPUT' && (a as HTMLInputElement).type === 'checkbox'))) a.blur();
-  });
+  // 控制項點完就失焦、焦點卡住時按鍵照常作用（規則見 focus.ts）
+  installFocusGuard();
   // 瀏覽器快捷鍵（存檔 / 列印 / 開啟 / 尋找…）一律攔截
   window.addEventListener(
     'keydown',

@@ -1,4 +1,4 @@
-import { axisAligned, snapScaleAxis } from '../src/engine/snap';
+import { axisAligned, rotatedHalf, snapMoveAxis, snapScaleAxis } from '../src/engine/snap';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -30,6 +30,23 @@ ok(axisAligned(0)?.swapped === false, '0° 對齊、寬高不對調');
 ok(axisAligned(90.2)?.swapped === true, '90° 附近對齊、寬高對調');
 ok(axisAligned(-180)?.swapped === false, '-180° 對齊');
 ok(axisAligned(30) === null, '30° 不對齊 → 不吸附');
+
+// 移動吸附：中心、兩邊都能吸到每一條線
+{
+  const grid = [0, 100, 200, 300, 400];
+  const r = snapMoveAxis(105, 30, grid, 8);
+  ok(r.line === 100 && r.center === 100, `中心吸到網格線（${r.center}）`);
+  const e = snapMoveAxis(232, 30, grid, 8); // 左邊 202 → 吸到 200
+  ok(e.line === 200 && e.center === 230, `左邊吸到網格線（${e.center}）`);
+  const f = snapMoveAxis(266, 30, grid, 8); // 右邊 296 → 吸到 300
+  ok(f.line === 300 && f.center === 270, `右邊吸到網格線（${f.center}）`);
+  const n = snapMoveAxis(150, 20, grid, 8);
+  ok(n.line === null && n.center === 150, '離線太遠 → 不吸');
+}
+{
+  const h = rotatedHalf(100, 40, 90);
+  ok(Math.abs(h.hx - 20) < 1e-9 && Math.abs(h.hy - 50) < 1e-9, '旋轉 90° 半寬半高對調');
+}
 
 console.log(fails ? `\n${fails} 項失敗` : '\n全部通過');
 process.exit(fails ? 1 : 0);

@@ -3,6 +3,7 @@ import { audioSignal, type AudioSignal } from './audioReact';
 import { scrubFrame } from './scrubCache';
 import { fxLevel, type BlendMode, type TransitionRef, type AudioClip, type AudioDrive, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
 import { maskAt, type Mask } from './mask';
+import { FIELD_RANGE, getShapeField, type ShapeField } from './maskShapes';
 import { CLIP_MASK_ID } from '../modules/extra';
 import { renderText, textKey } from './text';
 import { hexToRgb, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
@@ -193,7 +194,8 @@ void main() { outColor = texture(u_tex, v_uv); }`;
 /** 特效遮罩：mix(原畫面, 特效結果, 遮罩) */
 const MASK_FS = `${HEAD}uniform sampler2D u_src;
 uniform sampler2D u_fx;
-uniform int u_shape;     // 1 矩形, 2 橢圓
+uniform int u_shape;     // 1 矩形, 2 橢圓, 3 形狀貼圖（距離場）
+uniform sampler2D u_shapeTex;
 uniform vec4 u_box;      // 中心 x, y（0 = 置中，y 向下）, 寬, 高（以畫面寬 / 高為 1）
 uniform float u_feather;
 uniform float u_rot;
@@ -210,6 +212,12 @@ void main() {
   if (u_shape == 2) {
     float k = length(p / half_);
     d = (k - 1.0) * min(half_.x, half_.y);
+  } else if (u_shape == 3) {
+    // 距離場：以「半寬」為單位；框外再加上到框的距離
+    vec2 uv = p / half_;
+    vec2 c = clamp(uv, -1.0, 1.0);
+    float df = (texture(u_shapeTex, vec2(c.x * 0.5 + 0.5, 0.5 - c.y * 0.5)).r - 0.5) * 2.0 * ${FIELD_RANGE.toFixed(1)};
+    d = (df + length(uv - c)) * min(half_.x, half_.y);
   } else {
     vec2 q = abs(p) - half_;
     d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
@@ -798,12 +806,35 @@ export class Renderer {
     if (mask) this.maskPass(out, src, tmp, mask);
   }
 
+  private shapeTexs = new Map<string, { field: ShapeField; tex: WebGLTexture }>();
+  /** 形狀的距離場貼圖（還沒準備好 = null，先用矩形） */
+  private shapeTex(id: string): WebGLTexture | null {
+    const field = getShapeField(id);
+    if (!field) return null;
+    const cur = this.shapeTexs.get(id);
+    if (cur?.field === field) return cur.tex;
+    const gl = this.gl;
+    const tex = cur?.tex ?? gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, field.size, field.size, 0, gl.RED, gl.UNSIGNED_BYTE, field.data);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    this.shapeTexs.set(id, { field, tex });
+    return tex;
+  }
+
   private maskPass(out: Target, src: Target, fxTex: Target, m: Mask) {
     this.pass(out, this.maskProg, (p) => {
       const gl = this.gl;
       this.bindTex(p, 'u_src', src.tex, 0);
       this.bindTex(p, 'u_fx', fxTex.tex, 1);
-      gl.uniform1i(this.loc(p, 'u_shape'), m.shape === 'ellipse' ? 2 : 1);
+      const tex = m.shape === 'rect' || m.shape === 'ellipse' ? null : this.shapeTex(m.shape);
+      gl.uniform1i(this.loc(p, 'u_shape'), m.shape === 'ellipse' ? 2 : tex ? 3 : 1);
+      if (tex) this.bindTex(p, 'u_shapeTex', tex, 2);
       gl.uniform4f(this.loc(p, 'u_box'), m.x, m.y, Math.max(0, m.w), Math.max(0, m.h));
       gl.uniform1f(this.loc(p, 'u_feather'), Math.max(0, m.feather));
       gl.uniform1f(this.loc(p, 'u_rot'), (m.rotation * Math.PI) / 180);

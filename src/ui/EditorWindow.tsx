@@ -7,6 +7,8 @@ import { Slot } from './PreviewPanel';
 import { useMaskEdit } from './MaskEditor';
 import { useEditorMode, useEditorWindow, useLayout } from './uiStore';
 import type { PanelId } from './dockTree';
+import { isTextField } from './focus';
+import { pickerOpen } from './Library';
 
 /**
  * 編輯視窗（參考威力導演的子母畫面設計師）：針對「一個片段 / 特效」的編輯畫面。
@@ -92,7 +94,7 @@ export function EditorWindow({ hosts }: { hosts: Record<PanelId, HTMLElement> })
     if (!open) return;
     // Esc 關閉（capture：比全域快捷鍵先處理，免得 Esc 清掉選取）
     const key = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || (e.target as HTMLElement).closest?.('input, textarea, .cm-editor')) return;
+      if (e.key !== 'Escape' || isTextField(e.target) || pickerOpen()) return;
       e.stopPropagation();
       e.preventDefault();
       closeEditorWindow();

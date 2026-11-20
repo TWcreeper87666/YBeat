@@ -4,6 +4,12 @@ import { useStore } from '../store';
 import { $t, displayName } from '../i18n';
 import { maskAt, maskKey, type Mask } from '../engine/mask';
 import { upsertKey } from '../engine/keyframes';
+import { shapeInfo } from '../engine/maskShapes';
+import { axisAligned, gridSnapLines, rotatedHalf, snapMoveAxis } from '../engine/snap';
+import { useLayout } from './uiStore';
+
+/** 吸附距離（px），跟片段變換框一樣 */
+const SNAP_PX = 8;
 import { cfxCh, clipHost, fxHost } from './EffectControls';
 
 /** 正在預覽畫面上編輯的片段特效遮罩（特效軌的特效選取時一律可以編輯） */
@@ -86,13 +92,29 @@ const HANDLES: { k: string; sx: -1 | 0 | 1; sy: -1 | 0 | 1 }[] = [
   { k: 'se', sx: 1, sy: 1 }, { k: 's', sx: 0, sy: 1 }, { k: 'sw', sx: -1, sy: 1 }, { k: 'w', sx: -1, sy: 0 },
 ];
 
-function MaskBox({ t, W, H }: { t: Target; W: number; H: number }) {
+/** 形狀庫的形狀：在框裡畫出輪廓（框本身是外接矩形） */
+function ShapeOutline({ id }: { id: string }) {
+  const info = shapeInfo(id);
+  if (!info) return null;
+  if (info.path)
+    return (
+      <svg className="mask-outline" viewBox="0 0 200 200" preserveAspectRatio="none">
+        <path d={info.path} fillRule="evenodd" vectorEffect="non-scaling-stroke" />
+      </svg>
+    );
+  return <span className="mask-outline png" style={{ WebkitMaskImage: `url(${info.png})`, maskImage: `url(${info.png})` }} />;
+}
+
+type Guides = { x: number | null; y: number | null };
+
+function MaskBox({ t, W, H, setGuides }: { t: Target; W: number; H: number; setGuides: (g: Guides) => void }) {
   const m = t.mask;
   const cx = (0.5 + m.x) * W, cy = (0.5 + m.y) * H;
   const w = Math.max(2, m.w * W), h = Math.max(2, m.h * H);
   const f = m.feather * H;
+  const kind = m.shape === 'rect' || m.shape === 'ellipse' ? m.shape : 'shape';
 
-  /** 拖曳：移動 / 旋轉 / 羽化 / 8 個把手（對邊固定；Shift 等比、Alt 以中心縮放） */
+  /** 拖曳：移動 / 旋轉 / 羽化 / 8 個把手（對邊固定；角 = 等比、Ctrl 自由、Alt 以中心縮放、Shift 吸附） */
   const begin = (e: React.PointerEvent, mode: 'move' | 'rot' | 'feather' | { sx: number; sy: number }) => {
     if (e.button !== 0 || !t.active) return;
     e.stopPropagation();
@@ -115,10 +137,18 @@ function MaskBox({ t, W, H }: { t: Target; W: number; H: number }) {
       const p = P(ev);
       if (mode === 'move') {
         let x = m0.x + (p.x - p0.x) / W, y = m0.y + (p.y - p0.y) / H;
+        let g: Guides = { x: null, y: null };
         if (ev.shiftKey) {
-          if (Math.abs(x) < 0.03) x = 0;
-          if (Math.abs(y) < 0.03) y = 0;
+          // 跟片段的變換框一樣：中心、框的四邊（含旋轉的外接框）吸到畫面邊、中線、每一條網格線
+          const lines = gridSnapLines(W, H, useLayout.getState());
+          const { hx, hy } = rotatedHalf(m0.w * W, m0.h * H, m0.rotation);
+          const sx = snapMoveAxis((0.5 + x) * W, hx, lines.x, SNAP_PX);
+          const sy = snapMoveAxis((0.5 + y) * H, hy, lines.y, SNAP_PX);
+          x = sx.center / W - 0.5;
+          y = sy.center / H - 0.5;
+          g = { x: sx.line, y: sy.line };
         }
+        setGuides(g);
         return t.set({ x, y });
       }
       if (mode === 'rot') {
@@ -129,31 +159,57 @@ function MaskBox({ t, W, H }: { t: Target; W: number; H: number }) {
       const L = toLocal(p);
       if (mode === 'feather') return t.set({ feather: Math.max(0, (L.x - hw0) / H) });
       const { sx, sy } = mode;
-      let hw = hw0, hh = hh0, lx = 0, ly = 0;
-      if (ev.altKey) {
-        if (sx) hw = Math.abs(L.x);
-        if (sy) hh = Math.abs(L.y);
-        if (ev.shiftKey && sx && sy) {
-          const k = Math.max(hw / hw0, hh / hh0);
-          hw = hw0 * k;
-          hh = hh0 * k;
-        }
-      } else {
-        const ox = -sx * hw0, oy = -sy * hh0; // 對邊（固定不動）
-        if (sx) hw = Math.abs(L.x - ox) / 2;
-        if (sy) hh = Math.abs(L.y - oy) / 2;
-        if (ev.shiftKey && sx && sy) {
-          const k = Math.max(hw / hw0, hh / hh0);
-          hw = hw0 * k;
-          hh = hh0 * k;
-        }
-        if (sx) lx = ox + Math.sign(L.x - ox || sx) * hw;
-        if (sy) ly = oy + Math.sign(L.y - oy || sy) * hh;
+      // 角：預設等比（跟片段的變換框一樣），Ctrl = 自由縮放；Alt = 以中心縮放；Shift = 吸附
+      const alt = ev.altKey;
+      const prop = !!(sx && sy) && !(ev.ctrlKey || ev.metaKey);
+      const ox = alt ? 0 : -sx * hw0, oy = alt ? 0 : -sy * hh0; // 固定不動的點（對邊 / 中心）
+      const span = alt ? 1 : 2; // 半寬 = |拖的邊 - 固定點| / span
+      const dx = Math.sign(L.x - ox) || sx || 1, dy = Math.sign(L.y - oy) || sy || 1; // 拖的邊在哪一側
+      let hw = sx ? Math.abs(L.x - ox) / span : hw0;
+      let hh = sy ? Math.abs(L.y - oy) / span : hh0;
+      if (prop) {
+        const k = Math.max(hw / hw0, hh / hh0);
+        hw = hw0 * k;
+        hh = hh0 * k;
       }
+      let g: Guides = { x: null, y: null };
+      // Shift：拖的邊吸到畫面邊、中線、網格線（框要跟畫面對齊：旋轉 0 / 90 / 180 / 270°）
+      if (ev.shiftKey && axisAligned(m0.rotation)) {
+        const lines = gridSnapLines(W, H, useLayout.getState());
+        const snapEdge = (isX: boolean) => {
+          const e = isX ? ox + dx * hw * span : oy + dy * hh * span; // 拖的邊（框的座標）
+          const dir = isX ? { x: c, y: s } : { x: -s, y: c }; // 這個軸在畫面上的方向
+          const screenX = Math.abs(dir.x) > 0.5;
+          const d = Math.round(screenX ? dir.x : dir.y);
+          const base = screenX ? C0.x : C0.y;
+          const v = base + e * d;
+          let best: number | null = null;
+          for (const ln of screenX ? lines.x : lines.y) if (Math.abs(ln - v) <= SNAP_PX && (best === null || Math.abs(ln - v) < Math.abs(best - v))) best = ln;
+          if (best === null) return null;
+          return { half: Math.abs((best - base) / d - (isX ? ox : oy)) / span, line: best, screenX, dist: Math.abs(best - v) };
+        };
+        const rx = sx ? snapEdge(true) : null, ry = sy ? snapEdge(false) : null;
+        const mark = (r: NonNullable<typeof rx>) => (r.screenX ? (g.x = r.line) : (g.y = r.line));
+        if (prop) {
+          const r = rx && (!ry || rx.dist <= ry.dist) ? rx : ry;
+          if (r) {
+            const k = r === rx ? r.half / hw0 : r.half / hh0;
+            hw = hw0 * k;
+            hh = hh0 * k;
+            mark(r);
+          }
+        } else {
+          if (rx) { hw = rx.half; mark(rx); }
+          if (ry) { hh = ry.half; mark(ry); }
+        }
+      }
+      setGuides(g);
+      const lx = sx && !alt ? ox + dx * hw : 0, ly = sy && !alt ? oy + dy * hh : 0;
       const C = toScreen({ x: lx, y: ly });
       t.set({ x: C.x / W - 0.5, y: C.y / H - 0.5, w: Math.max(4, 2 * hw) / W, h: Math.max(4, 2 * hh) / H });
     };
     const up = () => {
+      setGuides({ x: null, y: null });
       document.body.classList.remove('mask-dragging');
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
@@ -164,13 +220,14 @@ function MaskBox({ t, W, H }: { t: Target; W: number; H: number }) {
 
   return (
     <div
-      className={`mask-gizmo ${m.shape} ${m.invert ? 'inv' : ''} ${t.active ? 'active' : 'passive'}`}
+      className={`mask-gizmo ${kind} ${m.invert ? 'inv' : ''} ${t.active ? 'active' : 'passive'}`}
       style={{ left: cx - w / 2, top: cy - h / 2, width: w, height: h, transform: `rotate(${m.rotation}deg)` }}
-      title={t.active ? $t('拖曳移動（Shift 吸附中心）、拖把手調整大小（Shift 等比、Alt 以中心縮放）、上方圓點旋轉、右側菱形羽化') : t.label}
+      title={t.active ? $t('拖曳移動、拖把手調整大小（角 = 等比，Ctrl 自由縮放、Alt 以中心縮放；Shift 吸附到中線 / 邊緣 / 網格線）、上方圓點旋轉、右側菱形羽化') : t.label}
       onPointerDown={(e) => t.active && begin(e, 'move')}
     >
-      {f > 0.5 && <div className={`mask-feather ${m.shape}`} style={{ inset: -f }} />}
-      {f > 0.5 && <div className={`mask-feather in ${m.shape}`} style={{ inset: Math.min(f, Math.min(w, h) / 2 - 1) }} />}
+      {kind === 'shape' && <ShapeOutline id={m.shape} />}
+      {f > 0.5 && <div className={`mask-feather ${kind}`} style={{ inset: -f }} />}
+      {f > 0.5 && <div className={`mask-feather in ${kind}`} style={{ inset: Math.min(f, Math.min(w, h) / 2 - 1) }} />}
       <span className="mask-tag">
         {t.label} · {$t('遮罩')}
         {m.invert ? $t('（反轉）') : ''}
@@ -191,12 +248,19 @@ function MaskBox({ t, W, H }: { t: Target; W: number; H: number }) {
 /** 預覽畫面上的遮罩框 */
 export function MaskGizmos({ W, H }: { W: number; H: number }) {
   const targets = useTargets();
+  const [guides, setGuides] = React.useState<Guides>({ x: null, y: null });
   if (!W || !targets.length) return null;
   return (
     <>
       {targets.map((t) => (
-        <MaskBox key={t.key} t={t} W={W} H={H} />
+        <MaskBox key={t.key} t={t} W={W} H={H} setGuides={setGuides} />
       ))}
+      {(guides.x !== null || guides.y !== null) && (
+        <svg className="snap-guides" width={W} height={H}>
+          {guides.x !== null && <line x1={guides.x} y1={0} x2={guides.x} y2={H} />}
+          {guides.y !== null && <line x1={0} y1={guides.y} x2={W} y2={guides.y} />}
+        </svg>
+      )}
     </>
   );
 }

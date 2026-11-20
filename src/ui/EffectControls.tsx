@@ -560,13 +560,11 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
     const list = currentKeys(host.owner, ch.id);
     const seg = targetSegment(list, k.id, lc);
     const curE = seg >= 0 ? easeId(list[seg].ease) : '';
-    const isLast = list.indexOf(list.find((x) => x.id === k.id)!) === list.length - 1;
+    // 緩動放子選單；只有一個關鍵影格（沒有區段可以設定）就不顯示
     openMenu(e.clientX, e.clientY, [
       ...(seg >= 0
-        ? [{ label: isLast ? $t('（套用到前一段）') : $t('（套用到下一段）'), action: undefined }, ...EASE_PRESETS.map((p) => ({ label: p.label, checked: curE === p.id, action: () => setSegmentEase(host, ch.id, seg, p.ease) }))]
-        : [{ label: $t('需要兩個以上的關鍵影格才能設定緩動'), action: undefined }]),
-      { separator: true },
-      { label: $t('播放頭移到這裡'), action: () => seek(k.t) },
+        ? [{ label: $t('緩動'), submenu: EASE_PRESETS.map((p) => ({ label: p.label, checked: curE === p.id, action: () => setSegmentEase(host, ch.id, seg, p.ease) })) }, { separator: true as const }]
+        : []),
       { label: n > 1 ? $t('複製 {0} 個關鍵影格', n) : $t('複製'), shortcut: 'Ctrl+C', action: copyKeys },
       { label: $t('貼上到播放頭'), shortcut: 'Ctrl+V', action: keyClipboard.length ? pasteKeys : undefined },
       { label: n > 1 ? $t('刪除 {0} 個關鍵影格', n) : $t('刪除關鍵影格'), shortcut: 'Del', danger: true, action: deleteSelectedKey },

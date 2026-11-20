@@ -19,21 +19,23 @@ export const PANELS: { id: PanelId; title: string }[] = [
   { id: 'text', title: $t('文字') },
   { id: 'transition', title: $t('轉場') },
   { id: 'effect', title: $t('特效') },
+  { id: 'mask', title: $t('遮罩') },
   { id: 'remap', title: $t('變速') },
   { id: 'inspector', title: $t('屬性') },
+  { id: 'code', title: $t('程式碼') },
   { id: 'preview', title: $t('預覽') },
   { id: 'source', title: $t('素材預覽') },
   { id: 'timeline', title: $t('時間軸') },
 ];
 const TITLE = Object.fromEntries(PANELS.map((p) => [p.id, p.title])) as Record<PanelId, string>;
-const LIB: PanelId[] = ['media', 'text', 'transition', 'effect', 'remap'];
+const LIB: PanelId[] = ['media', 'text', 'transition', 'effect', 'mask', 'remap'];
 
 /** 內建版面 */
 export const PRESETS: { id: string; name: string; build: () => DockNode }[] = [
-  { id: 'edit', name: $t('剪輯'), build: () => C([R([T(LIB), T(['inspector']), T(['preview', 'source'], 'preview')], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
-  { id: 'right', name: $t('預覽在右'), build: () => R([C([R([T(LIB), T(['inspector'])], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview', 'source'], 'preview')], [0.72, 0.28]) },
-  { id: 'code', name: $t('寫程式'), build: () => R([C([R([T(LIB), T(['inspector'])], [0.3, 0.7]), T(['timeline'])], [0.68, 0.32]), T(['preview', 'source'], 'preview')], [0.74, 0.26]) },
-  { id: 'timeline', name: $t('大時間軸'), build: () => C([R([T([...LIB, 'inspector']), T(['preview', 'source'], 'preview')], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
+  { id: 'edit', name: $t('剪輯'), build: () => C([R([T(LIB), T(['inspector', 'code'], 'inspector'), T(['preview', 'source'], 'preview')], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
+  { id: 'right', name: $t('預覽在右'), build: () => R([C([R([T(LIB), T(['inspector', 'code'], 'inspector')], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview', 'source'], 'preview')], [0.72, 0.28]) },
+  { id: 'code', name: $t('寫程式'), build: () => R([C([R([T(LIB), T(['inspector', 'code'], 'code')], [0.3, 0.7]), T(['timeline'])], [0.68, 0.32]), T(['preview', 'source'], 'preview')], [0.74, 0.26]) },
+  { id: 'timeline', name: $t('大時間軸'), build: () => C([R([T([...LIB, 'inspector', 'code'], 'media'), T(['preview', 'source'], 'preview')], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
 ];
 
 interface Custom { id: string; name: string; layout: DockNode }
@@ -117,7 +119,17 @@ export const useDock = create<DockState>()(
           l && !panelsIn(l).includes('source')
             ? mapTabs(l, (t) => (t.tabs.includes('preview') ? { ...t, tabs: [...t.tabs, 'source'] as PanelId[] } : t))
             : l;
-        const fix = (l: DockNode | null | undefined) => addSource(addText(l));
+        // 「遮罩」加在「特效」後面
+        const addMask = (l: DockNode | null | undefined) =>
+          l && !panelsIn(l).includes('mask')
+            ? mapTabs(l, (t) => (t.tabs.includes('effect') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'effect' ? ['effect', 'mask'] : [x])) as PanelId[] } : t))
+            : l;
+        // 「程式碼」加在「屬性」後面
+        const addCode = (l: DockNode | null | undefined) =>
+          l && !panelsIn(l).includes('code')
+            ? mapTabs(l, (t) => (t.tabs.includes('inspector') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'inspector' ? ['inspector', 'code'] : [x])) as PanelId[] } : t))
+            : l;
+        const fix = (l: DockNode | null | undefined) => addCode(addMask(addSource(addText(l))));
         return {
           ...current,
           ...p,

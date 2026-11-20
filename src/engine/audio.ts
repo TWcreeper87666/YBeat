@@ -165,8 +165,9 @@ function schedule(ctx: BaseAudioContext, dest: AudioNode, buf: AudioBuffer, p: A
 // ───────────── 預覽播放（Web Audio：用 AudioContext 的時鐘排程，不會因為 <audio> 元素對時而卡頓）─────────────
 
 let actx: AudioContext | null = null;
-let live: AudioBufferSourceNode[] = [];
-let gen = 0;
+/** 正在播放 / 排程中的聲音：key = 這段聲音的所有參數；內容改了只換掉變動的那幾段，其他繼續播（不會卡頓） */
+type LiveItem = { node: AudioBufferSourceNode | null; dead: boolean };
+let live = new Map<string, LiveItem>();
 /** 目前排程對應的時間軸起點與 context 時間 */
 let anchor: { t0: number; c0: number } | null = null;
 let lastInput: unknown[] = [];
@@ -175,15 +176,46 @@ let tick: { t: number; perf: number } | null = null;
 let modMap: { src: Module[] | null; map: Map<string, Module> } = { src: null, map: new Map() };
 let prepTimer: ReturnType<typeof setTimeout> | undefined;
 
+const planKey = (p: AudioPlanItem) =>
+  `${p.url}|${p.start}|${p.duration}|${p.in}|${p.rate}|${p.volume}|${p.fadeIn}|${p.fadeOut}|${p.keepPitch}`;
+
+function killItem(it: LiveItem) {
+  it.dead = true;
+  if (!it.node) return;
+  try { it.node.stop(); } catch { /* 還沒開始 */ }
+  it.node.disconnect();
+}
+
 function stopLive() {
-  gen++;
-  for (const n of live) {
-    try { n.stop(); } catch { /* 還沒開始 */ }
-    n.disconnect();
-  }
-  live = [];
+  for (const it of live.values()) killItem(it);
+  live = new Map();
   anchor = null;
   tick = null;
+}
+
+/** 把計畫裡還沒在播的聲音排進去、已經不在計畫裡的停掉（相同的不動） */
+function reconcile(ctx: AudioContext, plan: AudioPlanItem[]) {
+  const { t0, c0 } = anchor!;
+  const next = new Map<string, LiveItem>();
+  const tNow = t0 + (ctx.currentTime - c0); // 現在的時間軸時間
+  for (const p of plan) {
+    const key = planKey(p);
+    if (next.has(key)) continue;
+    const old = live.get(key);
+    if (old) {
+      next.set(key, old);
+      continue;
+    }
+    if (p.start + p.duration <= tNow) continue;
+    const it: LiveItem = { node: null, dead: false };
+    next.set(key, it);
+    void sourceFor(p).then((r) => {
+      if (!r || it.dead) return;
+      it.node = schedule(ctx, ctx.destination, r.buf, r.p, t0, c0);
+    });
+  }
+  for (const [k, it] of live) if (!next.has(k)) killItem(it);
+  live = next;
 }
 
 export function syncAudioPreview(s: PlanInput & { modules: Module[] }, t: number, playing: boolean) {
@@ -191,8 +223,9 @@ export function syncAudioPreview(s: PlanInput & { modules: Module[] }, t: number
   const input = [s.audios, s.clips, s.media, s.tracks, s.modules];
   const changed = input.some((x, i) => x !== lastInput[i]);
   lastInput = input;
+  const plan = changed || !anchor ? audioPlan(s, modMap.map) : null;
   if (changed) {
-    for (const p of audioPlan(s, modMap.map)) void getAudioBuffer(p.url); // 先解碼，按下播放時就有聲音
+    for (const p of plan!) void getAudioBuffer(p.url); // 先解碼，按下播放時就有聲音
     // 保持音調的變速片段：停止編輯一下子之後才預先處理（拖速度滑桿時不要每一格都算）
     clearTimeout(prepTimer);
     prepTimer = setTimeout(() => {
@@ -210,26 +243,20 @@ export function syncAudioPreview(s: PlanInput & { modules: Module[] }, t: number
     if (anchor) stopLive();
     return;
   }
-  // 時間軸跳動（拖播放頭、循環、Home/End）或內容改了 → 重新排程。
+  // 時間軸跳動（拖播放頭、循環、Home/End）→ 全部重新排程。
   // 用畫面時鐘判斷「跳動」：AudioContext 剛啟動時 currentTime 會停一下，拿它比會誤判
   const now = performance.now();
   const jumped = !tick || Math.abs(t - (tick.t + (now - tick.perf) / 1000)) > 0.25;
   tick = { t, perf: now };
-  if (!changed && anchor && !jumped) return;
-  stopLive();
-  tick = { t, perf: now };
-  const my = gen;
-  const ctx = actx;
-  const c0 = ctx.currentTime + 0.02;
-  anchor = { t0: t, c0 };
-  for (const p of audioPlan(s, modMap.map)) {
-    if (p.start + p.duration <= t) continue;
-    void sourceFor(p).then((r) => {
-      if (!r || my !== gen) return;
-      const n = schedule(ctx, ctx.destination, r.buf, r.p, t, c0);
-      if (n) live.push(n);
-    });
+  if (jumped || !anchor) {
+    stopLive();
+    tick = { t, perf: now };
+    anchor = { t0: t, c0: actx.currentTime + 0.02 };
+    reconcile(actx, plan ?? audioPlan(s, modMap.map));
+    return;
   }
+  // 內容改了（拖片段、改音量…）：只換掉有變動的聲音，跟這次編輯無關的繼續播
+  if (changed) reconcile(actx, plan!);
 }
 
 export function stopAudioPreview() {
@@ -238,14 +265,15 @@ export function stopAudioPreview() {
 
 // ───────────── 匯出混音 ─────────────
 
-export async function mixdown(s: PlanInput, modules: Map<string, Module>, duration: number): Promise<AudioBuffer | null> {
+/** 混音：時間軸 start 秒起、長 duration 秒（只輸出循環範圍時 start > 0） */
+export async function mixdown(s: PlanInput, modules: Map<string, Module>, duration: number, start = 0): Promise<AudioBuffer | null> {
   const ctx = new OfflineAudioContext(2, Math.max(1, Math.ceil(duration * SAMPLE_RATE)), SAMPLE_RATE);
   let any = false;
   for (const p of audioPlan(s, modules)) {
+    if (p.start + p.duration <= start || p.start >= start + duration) continue;
     const r = await sourceFor(p);
     if (!r) continue;
-    any = true;
-    schedule(ctx, ctx.destination, r.buf, r.p, 0, 0);
+    if (schedule(ctx, ctx.destination, r.buf, r.p, start, 0)) any = true;
   }
   return any ? ctx.startRendering() : null;
 }

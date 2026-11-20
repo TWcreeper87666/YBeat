@@ -3,7 +3,7 @@ import { Diamond, X } from 'lucide-react';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { create } from 'zustand';
 import { flushSync } from 'react-dom';
-import { axisAligned, snapScaleAxis } from '../engine/snap';
+import { axisAligned, gridSnapLines, rotatedHalf, snapMoveAxis, snapScaleAxis } from '../engine/snap';
 import { projectDuration, useStore, type Clip, type Media } from '../store';
 import { Renderer, computeFrame, makeCtx, setRenderer } from '../engine/renderer';
 import { setRemapErrorReporter } from '../engine/remap';
@@ -240,35 +240,11 @@ function dragWin(onMove: (ev: PointerEvent) => void, onUp?: () => void) {
   window.addEventListener('pointerup', up);
 }
 
-const SNAP = 0.025;
-/** 縮放吸附的距離（px） */
+/** 吸附距離（px） */
 const SNAP_PX = 8;
-/** 縮放時可以吸附的線：畫面四邊、中線，開了輔助網格再加上網格線 */
-function snapLines(W: number, H: number) {
-  const L = useLayout.getState();
-  const x = [0, W / 2, W], y = [0, H / 2, H];
-  if (L.grid) {
-    for (let i = 1; i < L.gridCols; i++) x.push((i / L.gridCols) * W);
-    for (let i = 1; i < L.gridRows; i++) y.push((i / L.gridRows) * H);
-  }
-  return { x, y };
-}
+const snapLines = (W: number, H: number) => gridSnapLines(W, H, useLayout.getState());
 type Rect = { left: number; top: number; width: number; height: number };
 const sameRect = (a: Rect, b: Rect) => a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
-/** Shift 吸附：中心、三分線、畫面邊緣；回傳吸附後的值與參考線位置（0~1） */
-function snapAxis(v: number, half: number): { v: number; guide: number | null } {
-  const cands: [number, number][] = [
-    [0, 0.5],
-    [-1 / 6, 1 / 3],
-    [1 / 6, 2 / 3],
-    [-0.5 + half, 0], // 左 / 上邊貼齊
-    [0.5 - half, 1], // 右 / 下邊貼齊
-  ];
-  let best: [number, number] | null = null;
-  for (const c of cands) if (Math.abs(v - c[0]) < SNAP && (!best || Math.abs(v - c[0]) < Math.abs(v - best[0]))) best = c;
-  return best ? { v: best[0], guide: best[1] } : { v, guide: null };
-}
-
 function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> }) {
   const [rect, setRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const [guides, setGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
@@ -332,11 +308,14 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
           let y = base.y + (p.y - p0.y) / H;
           let g = { x: null as number | null, y: null as number | null };
           if (ev.shiftKey) {
-            const sx = snapAxis(x, b.w / 2 / W);
-            const sy = snapAxis(y, b.h / 2 / H);
-            x = sx.v;
-            y = sy.v;
-            g = { x: sx.guide, y: sy.guide };
+            // 中心、框的四邊（含旋轉的外接框）都能吸到每一條線
+            const lines = snapLines(W, H);
+            const { hx, hy } = rotatedHalf(b.w, b.h, b.rot);
+            const sx = snapMoveAxis((0.5 + x) * W, hx, lines.x, SNAP_PX);
+            const sy = snapMoveAxis((0.5 + y) * H, hy, lines.y, SNAP_PX);
+            x = sx.center / W - 0.5;
+            y = sy.center / H - 0.5;
+            g = { x: sx.line !== null ? sx.line / W : null, y: sy.line !== null ? sy.line / H : null };
           }
           setGuides(g);
           apply({ x, y });
@@ -407,6 +386,16 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
     const s = useStore.getState();
     const ctx = makeCtx(s);
     const p = pt(e);
+    // 編輯視窗：只能動正在編輯的那個片段（其他片段鎖住，不會被點選或拖走；被別的片段蓋住也點得到）
+    if (useEditorWindow.getState().open) {
+      const sel = s.selection;
+      const c = sel?.type === 'clip' ? s.clips.find((x) => x.id === sel.id) : undefined;
+      if (!c) return;
+      const m = ctx.media.get(c.mediaId);
+      const l = s.time - c.start;
+      if ((m || c.text) && l >= 0 && l < c.duration && hit(boxOf(c, m, l, W, H), p.x, p.y)) begin(e, c, m, 'move');
+      return;
+    }
     for (let ti = ctx.videoTracks.length - 1; ti >= 0; ti--) {
       if (s.tracks.video[ti]?.hidden) continue;
       const fr = computeFrame(ctx.videoTracks[ti], s.time);
@@ -420,7 +409,7 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
         return;
       }
     }
-    if (!useEditorWindow.getState().open) s.select(null);
+    s.select(null);
   };
 
   const onWheel = (e: React.WheelEvent) => {

@@ -1,5 +1,5 @@
 import { $t, displayName } from '../i18n';
-import { AlignCenter, AlignLeft, AlignRight, Bold, Circle, CircleCheck, Italic, LayoutGrid, List, Music, Palette, Play, Plus, Search, Square, Star, TriangleAlert, Upload, X, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, Unlink, Link2, Unlink2 } from 'lucide-react';
+import { AlignCenter, AlignLeft, AlignRight, Bold, CircleCheck, Italic, Music, Palette, Play, Plus, TriangleAlert, Upload, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, Unlink, Link2, Unlink2 } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
 import { type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
 import type { Module } from '../modules/builtin';
@@ -7,13 +7,13 @@ import { CATEGORIES, categoryOf } from '../modules/categories';
 import { colorMedia, colorName, importFiles, pickFiles, relinkWithPicker, removeMedia } from '../engine/media';
 import { nextStart } from '../engine/overlap';
 import { FONTS, TEXT_PRESETS, DEFAULT_TEXT, renderText, type TextStyle } from '../engine/text';
-import { DEFAULT_MASK, type Mask, type MaskShape } from '../engine/mask';
+import { DEFAULT_MASK, type Mask } from '../engine/mask';
+import { shapeName } from '../engine/maskShapes';
 import type { Keyframe } from '../engine/keyframes';
 import { parseDuration, parseParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
 import { computeFrame, transitionWindow, sortClips, makeCtx } from '../engine/renderer';
 import { DEFAULT_TRANSFORM, FITS, type Fit } from '../engine/transform';
 import { plainSpeed } from '../engine/remap';
-import { CLIP_MASK_ID } from '../modules/extra';
 
 /** 混合模式選單（函式：語言在載入時決定） */
 const BLENDS = (): Record<BlendMode, string> => ({
@@ -33,30 +33,10 @@ import { openEditorWindow, useEditorWindow } from './EditorWindow';
 import { openMenu, revealSelection, stopPreviewFx, toast, useLayout, usePreviewFx, type MenuItem } from './uiStore';
 import { DragNumber } from './DragNumber';
 import { ModuleCode } from './ModuleCode';
+import { newModule, openModuleEditor } from './CodePanel';
+import { FavButton, LibFilter, LibToolbar, match, openPicker } from './Library';
+import { MaskLibrary, ShapeThumb, addClipMask, setMaskShape } from './MaskPanel';
 import { EffectControls, cfxCh, clipChannels, clipHost, fxChannels, fxHost, maskChannels, type Channel, type Section } from './EffectControls';
-
-// ───────────────────────── 共用：搜尋 + 檢視切換 ─────────────────────────
-
-function LibToolbar({ id, query, setQuery, children }: { id: string; query: string; setQuery: (q: string) => void; children?: React.ReactNode }) {
-  const view = useLayout((s) => s.libView[id] ?? 'grid');
-  const setView = (v: 'list' | 'grid') => useLayout.getState().set({ libView: { ...useLayout.getState().libView, [id]: v } });
-  return (
-    <div className="lib-bar">
-      <div className="lib-search">
-        <Search size={13} />
-        <input placeholder={$t('搜尋…')} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && setQuery('')} />
-        {query && <button onClick={() => setQuery('')}><X size={13} /></button>}
-      </div>
-      {children}
-      <div className="lib-view">
-        <button className={view === 'list' ? 'on' : ''} title={$t('清單')} onClick={() => setView('list')}><List size={14} /></button>
-        <button className={view === 'grid' ? 'on' : ''} title={$t('格狀')} onClick={() => setView('grid')}><LayoutGrid size={14} /></button>
-      </div>
-    </div>
-  );
-}
-
-const match = (name: string, q: string) => !q || name.toLowerCase().includes(q.trim().toLowerCase()) || displayName(name).toLowerCase().includes(q.trim().toLowerCase());
 
 // ───────────────────────── 素材 ─────────────────────────
 
@@ -109,7 +89,8 @@ export function MediaPanel() {
   const audios = useStore((s) => s.audios);
   const addClip = useStore((s) => s.addClip);
   const view = useLayout((s) => s.libView.media ?? 'grid');
-  const filter = useLayout((s) => s.mediaFilter);
+  // 分類籤收起來 = 全部
+  const filter = useLayout((s) => (s.libFilterOpen.media ? s.mediaFilter : 'all'));
   const [q, setQ] = useState('');
   const [sort, setSort] = useState<'added' | 'name' | 'type'>('added');
 
@@ -156,27 +137,26 @@ export function MediaPanel() {
 
   return (
     <div className="lib" onContextMenu={bgMenu}>
-      <LibToolbar id="media" query={q} setQuery={setQ}>
+      <LibToolbar id="media" query={q} setQuery={setQ} filter={{ active: filter !== 'all', reset: () => useLayout.getState().set({ mediaFilter: 'all' }) }}>
         <button className="lib-add" title={$t('匯入媒體 (Ctrl+O)')} onClick={async () => importFiles(await pickFiles())}><Plus size={15} /></button>
       </LibToolbar>
-      <div className="lib-filter">
-        {(['all', 'video', 'image', 'audio'] as const).map((f) => (
-          <button key={f} className={filter === f ? 'on' : ''} onClick={() => useLayout.getState().set({ mediaFilter: f })}>
-            {f === 'all' ? $t('全部') : KIND_LABEL[f]}
-            <span>{f === 'all' ? media.length : media.filter((m) => m.kind === f).length}</span>
-          </button>
-        ))}
-        <button className={filter === 'color' ? 'on' : ''} onClick={() => useLayout.getState().set({ mediaFilter: 'color' })}><Palette size={12} /> {$t('色板')}</button>
-      </div>
+      <LibFilter
+        id="media"
+        cats={[
+          ...(['all', 'video', 'image', 'audio'] as const).map((f) => ({ id: f, label: f === 'all' ? $t('全部') : KIND_LABEL[f], count: f === 'all' ? media.length : media.filter((m) => m.kind === f).length })),
+          { id: 'color', label: $t('色板'), icon: <Palette size={12} /> },
+        ]}
+        cur={filter}
+        set={(f) => useLayout.getState().set({ mediaFilter: f as typeof filter })}
+      />
       {filter === 'color' ? (
         <div className="lib-body"><ColorSwatches /></div>
       ) : (
       <div className="lib-body">
-        {missing > 0 && <div className="warn"><TriangleAlert size={13} /> {missing}{' '}{$t('個素材遺失：點它重新選檔，或把新素材拖到時間軸上的紅色片段。')}</div>}
+        {missing > 0 && <div className="warn"><TriangleAlert size={13} /> {missing}{' '}{$t('個素材遺失')}</div>}
         {media.length === 0 && (
           <div className="lib-empty">
             <button className="btn primary" onClick={async () => importFiles(await pickFiles())}><Upload size={14} /> {$t('匯入影片 / 圖片 / 音樂')}</button>
-            <p className="muted small">{$t('也可以把檔案拖進視窗任何地方')}</p>
           </div>
         )}
         {media.length > 0 && list.length === 0 && <p className="muted small center">{$t('沒有符合的素材')}</p>}
@@ -262,13 +242,21 @@ function ModuleThumb({ m }: { m: Module }) {
 }
 
 export function ModulePanel({ kind }: { kind: ModuleKind }) {
+  return <ModuleLibrary kind={kind} />;
+}
+
+/**
+ * 模組庫（轉場 / 特效 / 變速）。分頁與屬性面板的挑選視窗共用：
+ * 有 onPick = 挑選模式（點一下就選、不試看、不能拖）
+ */
+export function ModuleLibrary({ kind, onPick }: { kind: ModuleKind; onPick?: (id: string) => void }) {
   const all = useStore((s) => s.modules);
   const previewing = usePreviewFx((s) => s.fx?.moduleId);
   const view = useLayout((s) => s.libView[kind] ?? 'grid');
   const favorites = useLayout((s) => s.favorites);
-  const cat = useLayout((s) => s.modCat[kind] ?? 'all');
+  const cat = useLayout((s) => (s.libFilterOpen[kind] ? s.modCat[kind] ?? 'all' : 'all'));
   const [q, setQ] = useState('');
-  const { select, createModule } = useStore.getState();
+
   const favSet = new Set(favorites);
   const ofKind = all.filter((m) => m.kind === kind);
   const inCat = (m: Module, c: string) => c === 'all' || (c === 'fav' ? favSet.has(m.id) : categoryOf(m) === c);
@@ -316,42 +304,45 @@ export function ModulePanel({ kind }: { kind: ModuleKind }) {
     e.preventDefault();
     e.stopPropagation();
     const S = useStore.getState();
+    // 套用相關的放進「套用」子選單（變速只有一種，直接放）
+    const applyItems: MenuItem[] = (() => {
+      if (kind === 'remap') return [{ label: $t('套用到選取的片段'), action: () => apply(m.id) }];
+      if (kind === 'effect') {
+        const st = useStore.getState();
+        const ids = st.selected.filter((k) => k.startsWith('clip:')).map((k) => k.slice(5));
+        if (!ids.length && st.selection?.type === 'clip') ids.push(st.selection.id);
+        return [
+          { label: $t('在播放頭加入'), action: () => apply(m.id) },
+          { label: $t('選取片段的片段特效'), action: ids.length ? () => ids.forEach((cid) => useStore.getState().addClipFx(cid, m.id)) : undefined },
+        ];
+      }
+      const st = useStore.getState();
+      const track = st.activeTrack?.kind === 'video' ? st.activeTrack.idx : st.selection?.type === 'clip' ? st.clips.find((c) => c.id === st.selection!.id)?.track ?? 0 : st.tracks.video.length - 1;
+      const go = (scope: TrScope) => toast($t('已套用到 {0} 個位置', useStore.getState().applyTransitions(track, scope, { moduleId: m.id })));
+      const name = $t('影片 {0}', track + 1);
+      return [
+        { label: $t('選取的片段'), action: () => apply(m.id) },
+        { separator: true },
+        { label: $t('「{0}」的所有剪接點', name), action: () => go('cuts') },
+        { label: $t('「{0}」所有片段的開頭', name), action: () => go('heads') },
+        { label: $t('「{0}」所有片段的結尾', name), action: () => go('tails') },
+        { label: $t('「{0}」全部', name), action: () => go('all') },
+      ];
+    })();
     openMenu(e.clientX, e.clientY, [
       { label: favSet.has(m.id) ? $t('從我的最愛移除') : $t('加入我的最愛'), action: () => toggleFav(m.id) },
       { separator: true },
-      { label: kind === 'effect' ? $t('在播放頭加入') : $t('套用到選取的片段'), action: () => apply(m.id) },
-      ...(kind === 'effect'
-        ? [{
-            label: $t('加到選取片段的片段特效'),
-            action: (() => {
-              const st = useStore.getState();
-              const ids = st.selected.filter((k) => k.startsWith('clip:')).map((k) => k.slice(5));
-              if (!ids.length && st.selection?.type === 'clip') ids.push(st.selection.id);
-              return ids.length ? () => ids.forEach((cid) => useStore.getState().addClipFx(cid, m.id)) : undefined;
-            })(),
-          }]
-        : []),
-      ...(kind === 'transition'
-        ? (() => {
-            const st = useStore.getState();
-            const track = st.activeTrack?.kind === 'video' ? st.activeTrack.idx : st.selection?.type === 'clip' ? st.clips.find((c) => c.id === st.selection!.id)?.track ?? 0 : st.tracks.video.length - 1;
-            const go = (scope: TrScope) => toast($t('已套用到 {0} 個位置', useStore.getState().applyTransitions(track, scope, { moduleId: m.id })));
-            const name = $t('影片 {0}', track + 1);
-            return [
-              { separator: true as const },
-              { label: $t('套用到「{0}」的所有剪接點', name), action: () => go('cuts') },
-              { label: $t('套用到「{0}」所有片段的開頭', name), action: () => go('heads') },
-              { label: $t('套用到「{0}」所有片段的結尾', name), action: () => go('tails') },
-              { label: $t('套用到「{0}」全部', name), action: () => go('all') },
-            ];
-          })()
-        : []),
+      ...(applyItems.length > 1 ? [{ label: $t('套用'), submenu: applyItems }] : applyItems),
       { label: $t('在預覽中試看'), action: kind !== 'remap' ? () => togglePreview(m.id) : undefined },
-      { label: $t('編輯程式碼'), action: () => { stopPreviewFx(); select({ type: 'module', id: m.id }); } },
-      { label: $t('複製為新模組'), action: () => select({ type: 'module', id: S.forkModule(m.id) }) },
-      { separator: true },
-      { label: $t('重置為預設'), action: m.builtin ? () => S.resetModule(m.id) : undefined },
-      { label: $t('刪除模組'), danger: true, action: !m.builtin ? () => { S.select({ type: 'module', id: m.id }); S.removeSelection(); } : undefined },
+      // 內建模組不能直接改：複製成自訂模組再編輯
+      ...(m.builtin ? [] : [{ label: $t('編輯程式碼'), action: () => { stopPreviewFx(); openModuleEditor(m.id); } }]),
+      { label: $t('複製為新模組'), action: () => openModuleEditor(S.forkModule(m.id)) },
+      ...(m.builtin
+        ? []
+        : [
+            { separator: true as const },
+            { label: $t('刪除模組'), danger: true, action: () => { if (!S.removeModule(m.id)) toast($t('還有片段 / 特效在用這個模組，不能刪除'), 'error'); } },
+          ]),
     ]);
   };
 
@@ -359,57 +350,37 @@ export function ModulePanel({ kind }: { kind: ModuleKind }) {
     e.preventDefault();
     const L = useLayout.getState();
     openMenu(e.clientX, e.clientY, [
-      { label: $t('新增自訂模組'), action: () => createModule(kind) },
+      { label: $t('新增自訂模組'), action: () => newModule(kind) },
       { separator: true },
       { label: $t('清單檢視'), checked: view === 'list', action: () => L.set({ libView: { ...L.libView, [kind]: 'list' } }) },
       { label: $t('格狀檢視'), checked: view === 'grid', action: () => L.set({ libView: { ...L.libView, [kind]: 'grid' } }) },
-      { separator: true },
-      ...cats.map((c) => ({ label: c.label, checked: cat === c.id, action: () => setCat(c.id) })),
-      { separator: true },
-      { label: $t('結束預覽'), action: previewing ? stopPreviewFx : undefined },
     ]);
   };
 
   return (
-    <div className="lib" onContextMenu={bgMenu}>
-      <LibToolbar id={kind} query={q} setQuery={setQ}>
-        <button className="lib-add" title={$t('新增自訂模組')} onClick={() => createModule(kind)}><Plus size={15} /></button>
+    <div className="lib" onContextMenu={(e) => (onPick ? e.preventDefault() : bgMenu(e))}>
+      <LibToolbar id={kind} query={q} setQuery={setQ} filter={{ active: cat !== 'all', reset: () => setCat('all') }}>
+        {!onPick && <button className="lib-add" title={$t('新增自訂模組')} onClick={() => newModule(kind)}><Plus size={15} /></button>}
       </LibToolbar>
-      <div className="lib-filter">
-        {cats.map((c) => (
-          <button key={c.id} className={cat === c.id ? 'on' : ''} onClick={() => setCat(c.id)}>
-            {c.id === 'fav' && <Star size={11} fill="currentColor" />}
-            {c.label}
-            <span>{ofKind.filter((m) => inCat(m, c.id)).length}</span>
-          </button>
-        ))}
-      </div>
+      <LibFilter id={kind} cats={cats.map((c) => ({ ...c, count: ofKind.filter((m) => inCat(m, c.id)).length }))} cur={cat} set={setCat} />
       <div className="lib-body">
         {modules.length === 0 && (
-          <p className="muted small center">{cat === 'fav' ? $t('還沒有我的最愛：滑到模組上點星號加入') : cat === 'custom' ? $t('還沒有自訂模組：按右上角 ＋ 新增') : $t('沒有符合的模組')}</p>
+          <p className="muted small center">{cat === 'fav' ? $t('還沒有我的最愛') : cat === 'custom' ? $t('還沒有自訂模組') : $t('沒有符合的模組')}</p>
         )}
         <div className={view === 'grid' ? 'lib-grid mods' : 'lib-list'}>
           {modules.map((m) => (
             <div
               key={m.id}
-              className={`lib-item mod mk-${kind} ${previewing === m.id ? 'previewing' : ''}`}
-              onPointerDown={(e) => startLibraryDrag(e, { kind: 'module', id: m.id, moduleKind: kind }, displayName(m.name))}
-              onClick={() => togglePreview(m.id)}
-              onContextMenu={(e) => itemMenu(e, m)}
-              title={displayName(m.name)}
+              className={`lib-item mod mk-${kind} ${!onPick && previewing === m.id ? 'previewing' : ''}`}
+              onPointerDown={(e) => !onPick && startLibraryDrag(e, { kind: 'module', id: m.id, moduleKind: kind }, displayName(m.name))}
+              onClick={() => (onPick ? onPick(m.id) : togglePreview(m.id))}
+              onContextMenu={(e) => (onPick ? e.preventDefault() : itemMenu(e, m))}
+              title={onPick ? $t('{0}（點一下加入）', displayName(m.name)) : displayName(m.name)}
             >
               <ModuleThumb m={m} />
-              <button
-                className={`fav-btn ${favSet.has(m.id) ? 'on' : ''}`}
-                title={favSet.has(m.id) ? $t('從我的最愛移除') : $t('加入我的最愛')}
-                onPointerDown={(e) => e.stopPropagation()}
-                onClick={(e) => { e.stopPropagation(); toggleFav(m.id); }}
-                onDoubleClick={(e) => e.stopPropagation()}
-              >
-                <Star size={13} fill={favSet.has(m.id) ? 'currentColor' : 'none'} />
-              </button>
+              <FavButton on={favSet.has(m.id)} toggle={() => toggleFav(m.id)} />
               <div className="lib-meta">
-                <div className="lib-name">{previewing === m.id && <Play size={10} fill="currentColor" />} {displayName(m.name)}</div>
+                <div className="lib-name">{!onPick && previewing === m.id && <Play size={10} fill="currentColor" />} {displayName(m.name)}</div>
                 {view === 'list' && !m.builtin && <div className="lib-sub">{$t('自訂')}</div>}
               </div>
             </div>
@@ -431,7 +402,6 @@ export function InspectorPanel() {
       {sel?.type === 'transition' && <TransitionInspector key={sel.id} selId={sel.id} />}
       {sel?.type === 'effect' && <EffectInspector id={sel.id} />}
       {sel?.type === 'audio' && <AudioInspector id={sel.id} />}
-      {sel?.type === 'module' && <ModuleInspector id={sel.id} />}
     </div>
   );
 }
@@ -745,7 +715,7 @@ function effectSections(
   mod: Module | undefined,
   local: number,
   update: (p: Partial<FxLike>) => void,
-  o: { idBase: string; maskKey?: string; ch?: (id: string) => string; compact?: boolean; title?: string; actions?: React.ReactNode; badge?: React.ReactNode; dim?: boolean; onFork?: (id: string) => void },
+  o: { idBase: string; /** 從 store 拿最新的（挑選視窗開著時資料會變） */ fresh: () => FxLike | undefined; maskKey?: string; ch?: (id: string) => string; compact?: boolean; title?: string; actions?: React.ReactNode; badge?: React.ReactNode; dim?: boolean; onFork?: (id: string) => void },
 ): Section[] {
   const ch = o.ch ?? ((x: string) => x);
   const mapCh = (l: Channel[]) => l.map((c) => ({ ...c, id: ch(c.id) }));
@@ -763,51 +733,45 @@ function effectSections(
     if (!useEditorWindow.getState().open) return openEditorWindow(editKey);
     useMaskEdit.setState({ key: useMaskEdit.getState().key === editKey ? null : editKey });
   };
-  /** 快速設定：清掉該屬性的關鍵影格、直接設定固定值 */
-  const preset = (v: Partial<typeof mask>) => {
-    const keys = Object.fromEntries(Object.entries(f.keys ?? {}).filter(([k]) => !(k.startsWith('mask.') && k.slice(5) in v)));
-    update({ mask: { ...mask, ...v }, keys });
-  };
   const maskRows = [
     {
       label: $t('遮罩'),
       node: (
-        <div className="seg small-seg">
-          {(['none', 'rect', 'ellipse'] as MaskShape[]).map((sh) => (
-            <button
-              key={sh}
-              className={mask.shape === sh ? 'on' : ''}
-              onClick={() => {
-                setMask({ shape: sh });
-                if (sh !== 'none' && editKey) useMaskEdit.setState({ key: editKey });
-              }}
-            >
-              {sh === 'none' ? $t('無') : sh === 'rect' ? <><Square size={12} /> {$t('矩形')}</> : <><Circle size={12} /> {$t('橢圓')}</>}
-            </button>
-          ))}
-        </div>
+        <button
+          className="shape-pick"
+          title={$t('選擇遮罩形狀')}
+          onClick={(e) =>
+            openPicker(e.currentTarget, $t('遮罩形狀'), () => (
+              <MaskLibrary
+                current={o.fresh()?.mask?.shape ?? 'none'}
+                allowNone
+                onPick={(sh) => {
+                  setMaskShape({ ...DEFAULT_MASK, ...o.fresh()?.mask }, sh, update);
+                  if (sh !== 'none' && editKey) useMaskEdit.setState({ key: editKey });
+                }}
+              />
+            ))
+          }
+        >
+          <ShapeThumb id={mask.shape} />
+          <span className="shape-pick-name">{shapeName(mask.shape)}</span>
+          <ChevronDown size={12} />
+        </button>
       ),
     },
+    ...(mask.shape !== 'none' && editKey
+      ? [{
+          label: $t('預覽'),
+          node: (
+            <button className={`btn small-h ${editing ? 'on-accent' : ''}`} onClick={toggleEdit} title={$t('在預覽畫面上直接拖曳調整遮罩')}>
+              <SquareDashedMousePointer size={12} /> {editing ? $t('編輯中') : $t('在預覽中編輯')}
+            </button>
+          ),
+        }]
+      : []),
     ...(mask.shape !== 'none'
       ? [
           { label: $t('反轉'), node: <Switch v={mask.invert} on={(v) => setMask({ invert: v })} /> },
-          {
-            label: $t('快速設定'),
-            node: (
-              <div className="btn-row">
-                {editKey && (
-                  <button className={`btn small-h ${editing ? 'on-accent' : ''}`} onClick={toggleEdit} title={$t('在預覽畫面上直接拖曳調整遮罩')}>
-                    <SquareDashedMousePointer size={12} /> {editing ? $t('編輯中') : $t('在預覽中編輯')}
-                  </button>
-                )}
-                <button className="btn small-h" onClick={() => preset({ x: 0, y: 0 })}>{$t('置中')}</button>
-                <button className="btn small-h" onClick={() => preset({ x: 0, y: 0, w: 1, h: 1, rotation: 0 })}>{$t('全畫面')}</button>
-                <button className="btn small-h" onClick={() => preset({ x: 0, y: -0.25, w: 1, h: 0.5, rotation: 0 })}>{$t('上半')}</button>
-                <button className="btn small-h" onClick={() => preset({ x: 0, y: 0.25, w: 1, h: 0.5, rotation: 0 })}>{$t('下半')}</button>
-                <button className="btn small-h" onClick={() => preset({ ...DEFAULT_MASK, shape: mask.shape, invert: mask.invert })}>{$t('重設')}</button>
-              </div>
-            ),
-          },
         ]
       : []),
   ];
@@ -888,6 +852,7 @@ function clipFxSections(clip: Clip, modules: Module[], local: number): Section[]
     const off = f.enabled === false;
     return effectSections(f, mod, local, (p) => S.updateClipFx(clip.id, f.id, p as Partial<ClipFx>), {
       idBase: `cfx.${f.id}`,
+      fresh: () => useStore.getState().clips.find((c) => c.id === clip.id)?.effects?.find((x) => x.id === f.id),
       maskKey: cfxMaskKey(f.id),
       ch: (c) => cfxCh(f.id, c),
       compact: true,
@@ -907,48 +872,30 @@ function clipFxSections(clip: Clip, modules: Module[], local: number): Section[]
   });
 }
 
-/** 「加入片段特效」下拉 */
-/** 片段遮罩 = 一個特殊的片段特效（沿用遮罩的關鍵影格、預覽拖曳編輯、分割 / 合併處理） */
-function addClipMask(clipId: string, shape: MaskShape) {
-  const S = useStore.getState();
-  S.addClipFx(clipId, CLIP_MASK_ID);
-  const f = useStore.getState().clips.find((c) => c.id === clipId)?.effects?.at(-1);
-  if (!f) return;
-  S.updateClipFx(clipId, f.id, { mask: { ...DEFAULT_MASK, shape, w: 0.8, h: 0.6 } });
-  openEditorWindow(cfxMaskKey(f.id)); // 加了片段遮罩就直接開編輯視窗調整
-}
-
+/** 「加入片段特效」/「加入片段遮罩」：打開挑選視窗（跟特效 / 遮罩分頁同一套素材庫） */
 function AddClipFx({ clipId }: { clipId: string }) {
-  const modules = useStore((s) => s.modules).filter((m) => m.kind === 'effect');
   return (
-    <>
     <div className="ec-row add-cfx-row">
       <div className="ec-left ec-plain">
-        <Sparkles size={13} />
-        <select
-          className="select wide"
-          value=""
-          onChange={(e) => {
-            if (e.target.value) useStore.getState().addClipFx(clipId, e.target.value);
-          }}
-        >
-          <option value="">{$t('＋ 加入片段特效…')}</option>
-          {modules.map((m) => <option key={m.id} value={m.id}>{displayName(m.name)}</option>)}
-        </select>
-      </div>
-      <div className="ec-right ec-dim" />
-    </div>
-    {/* 片段遮罩放在自己的一列：跟下拉選單擠在一起時選單會被壓到看不到字 */}
-    <div className="ec-row add-cfx-row">
-      <div className="ec-left ec-plain">
-        <div className="btn-row cfx-mask-row">
-          <button className="btn small-h" title={$t('加入片段遮罩：只保留遮罩範圍內的畫面')} onClick={() => addClipMask(clipId, 'rect')}><Square size={12} /> {$t('矩形遮罩')}</button>
-          <button className="btn small-h" title={$t('加入橢圓片段遮罩')} onClick={() => addClipMask(clipId, 'ellipse')}><Circle size={12} /> {$t('橢圓遮罩')}</button>
+        <div className="btn-row cfx-add-row">
+          <button
+            className="btn small-h"
+            title={$t('從特效庫挑一個特效，套用在這個片段上')}
+            onClick={(e) => openPicker(e.currentTarget, $t('加入片段特效'), (close) => <ModuleLibrary kind="effect" onPick={(id) => { useStore.getState().addClipFx(clipId, id); close(); }} />)}
+          >
+            <Sparkles size={12} /> {$t('加入片段特效…')}
+          </button>
+          <button
+            className="btn small-h"
+            title={$t('加入片段遮罩：只保留遮罩範圍內的畫面')}
+            onClick={(e) => openPicker(e.currentTarget, $t('加入片段遮罩'), (close) => <MaskLibrary onPick={(sh) => { close(); addClipMask(clipId, sh); }} />)}
+          >
+            <SquareDashed size={12} /> {$t('加入片段遮罩…')}
+          </button>
         </div>
       </div>
       <div className="ec-right ec-dim" />
     </div>
-    </>
   );
 }
 
@@ -960,7 +907,7 @@ function EffectInspector({ id }: { id: string }) {
   const { updateEffect } = useStore.getState();
   const host = fxHost(fx.id)!;
   const local = Math.min(fx.duration, Math.max(0, time - fx.start));
-  const sections = effectSections(fx, mod, local, (p) => updateEffect(id, p as Partial<FxItem>), { idBase: 'fx' });
+  const sections = effectSections(fx, mod, local, (p) => updateEffect(id, p as Partial<FxItem>), { idBase: 'fx', fresh: () => useStore.getState().effects.find((e) => e.id === id) });
   return (
     <EffectControls
       host={host}
@@ -1015,11 +962,9 @@ function TransitionInspector({ selId }: { selId: string }) {
     useStore.setState({ clips: clipsNew });
     toast($t('已更新 {0} 個轉場', n));
   };
-  const modeHint = w?.mode === 'head' ? $t('前面沒有緊貼的片段：從透明轉入（最底層軌道看起來就是從黑畫面轉入）') : w?.mode === 'tail' ? $t('片段結尾：轉到透明') : null;
   return (
     <>
-      {!w && <div className="warn" style={{ margin: 8 }}>{$t('後面有緊貼的片段，轉出不會生效（請改用下一個片段的進場轉場）。')}</div>}
-      {modeHint && <div className="info-note">{modeHint}</div>}
+      {!w && <div className="warn" style={{ margin: 8 }}>{$t('轉出不會生效')}</div>}
       <PlainControls
         title={<><Title kind="k-tr" label={side === 'out' ? $t('轉出') : $t('轉場')} name={mod ? displayName(mod.name) : ''} /><button className="link danger" onClick={() => setTransition(clipId, null, side)}>{$t('移除')}</button></>}
         rows={[
@@ -1060,24 +1005,6 @@ function AudioInspector({ id }: { id: string }) {
         { label: $t('保持音調'), node: <PitchSwitch v={a.keepPitch !== false} on={(v) => updateAudio(id, { keepPitch: v })} /> },
       ]}
     />
-  );
-}
-
-function ModuleInspector({ id }: { id: string }) {
-  const mod = useStore((s) => s.modules.find((m) => m.id === id));
-  if (!mod) return null;
-  const { renameModule } = useStore.getState();
-  const label = mod.kind === 'transition' ? $t('轉場模組') : mod.kind === 'effect' ? $t('特效模組') : $t('變速模組');
-  return (
-    <div className="ec plain">
-      <div className="ec-row ec-header">
-        <div className="ec-left">
-          <span className={`kind ${mod.kind === 'transition' ? 'k-tr' : mod.kind === 'effect' ? 'k-fx' : 'k-clip'}`}>{label}</span>
-          {mod.builtin ? <span className="ec-name">{displayName(mod.name)}</span> : <input className="name-input" value={mod.name} onChange={(e) => renameModule(id, e.target.value)} />}
-        </div>
-      </div>
-      <div className="ec-footer"><ModuleCode module={mod} forceOpen /></div>
-    </div>
   );
 }
 

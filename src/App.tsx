@@ -4,6 +4,10 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { FORMATS, formatLabel, projectDuration, useStore } from './store';
 import { InspectorPanel, MediaPanel, ModulePanel, TextPanel } from './ui/LeftPanel';
+import { isTextField } from './ui/focus';
+import { MaskPanel } from './ui/MaskPanel';
+import { CodePanel } from './ui/CodePanel';
+import { PickerHost } from './ui/Library';
 import { Timeline, mergeOrHint } from './ui/Timeline';
 import { SourcePanel, sourceHotkey } from './ui/SourcePanel';
 import { FloatingWindow, PreviewPanel, Slot } from './ui/PreviewPanel';
@@ -29,12 +33,16 @@ const openDialog = (d: Dialog) => setDialogGlobal(d);
 
 function ExportDialog({ close }: { close: () => void }) {
   const [fps, setFps] = useState(60);
-  const dur = useStore((s) => projectDuration(s));
+  const full = useStore((s) => projectDuration(s));
+  const loop = useStore((s) => s.loop);
+  const [onlyLoop, setOnlyLoop] = useState(!!loop);
+  const range = onlyLoop && loop ? { a: loop.a, b: Math.min(loop.b, full) } : undefined;
+  const dur = range ? Math.max(0, range.b - range.a) : full;
   const fmt = useStore((s) => s.format);
   const go = async () => {
     close();
     try {
-      downloadBlob(await exportMp4(fps), `edit_${Date.now()}.mp4`);
+      downloadBlob(await exportMp4(fps, range), `edit_${Date.now()}.mp4`);
       toast($t('匯出完成'));
     } catch (e) {
       toast($t('匯出失敗：{0}', e instanceof Error ? e.message : e), 'error');
@@ -50,6 +58,15 @@ function ExportDialog({ close }: { close: () => void }) {
           {[30, 60].map((f) => <button key={f} className={fps === f ? 'on' : ''} onClick={() => setFps(f)}>{f} fps</button>)}
         </div>
       </div>
+      {loop && (
+        <div className="form-row">
+          <span>{$t('範圍')}</span>
+          <div className="seg">
+            <button className={!onlyLoop ? 'on' : ''} onClick={() => setOnlyLoop(false)}>{$t('整個專案')}</button>
+            <button className={onlyLoop ? 'on' : ''} onClick={() => setOnlyLoop(true)}>{$t('循環範圍')}</button>
+          </div>
+        </div>
+      )}
       <div className="form-row"><span>{$t('長度')}</span><b>{dur.toFixed(2)}{' '}{$t('秒')}</b></div>
       <div className="form-row"><span>{$t('格式')}</span><b>{$t('MP4（H.264 + AAC）')}</b></div>
       <div className="dialog-actions">
@@ -106,6 +123,7 @@ const TUTORIAL: { title: string; items: string[] }[] = [
     title: $t('素材、色板與文字'),
     items: [
       $t('單擊素材在「素材預覽」打開，可以設定入點 / 出點後按「插入片段」。'),
+      $t('素材遺失時（紅色）：點素材重新選檔，或把新素材拖到時間軸上的紅色片段。'),
       $t('色板是純色背景素材：拖到影片軌，或選好顏色後按「加到結尾」。'),
       $t('文字樣式拖到影片軌，或按文字分頁右上角的 ＋ 加在播放頭；選取後在「屬性」修改內容與樣式。'),
     ],
@@ -115,8 +133,11 @@ const TUTORIAL: { title: string; items: string[] }[] = [
     items: [
       $t('在素材庫單擊模組可以試看（顯示在「素材預覽」），拖曳到時間軸套用，右鍵有更多套用方式。'),
       $t('特效拖到特效軌 = 調整圖層（作用在它下面的影片軌）；拖到影片 / 文字片段上 = 只作用在那個片段的片段特效。'),
-      $t('也可以直接拖到「屬性」面板，套用到目前選取的片段；或用屬性面板最下面的「＋ 加入片段特效」選單。'),
+      $t('也可以直接拖到「屬性」面板，套用到目前選取的片段；或按屬性面板最下面的「加入片段特效…」從特效庫挑。'),
       $t('轉場拖到兩個片段的剪接點、片段開頭或片段結尾；變速模組拖到影片片段上。'),
+      $t('片段前面沒有緊貼的片段時，進場轉場是從透明轉入（在最底層軌道看起來就是從黑畫面轉入）；結尾的轉出是轉到透明。後面緊貼著片段時轉出不會生效，請改用下一個片段的進場轉場。'),
+      $t('自訂模組在「程式碼」分頁編輯：改完按「儲存」（Ctrl+S）才會套用，⋯ 選單可以捨棄變更。內建模組不能直接改，請先「複製為新模組」。'),
+      $t('新增的模組第一次儲存後才會出現在素材庫。程式碼分頁可以同時開好幾個模組（中鍵關閉），關閉還沒儲存的分頁會先詢問。'),
     ],
   },
   {
@@ -140,9 +161,11 @@ const TUTORIAL: { title: string; items: string[] }[] = [
   {
     title: $t('遮罩'),
     items: [
-      $t('每個特效都有遮罩，限制它只作用在某個區域；片段本身也可以加「矩形遮罩 / 橢圓遮罩」，只保留遮罩內的畫面。'),
+      $t('每個特效都有遮罩，限制它只作用在某個區域；片段本身也可以加片段遮罩，只保留遮罩內的畫面。'),
       $t('特效軌的遮罩直接在預覽上拖；片段特效的遮罩按「在預覽中編輯」會打開編輯視窗。'),
-      $t('在預覽畫面上拖曳遮罩框：框內移動、把手縮放（Shift 等比）、上方圓點旋轉、右側菱形羽化。'),
+      $t('在預覽畫面上拖曳遮罩框：框內移動、把手縮放（角 = 等比，Ctrl 自由縮放；Shift 吸附到網格線）、上方圓點旋轉、右側菱形羽化。'),
+      $t('「遮罩」分頁是形狀庫：點一下套用到選取的片段（加片段遮罩）或特效（換形狀），也可以拖到時間軸的片段 / 特效上。滑到形狀上點星號加入我的最愛。'),
+      $t('右上角 ＋ 可以匯入自訂形狀（PNG / SVG）：透明背景的圖用透明度，沒有透明背景就用亮度（白色 = 保留）。'),
     ],
   },
   {
@@ -272,7 +295,7 @@ function SettingsDialog({ close }: { close: () => void }) {
       </div>
       <div className="set-sec">{$t('時間軸')}</div>
       <div className="form-row col">
-        <span>{$t('上層軌道（畫面中蓋在上面的）顯示在')}</span>
+        <span>{$t('上層軌道顯示在')}</span>
         <div className="seg">
           <button className={L.upperLayerAt === 'bottom' ? 'on' : ''} onClick={() => L.set({ upperLayerAt: 'bottom' })}>{$t('下方')}</button>
           <button className={L.upperLayerAt === 'top' ? 'on' : ''} onClick={() => L.set({ upperLayerAt: 'top' })}>{$t('上方')}</button>
@@ -339,7 +362,6 @@ function ExportOverlay() {
       <div className="dialog">
         <h3>{$t('匯出中…')}{' '}{(ex.progress * 100).toFixed(0)}%</h3>
         <div className="bar"><div style={{ width: `${ex.progress * 100}%` }} /></div>
-        <p className="muted small">{$t('逐幀渲染 + 混音，不會掉幀。影片素材需要精準 seek，所以會比即時慢一些。')}</p>
         <div className="dialog-actions">
           <button className="btn" onClick={() => useStore.setState({ exporting: { ...ex, cancel: true } })}>{$t('取消')}</button>
         </div>
@@ -473,7 +495,7 @@ const revealPlayhead = () => requestAnimationFrame(() => window.dispatchEvent(ne
 
 function onKey(e: KeyboardEvent) {
   const el = e.target as HTMLElement;
-  if (el instanceof Element && el.closest('input, textarea, select, .cm-editor, [contenteditable]')) return;
+  if (isTextField(el)) return; // 只有打字欄位攔住快捷鍵（滑桿、下拉選單等由 focus.ts 處理）
   const s = useStore.getState();
   const mod = e.ctrlKey || e.metaKey;
   // 對話框開著（例如使用教學）時，Ctrl+C / A 交給瀏覽器（複製 / 全選文字），不要動到時間軸
@@ -614,13 +636,16 @@ export default function App() {
       {createPortal(<SourcePanel />, hosts.source)}
       {createPortal(<ModulePanel kind="transition" />, hosts.transition)}
       {createPortal(<ModulePanel kind="effect" />, hosts.effect)}
+      {createPortal(<MaskPanel />, hosts.mask)}
       {createPortal(<ModulePanel kind="remap" />, hosts.remap)}
       {createPortal(<InspectorPanel />, hosts.inspector)}
+      {createPortal(<CodePanel />, hosts.code)}
       {createPortal(<PreviewPanel />, hosts.preview)}
       {createPortal(<Timeline />, hosts.timeline)}
 
       <ExportOverlay />
       <Dialogs />
+      <PickerHost />
       <MenuHost />
       <ConfirmHost />
       <DragGhost />

@@ -1,9 +1,10 @@
-/** 特效遮罩：限制特效只作用在畫面的某個區域（矩形 / 橢圓，可羽化、反轉、打關鍵影格） */
+/** 特效遮罩：限制特效只作用在畫面的某個區域（矩形 / 橢圓 / 形狀庫裡的任何形狀，可羽化、反轉、打關鍵影格） */
 
 import { $t } from '../i18n';
 import { evalKeys, type Keyframe } from './keyframes';
 
-export type MaskShape = 'none' | 'rect' | 'ellipse';
+/** 'none' / 'rect' / 'ellipse'，或形狀庫的 id（見 maskShapes.ts，例如 'star'、'custom:…'） */
+export type MaskShape = string;
 
 export interface Mask {
   shape: MaskShape;

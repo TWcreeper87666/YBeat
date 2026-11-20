@@ -267,7 +267,9 @@ interface State {
   renameModule(id: string, name: string): void;
   forkModule(id: string): string;
   resetModule(id: string): void;
-  createModule(kind: ModuleKind): string;
+  createModule(kind: ModuleKind, init?: { name?: string; code?: string }): string;
+  /** 刪除自訂模組；內建或還有東西在用 → 不刪、回傳 false */
+  removeModule(id: string): boolean;
   setError(id: string, msg: string | null): void;
   setTime(t: number): void;
   setPlaying(p: boolean): void;
@@ -783,11 +785,8 @@ export const useStore = create<State>()(
             return s.setTransition(clipId, null, side);
           }
           if (sel?.type === 'module') {
-            const m = s.modules.find((x) => x.id === sel.id);
-            const used =
-              s.clips.some((c) => c.remap.moduleId === sel.id || c.transitionIn?.moduleId === sel.id || c.transitionOut?.moduleId === sel.id || !!c.effects?.some((f) => f.moduleId === sel.id)) || s.effects.some((e) => e.moduleId === sel.id);
-            if (!m || m.builtin || used) return;
-            return set({ modules: s.modules.filter((x) => x.id !== sel.id), selection: null });
+            if (s.removeModule(sel.id)) set({ selection: null });
+            return;
           }
           const dels = targets()
             .map(({ type, id }) => ({ type, it: findItem(type, id) }))
@@ -1304,11 +1303,21 @@ export const useStore = create<State>()(
           if (b) set((s) => ({ modules: s.modules.map((m) => (m.id === id ? { ...b } : m)) }));
         },
 
-        createModule: (kind) => {
+        createModule: (kind, init) => {
           const names = { effect: $t('新特效'), transition: $t('新轉場'), remap: $t('新變速') };
-          const m: Module = { id: `${kind}-${uid()}`, kind, name: names[kind], code: NEW_MODULE_TEMPLATES[kind] };
-          set((s) => ({ modules: [...s.modules, m], selection: { type: 'module', id: m.id }, selected: [], leftTab: 'editor' }));
+          const m: Module = { id: `${kind}-${uid()}`, kind, name: init?.name || names[kind], code: init?.code ?? NEW_MODULE_TEMPLATES[kind] };
+          set((s) => ({ modules: [...s.modules, m] }));
           return m.id;
+        },
+
+        removeModule: (id) => {
+          const s = get();
+          const m = s.modules.find((x) => x.id === id);
+          const used =
+            s.clips.some((c) => c.remap.moduleId === id || c.transitionIn?.moduleId === id || c.transitionOut?.moduleId === id || !!c.effects?.some((f) => f.moduleId === id)) || s.effects.some((e) => e.moduleId === id);
+          if (!m || m.builtin || used) return false;
+          set({ modules: s.modules.filter((x) => x.id !== id) });
+          return true;
         },
 
         setError: (id, msg) => {

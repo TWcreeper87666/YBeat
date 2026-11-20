@@ -45,7 +45,7 @@ export function SourcePanel() {
   if (!media || !mediaUsable(media)) {
     return (
       <div className="source-panel empty">
-        <p className="muted">{$t('在素材上按右鍵 →「預覽素材」，或按一下素材，就會在這裡顯示')}</p>
+        <p className="muted">{$t('沒有預覽中的素材')}</p>
       </div>
     );
   }
@@ -394,7 +394,7 @@ function ModulePreview({ moduleId, t0 }: { moduleId: string; t0: number }) {
         <span className={`kind ${mod.kind === 'transition' ? 'k-tr' : 'k-fx'}`}>{mod.kind === 'transition' ? $t('轉場') : $t('特效')}</span>
         <span className="source-name">{displayName(mod.name)}</span>
         <span className="spacer" />
-        <span className="muted small">{$t('循環試看中（套用在目前的畫面上）')}</span>
+        <span className="muted small">{$t('循環試看中')}</span>
         <button className="tp" title={$t('結束預覽 (Esc)')} onClick={stopPreviewFx}><X size={14} /></button>
       </div>
     </div>

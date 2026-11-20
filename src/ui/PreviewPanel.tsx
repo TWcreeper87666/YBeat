@@ -149,8 +149,8 @@ function GridPopover({ at, close }: { at: { x: number; y: number }; close: () =>
   return (
     <div ref={ref} className="popover" style={{ left: pos.x, top: pos.y }} onContextMenu={(e) => e.preventDefault()}>
       <div className="pop-title">{$t('輔助網格')}</div>
-      <div className="pop-row"><span>{$t('列（橫線）')}</span><DragNumber value={L.gridRows} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridRows: Math.round(v), grid: true })} /></div>
-      <div className="pop-row"><span>{$t('欄（直線）')}</span><DragNumber value={L.gridCols} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridCols: Math.round(v), grid: true })} /></div>
+      <div className="pop-row"><span>{$t('列')}</span><DragNumber value={L.gridRows} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridRows: Math.round(v), grid: true })} /></div>
+      <div className="pop-row"><span>{$t('欄')}</span><DragNumber value={L.gridCols} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridCols: Math.round(v), grid: true })} /></div>
       <div className="chips">
         {presets.map(([r, c]) => (
           <button key={`${r}x${c}`} className={L.gridRows === r && L.gridCols === c ? 'on' : ''} onClick={() => L.set({ gridRows: r, gridCols: c, grid: true })}>{c}×{r}</button>

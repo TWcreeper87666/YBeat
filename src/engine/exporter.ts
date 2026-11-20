@@ -1,3 +1,4 @@
+import { ensureShapes } from './maskShapes';
 import { $t } from '../i18n';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { projectDuration, useStore } from '../store';
@@ -34,16 +35,21 @@ async function pickAudioConfig() {
 }
 
 /** 逐幀離線渲染 → WebCodecs 硬體編碼 → MP4（含混音，不會掉幀） */
-export async function exportMp4(fps: number): Promise<Blob> {
+/** range：只輸出這段（例如循環範圍）；沒給 = 整個專案 */
+export async function exportMp4(fps: number, range?: { a: number; b: number }): Promise<Blob> {
   const r = getRenderer();
   if (!r) throw new Error($t('渲染器尚未就緒'));
   if (typeof VideoEncoder === 'undefined') throw new Error($t('此瀏覽器不支援 WebCodecs，請使用 Chrome / Edge'));
 
   const st0 = useStore.getState();
-  const dur = projectDuration(st0);
+  const start = range ? Math.max(0, range.a) : 0;
+  const dur = range ? Math.min(projectDuration(st0), range.b) - start : projectDuration(st0);
   if (dur <= 0) throw new Error($t('時間軸是空的'));
   const total = Math.ceil(dur * fps);
   const ctx = makeCtx(st0);
+  // 自訂遮罩形狀要先解碼好（預覽時是背景載入）
+  const fxs = [...st0.effects, ...st0.clips.flatMap((c) => c.effects ?? [])];
+  await ensureShapes(fxs.map((f) => f.mask?.shape ?? 'none'));
 
   const { w: FW, h: FH } = st0.format;
   const vConfig = await pickVideoConfig(FW, FH, fps);
@@ -58,7 +64,7 @@ export async function exportMp4(fps: number): Promise<Blob> {
   let encodeError: unknown = null;
   let encoder: VideoEncoder | null = null;
   try {
-    const mixed = await mixdown(st0, ctx.modules, dur);
+    const mixed = await mixdown(st0, ctx.modules, dur, start);
     const aPick = mixed ? await pickAudioConfig() : null;
 
     const target = new ArrayBufferTarget();
@@ -94,7 +100,7 @@ export async function exportMp4(fps: number): Promise<Blob> {
     for (let i = 0; i < total; i++) {
       if (useStore.getState().exporting?.cancel) throw new Error($t('已取消'));
       if (encodeError) throw encodeError;
-      const t = i / fps;
+      const t = start + i / fps;
       await r.prepareExact(ctx, t);
       r.render(ctx, t, 'export');
       const frame = new VideoFrame(r.canvas, { timestamp: Math.round((i * 1e6) / fps), duration: Math.round(1e6 / fps) });

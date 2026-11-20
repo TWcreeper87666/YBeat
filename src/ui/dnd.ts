@@ -5,6 +5,7 @@ import { parseDuration } from '../engine/params';
 import { addMediaBlob, colorMedia } from '../engine/media';
 import { fitStart } from '../engine/overlap';
 import { TEXT_PRESETS } from '../engine/text';
+import { addClipMask, setEffectMask } from './MaskPanel';
 import { confirmDialog, toast, useDrag, useSnapLine, type DragPayload, type DragState, type DropTarget } from './uiStore';
 
 const SNAP_PX = 10;
@@ -54,6 +55,19 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
   // 拖到「屬性」面板：套用到目前選取的項目（特效 → 片段特效 / 取代特效軌上的特效；轉場 → 進場；變速 → 時間重映射）
   const insp = els.find((e) => e.classList?.contains('panel-inspector'));
   document.querySelector('.panel-inspector')?.classList.toggle('drop-here', false);
+  // 遮罩形狀：片段 → 加片段遮罩；特效 → 換遮罩形狀（拖到屬性面板 = 套用到選取的項目）
+  if (payload.kind === 'mask') {
+    if (insp) {
+      const sel = s.selection;
+      const t: DropTarget = sel?.type === 'clip' && s.clips.some((c) => c.id === sel.id) ? { kind: 'clip', clipId: sel.id, action: 'mask', valid: true } : sel?.type === 'effect' ? { kind: 'effect', fxId: sel.id } : null;
+      insp.classList.toggle('drop-here', !!t);
+      return t;
+    }
+    const fxEl = els.find((e) => e.dataset.key?.startsWith('effect:'));
+    if (fxEl) return { kind: 'effect', fxId: fxEl.dataset.key!.slice(7) };
+    if (clip) return { kind: 'clip', clipId: clip.id, action: 'mask', valid: true };
+    return null;
+  }
   if (insp && payload.kind === 'module') {
     const sel = s.selection;
     let t: DropTarget = null;
@@ -134,6 +148,13 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
   const s = useStore.getState();
   if (!target) {
     if (files) await importMany(files);
+    return;
+  }
+  if (payload.kind === 'mask') {
+    if (target.kind === 'effect') {
+      setEffectMask(target.fxId, payload.shape);
+      toast($t('已設定特效的遮罩形狀'));
+    } else if (target.kind === 'clip') addClipMask(target.clipId, payload.shape);
     return;
   }
   if (target.kind === 'effect') {
