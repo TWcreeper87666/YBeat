@@ -47,6 +47,13 @@ export function LibToolbar({ id, query, setQuery, children, filter }: { id: stri
   );
 }
 
+/** 只在素材庫空白處（不是項目 / 按鈕 / 輸入框上）觸發：單擊取消選取、雙擊新增 */
+export const onBlank = (fn?: () => void) => (e: React.MouseEvent) => {
+  if (!fn || (e.target as Element).closest('.lib-item, button, input, select, textarea, a')) return;
+  e.preventDefault();
+  fn();
+};
+
 export const match = (name: string, q: string) => !q || name.toLowerCase().includes(q.trim().toLowerCase()) || displayName(name).toLowerCase().includes(q.trim().toLowerCase());
 
 // ───────────── 分類籤（全部 / 我的最愛 / …） ─────────────

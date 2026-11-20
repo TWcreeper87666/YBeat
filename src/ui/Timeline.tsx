@@ -18,6 +18,7 @@ import { relinkWithPicker } from '../engine/media';
 import { confirmDialog, openMenu, promptDialog, stopPreviewFx, toast, useDrag, useLayout, useReveal, useSnapLine, type MenuItem } from './uiStore';
 import { itemName } from './names';
 import { useDock } from './Dock';
+import { closeSource } from './SourcePanel';
 import { beatSnapPoints, fitToBeats, getBeats, splitAtBeats, useBeats } from './beatGrid';
 
 const SNAP_PX = 8;
@@ -831,7 +832,20 @@ export function Timeline() {
     if (!sel) return;
     const el = innerRef.current?.querySelector<HTMLElement>(`[data-key="${sel.type}:${sel.id}"]`);
     if (!el) return;
-    el.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
+    // 時間軸自己管水平捲動（overflow-x: hidden），scrollIntoView 不可靠：自己算
+    const box = scrollRef.current;
+    const it = sel.type === 'clip' || sel.type === 'effect' || sel.type === 'audio' ? (useStore.getState()[LIST[sel.type]] as AnyItem[]).find((x) => x.id === sel.id) : undefined;
+    if (box && it) {
+      const pps = useStore.getState().pps;
+      const viewW = box.clientWidth - LABEL_W;
+      const a = it.start * pps, b = (it.start + it.duration) * pps;
+      if (a < box.scrollLeft || a > box.scrollLeft + viewW - 40) box.scrollLeft = Math.max(0, a - Math.min(80, viewW / 4));
+      else if (b > box.scrollLeft + viewW && b - a < viewW) box.scrollLeft = b - viewW + 20;
+      const r = el.getBoundingClientRect(), v = box.getBoundingClientRect();
+      if (r.top < v.top + 26) box.scrollTop -= v.top + 26 - r.top; // 尺規那一列（sticky）不要擋到
+      else if (r.bottom > v.bottom) box.scrollTop += r.bottom - v.bottom;
+    }
+    if (!useReveal.getState().flash) return;
     el.classList.remove('flash');
     void el.offsetWidth;
     el.classList.add('flash');
@@ -1154,9 +1168,9 @@ export function Timeline() {
         // 跟時間軸互動 → 其他輸入框（例如素材庫的搜尋）失去焦點，Ctrl+Z 等快捷鍵才會作用在時間軸
         const ae = document.activeElement as HTMLElement | null;
         if (ae && ae !== document.body && !(e.currentTarget as HTMLElement).contains(ae)) ae.blur();
-        // 跟時間軸互動 → 從「素材預覽」切回「預覽」
+        // 跟時間軸互動 → 預覽面板回到時間軸畫面
         stopPreviewFx();
-        useDock.getState().activatePanel('preview', true);
+        closeSource();
       }}
     >
       <TimelineToolbar />
@@ -1294,8 +1308,8 @@ function TimelineToolbar() {
       <button className="tbtn" disabled={!canUndo} onClick={undo} title={$t('復原 (Ctrl+Z)')}><Undo2 size={15} /></button>
       <button className="tbtn" disabled={!canRedo} onClick={redo} title={$t('重做 (Ctrl+Shift+Z)')}><Redo2 size={15} /></button>
       <span className="sep" />
-      <button className="tbtn" onClick={S.split} title={$t('在播放頭分割 (S)')}><Scissors size={14} /> {$t('分割')}</button>
-      <button className={`tbtn ${snap ? 'on' : ''}`} onClick={() => S.setSnap(!snap)} title={$t('磁吸對齊 (N)')}><Magnet size={14} /> {$t('磁吸')}</button>
+      <button className="tbtn" onClick={S.split} title={$t('在播放頭分割 (S)')}><Scissors size={14} /> <span className="tb-lbl">{$t('分割')}</span></button>
+      <button className={`tbtn ${snap ? 'on' : ''}`} onClick={() => S.setSnap(!snap)} title={$t('磁吸對齊 (N)')}><Magnet size={14} /> <span className="tb-lbl">{$t('磁吸')}</span></button>
       <button
         className={`tbtn ${beatsOn ? 'on' : ''}`}
         title={$t('節拍格線與節拍指令')}
@@ -1308,11 +1322,11 @@ function TimelineToolbar() {
           ]);
         }}
       >
-        <Drum size={14} /> {$t('節拍')} <ChevronDown size={11} />
+        <Drum size={14} /> <span className="tb-lbl">{$t('節拍')}</span> <ChevronDown size={11} />
       </button>
       <span className="spacer" />
       <input className="zoom" type="range" min={0} max={1000} value={toSlider(pps)} onChange={(e) => S.setPps(fromSlider(+e.target.value))} title={$t('時間軸縮放（Ctrl+滾輪）')} />
-      <button className="tbtn" onClick={() => window.dispatchEvent(new Event('timeline-fit'))} title={$t('整個專案符合視窗 (\\)')}><ArrowLeftRight size={14} /> {$t('符合')}</button>
+      <button className="tbtn" onClick={() => window.dispatchEvent(new Event('timeline-fit'))} title={$t('整個專案符合視窗 (\\)')}><ArrowLeftRight size={14} /> <span className="tb-lbl">{$t('符合')}</span></button>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import { $t, displayName } from '../i18n';
-import { AlignCenter, AlignLeft, AlignRight, Bold, CircleCheck, Italic, Music, Palette, Pipette, Play, Plus, TriangleAlert, Upload, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2 } from 'lucide-react';
+import { AlignCenter, AlignLeft, AlignRight, Bold, CircleCheck, Italic, Music, Palette, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2 } from 'lucide-react';
 import React, { useMemo, useState } from 'react';
 import { attachedAudioIds, type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
 import type { Module } from '../modules/builtin';
@@ -16,6 +16,7 @@ import { parseDuration, parseParams, type ParamDef, type ParamValue, type ParamV
 import { computeFrame, transitionWindow, sortClips, makeCtx } from '../engine/renderer';
 import { DEFAULT_TRANSFORM, FITS, type Fit } from '../engine/transform';
 import { plainSpeed } from '../engine/remap';
+import { CURVE_ID, curveCode, defaultCurveKeys, keysToCurve } from '../engine/remapCurve';
 
 /** 混合模式選單（函式：語言在載入時決定） */
 const BLENDS = (): Record<BlendMode, string> => ({
@@ -31,15 +32,15 @@ import { startLibraryDrag } from './dnd';
 import { itemName } from './names';
 import { ensureMatte, matteCoverage, matteFrames, useMatte } from '../engine/matte';
 import { cfxMaskKey, useMaskEdit } from './MaskEditor';
-import { openSource } from './SourcePanel';
-import { openMenu, revealSelection, stopPreviewFx, toast, useLayout, usePreviewFx, type MenuItem } from './uiStore';
+import { closeSource, openSource, useSource } from './SourcePanel';
+import { openMenu, promptDialog, revealSelection, stopPreviewFx, toast, useLayout, usePreviewFx, type MenuItem } from './uiStore';
 import { DragNumber } from './DragNumber';
 import { ModuleCode } from './ModuleCode';
 import { newModule, openModuleEditor } from './CodePanel';
-import { FavButton, LibFilter, LibToolbar, match, openPicker } from './Library';
+import { FavButton, LibFilter, LibToolbar, match, onBlank, openPicker } from './Library';
 import { MaskLibrary, ShapeThumb, addClipMask, ensureClipBaseMask, setMaskShape } from './MaskPanel';
 import { openShapeDrawer } from './ShapeDrawer';
-import { EffectControls, cfxCh, clipChannels, clipHost, fxChannels, fxHost, maskChannels, type Channel, type Section } from './EffectControls';
+import { EffectControls, curveChannel, focusSection, cfxCh, clipChannels, clipHost, fxChannels, fxHost, maskChannels, type Channel, type Section } from './EffectControls';
 
 // ───────────────────────── 素材 ─────────────────────────
 
@@ -103,7 +104,7 @@ function SvPad({ hsv, onChange }: { hsv: Hsv; onChange: (h: Hsv) => void }) {
   );
 }
 
-/** 色板：拖到影片軌、或雙擊加到結尾 */
+/** 色板：拖到影片軌、或雙擊插入到播放頭 */
 function ColorSwatches() {
   const [hsv, setHsv] = useState<Hsv>(() => hexToHsv('#ff3d6e')!);
   const [draft, setDraft] = useState<string | null>(null);
@@ -122,7 +123,7 @@ function ColorSwatches() {
     remember(c);
     const m = await colorMedia(c);
     if (m) {
-      useStore.getState().addClip(m.id);
+      useStore.getState().insertMedia(m.id);
       revealSelection();
     }
   };
@@ -177,7 +178,7 @@ function ColorSwatches() {
             <input type="color" value={custom} onChange={(e) => pick(e.target.value)} />
           </label>
           <span className="spacer" />
-          <button className="btn primary small cpk-add" onClick={() => add(custom)}><Plus size={13} />{$t('加到結尾')}</button>
+          <button className="btn primary small cpk-add" onClick={() => add(custom)}><Plus size={13} />{$t('插入到播放頭')}</button>
         </div>
         {recent.length > 0 && <div className="cpk-recent">{recent.map((c) => swatch(c, 'mini'))}</div>}
       </div>
@@ -189,7 +190,6 @@ export function MediaPanel() {
   const media = useStore((s) => s.media);
   const clips = useStore((s) => s.clips);
   const audios = useStore((s) => s.audios);
-  const addClip = useStore((s) => s.addClip);
   const view = useLayout((s) => s.libView.media ?? 'grid');
   // 分類籤收起來 = 全部
   const filter = useLayout((s) => (s.libFilterOpen.media ? s.mediaFilter : 'all'));
@@ -204,6 +204,7 @@ export function MediaPanel() {
     return l;
   }, [media, filter, q, sort]);
   const missing = media.filter((m) => m.missing).length;
+  const previewing = useSource((s) => (s.open ? s.mediaId : null));
   /** 色板分頁：不用先打開分類籤也能直接切過去（素材庫是空的時候也找得到） */
   const toggleColors = () => {
     const L = useLayout.getState();
@@ -216,8 +217,7 @@ export function MediaPanel() {
     e.stopPropagation();
     const n = uses(m.id);
     openMenu(e.clientX, e.clientY, [
-      { label: $t('預覽素材'), action: mediaUsable(m) ? () => openSource(m.id) : undefined },
-      { label: $t('加到時間軸結尾'), action: mediaUsable(m) ? () => { addClip(m.id); revealSelection(); } : undefined },
+      { label: $t('插入到播放頭'), action: mediaUsable(m) ? () => { useStore.getState().insertMedia(m.id); revealSelection(); } : undefined },
       { label: m.missing ? $t('重新連結檔案…') : $t('替換檔案…'), action: () => relinkWithPicker(m.id) },
       { separator: true },
       { label: n ? $t('從素材庫移除（{0} 個片段使用中）', n) : $t('從素材庫移除'), action: () => removeMedia(m.id), danger: true },
@@ -261,23 +261,17 @@ export function MediaPanel() {
       {filter === 'color' ? (
         <div className="lib-body"><ColorSwatches /></div>
       ) : (
-      <div className="lib-body">
+      <div className="lib-body" onClick={onBlank(closeSource)} onDoubleClick={onBlank(async () => importFiles(await pickFiles()))}>
         {missing > 0 && <div className="warn"><TriangleAlert size={13} /> {missing}{' '}{$t('個素材遺失')}</div>}
-        {media.length === 0 && (
-          <div className="lib-empty">
-            <button className="btn primary" onClick={async () => importFiles(await pickFiles())}><Upload size={14} /> {$t('匯入影片 / 圖片 / 音樂')}</button>
-            <button className="btn" onClick={toggleColors}><Palette size={14} /> {$t('色板')}</button>
-          </div>
-        )}
+        {media.length === 0 && <p className="muted small center">{$t('還沒有素材')}<br />{$t('雙擊匯入')}</p>}
         {media.length > 0 && list.length === 0 && <p className="muted small center">{$t('沒有符合的素材')}</p>}
         <div className={view === 'grid' ? 'lib-grid' : 'lib-list'}>
           {list.map((m) => (
             <div
               key={m.id}
-              className={`lib-item ${m.missing ? 'missing' : ''}`}
+              className={`lib-item ${m.missing ? 'missing' : ''} ${previewing === m.id ? 'previewing' : ''}`}
               onPointerDown={(e) => mediaUsable(m) && startLibraryDrag(e, { kind: 'media', id: m.id }, m.name, m.kind === 'audio' ? undefined : m.thumb)}
-              onClick={() => (m.missing ? relinkWithPicker(m.id) : openSource(m.id, false))}
-              onDoubleClick={() => mediaUsable(m) && openSource(m.id)}
+              onClick={() => (m.missing ? relinkWithPicker(m.id) : openSource(m.id))}
               onContextMenu={(e) => itemMenu(e, m)}
               title={m.missing ? $t('{0}（遺失，點擊重新連結）', m.name) : m.name}
             >
@@ -288,7 +282,7 @@ export function MediaPanel() {
                 {uses(m.id) > 0 && view === 'grid' && <span className="used" title={$t('已在時間軸上使用')}><CircleCheck size={11} /></span>}
               </div>
               <div className="lib-meta">
-                <div className="lib-name">{m.name}</div>
+                <div className="lib-name">{previewing === m.id && <Play size={10} fill="currentColor" />} {m.name}</div>
                 {view === 'list' && (
                   <div className="lib-sub">{KIND_LABEL[m.kind]}{m.kind !== 'image' ? ` · ${m.duration.toFixed(1)}s` : ` · ${m.width}×${m.height}`}{uses(m.id) ? $t(' · 使用 {0} 次', uses(m.id)) : ''}</div>
                 )}
@@ -325,7 +319,7 @@ export function TextPanel() {
         <span className="spacer" />
         <button className="lib-add" title={$t('在播放頭加入文字')} onClick={() => add('title')}><Plus size={15} /></button>
       </div>
-      <div className="lib-body">
+      <div className="lib-body" onDoubleClick={onBlank(() => add('title'))}>
         <div className={view === 'grid' ? 'lib-grid mods' : 'lib-list'}>
           {TEXT_PRESETS.map((p, i) => (
             <div
@@ -359,7 +353,7 @@ export function ModulePanel({ kind }: { kind: ModuleKind }) {
  * 模組庫（轉場 / 特效 / 變速）。分頁與屬性面板的挑選視窗共用：
  * 有 onPick = 挑選模式（點一下就選、不試看、不能拖）
  */
-export function ModuleLibrary({ kind, onPick }: { kind: ModuleKind; onPick?: (id: string) => void }) {
+export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onPick?: (id: string) => void; current?: string }) {
   const all = useStore((s) => s.modules);
   const previewing = usePreviewFx((s) => s.fx?.moduleId);
   const view = useLayout((s) => s.libView[kind] ?? 'grid');
@@ -405,7 +399,6 @@ export function ModuleLibrary({ kind, onPick }: { kind: ModuleKind; onPick?: (id
   };
 
   const togglePreview = (id: string) => {
-    if (kind === 'remap') return;
     useStore.getState().setPlaying(false);
     usePreviewFx.setState({ fx: previewing === id ? null : { moduleId: id, t0: performance.now() } });
   };
@@ -443,7 +436,7 @@ export function ModuleLibrary({ kind, onPick }: { kind: ModuleKind; onPick?: (id
       { label: favSet.has(m.id) ? $t('從我的最愛移除') : $t('加入我的最愛'), action: () => toggleFav(m.id) },
       { separator: true },
       ...(applyItems.length > 1 ? [{ label: $t('套用'), submenu: applyItems }] : applyItems),
-      { label: $t('在預覽中試看'), action: kind !== 'remap' ? () => togglePreview(m.id) : undefined },
+      { label: $t('在預覽中試看'), action: () => togglePreview(m.id) },
       // 內建模組不能直接改：複製成自訂模組再編輯
       ...(m.builtin ? [] : [{ label: $t('編輯程式碼'), action: () => { stopPreviewFx(); openModuleEditor(m.id); } }]),
       { label: $t('複製為新模組'), action: () => openModuleEditor(S.forkModule(m.id)) },
@@ -470,10 +463,10 @@ export function ModuleLibrary({ kind, onPick }: { kind: ModuleKind; onPick?: (id
   return (
     <div className="lib" onContextMenu={(e) => (onPick ? e.preventDefault() : bgMenu(e))}>
       <LibToolbar id={kind} query={q} setQuery={setQ} filter={{ active: cat !== 'all', reset: () => setCat('all') }}>
-        {!onPick && <button className="lib-add" title={$t('新增自訂模組')} onClick={() => newModule(kind)}><Plus size={15} /></button>}
+        <button className="lib-add" title={$t('新增自訂模組')} onClick={() => newModule(kind)}><Plus size={15} /></button>
       </LibToolbar>
       <LibFilter id={kind} cats={cats.map((c) => ({ ...c, count: ofKind.filter((m) => inCat(m, c.id)).length }))} cur={cat} set={setCat} />
-      <div className="lib-body">
+      <div className="lib-body" onClick={onBlank(onPick ? undefined : stopPreviewFx)} onDoubleClick={onBlank(onPick ? undefined : () => newModule(kind))}>
         {modules.length === 0 && (
           <p className="muted small center">{cat === 'fav' ? $t('還沒有我的最愛') : cat === 'custom' ? $t('還沒有自訂模組') : $t('沒有符合的模組')}</p>
         )}
@@ -481,7 +474,7 @@ export function ModuleLibrary({ kind, onPick }: { kind: ModuleKind; onPick?: (id
           {modules.map((m) => (
             <div
               key={m.id}
-              className={`lib-item mod mk-${kind} ${!onPick && previewing === m.id ? 'previewing' : ''}`}
+              className={`lib-item mod mk-${kind} ${!onPick && previewing === m.id ? 'previewing' : ''} ${current === m.id ? 'current' : ''}`}
               onPointerDown={(e) => !onPick && startLibraryDrag(e, { kind: 'module', id: m.id, moduleKind: kind }, displayName(m.name))}
               onClick={() => (onPick ? onPick(m.id) : togglePreview(m.id))}
               onContextMenu={(e) => (onPick ? e.preventDefault() : itemMenu(e, m))}
@@ -501,7 +494,46 @@ export function ModuleLibrary({ kind, onPick }: { kind: ModuleKind; onPick?: (id
   );
 }
 
+/** 速度模式：跟遮罩形狀一樣，按了打開「變速」素材庫的小視窗來挑 */
+function RemapPick({ clip }: { clip: Clip }) {
+  const m = useStore((s) => s.modules.find((x) => x.id === clip.remap.moduleId));
+  return (
+    <button
+      className="shape-pick"
+      title={$t('選擇速度模式')}
+      onClick={(e) => openPicker(e.currentTarget, $t('變速'), () => <RemapPickerBody clipId={clip.id} />)}
+    >
+      {m && <RemapThumb m={m} />}
+      <span className="shape-pick-name">{m ? displayName(m.name) : ''}</span>
+      <ChevronDown size={12} />
+    </button>
+  );
+}
+function RemapThumb({ m }: { m: Module }) {
+  const url = useModuleThumb(m);
+  return <span className="remap-pick-thumb" style={url ? { backgroundImage: `url(${url})` } : undefined} />;
+}
+function RemapPickerBody({ clipId }: { clipId: string }) {
+  const cur = useStore((s) => s.clips.find((c) => c.id === clipId)?.remap.moduleId);
+  return <ModuleLibrary kind="remap" current={cur} onPick={(id) => useStore.getState().setRemap(clipId, id)} />;
+}
+
 // ───────────────────────── 屬性（效果控制） ─────────────────────────
+
+// 從素材庫 / 時間軸把轉場、變速、片段特效、遮罩加到片段上 → 屬性面板捲到新加的那一塊
+useStore.subscribe((s, p) => {
+  if (s.clips === p.clips && s.effects === p.effects) return;
+  const sel = s.selection;
+  if (!sel) return;
+  if ((sel.type === 'transition' && sel !== p.selection) || (sel.type === 'effect' && !p.effects.some((e) => e.id === sel.id))) return focusSection('@top');
+  if (sel.type !== 'clip') return;
+  const c = s.clips.find((x) => x.id === sel.id);
+  const pc = p.clips.find((x) => x.id === sel.id);
+  if (!c || !pc || c === pc) return;
+  const added = (c.effects ?? []).find((f) => !(pc.effects ?? []).some((x) => x.id === f.id));
+  if (added) return focusSection(added.base ? 'clipmask' : `cfx.${added.id}`);
+  if (c.remap.moduleId !== pc.remap.moduleId) focusSection('speed');
+});
 
 export function InspectorPanel() {
   const sel = useStore((s) => s.selection);
@@ -688,7 +720,7 @@ function ClipInspector({ id }: { id: string }) {
   // 連結的音訊也要訂閱：只改音訊（音量、保持音調…）時片段本身沒變，不訂閱的話面板不會重畫
   const linkedAudio = useStore((s) => (clip?.link ? s.audios.find((a) => a.link === clip.link) : undefined));
   if (!clip) return null;
-  const { updateClip, setRemap } = useStore.getState();
+  const { updateClip } = useStore.getState();
   const host = clipHost(clip.id)!;
   const local = Math.min(clip.duration, Math.max(0, time - clip.start));
   const chs = clipChannels(clip, local);
@@ -781,13 +813,33 @@ function ClipInspector({ id }: { id: string }) {
   });
   sections.push(clipMaskSection(clip, local));
 
-  if (isVideo && remapMod) {
+  if (isVideo && remapMod && clip.remap.moduleId === CURVE_ID) {
+    // 曲線模式：素材時間本身是一條關鍵影格曲線（往上正播、往下倒播、平的定格）
+    const saveCurve = async () => {
+      const keys = useStore.getState().clips.find((c) => c.id === clip.id)?.remap.keys ?? [];
+      if (keys.length < 2) return toast($t('曲線至少要兩個關鍵影格'), 'error');
+      const name = await promptDialog({ title: $t('存到素材庫'), value: $t('自訂曲線') });
+      if (!name?.trim()) return;
+      useStore.getState().createModule('remap', { name: name.trim(), code: curveCode(keysToCurve(keys, clip.duration)) });
+      toast($t('已存到素材庫'));
+    };
+    sections.push({
+      id: 'speed',
+      title: $t('速度 / 時間重映射'),
+      channels: [curveChannel(clip, media, local)],
+      rows: [
+        { label: $t('模式'), node: <RemapPick clip={clip} /> },
+        { label: '', node: <button className="btn small-h" title={$t('把這條曲線存成變速素材，可以套用到其他片段')} onClick={saveCurve}><Plus size={12} /> {$t('存到素材庫')}</button> },
+      ],
+      onReset: () => updateClip(clip.id, { remap: { moduleId: CURVE_ID, params: {}, keys: defaultCurveKeys(clip.duration) } }),
+    });
+  } else if (isVideo && remapMod) {
     const defs = parseParams(remapMod.code);
     sections.push({
       id: 'speed',
       title: $t('速度 / 時間重映射'),
       rows: [
-        { label: $t('模式'), node: <ModuleSelect kind="remap" value={clip.remap.moduleId} onChange={(m) => m && setRemap(clip.id, m)} /> },
+        { label: $t('模式'), node: <RemapPick clip={clip} /> },
         ...paramRows(defs, clip.remap.params, onRemapParams),
         ...(clip.remap.moduleId !== 'remap-speed'
           ? [{ label: $t('整體速率'), node: <DragNumber variant="text" value={clip.rate ?? 1} min={0.05} max={16} step={0.01} def={1} suffix="×" onChange={(v) => updateClip(clip.id, { rate: v })} /> }]

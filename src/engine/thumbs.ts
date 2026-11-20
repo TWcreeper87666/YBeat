@@ -3,7 +3,7 @@ import { create } from 'zustand';
 import type { Module } from '../modules/builtin';
 import { Renderer } from './renderer';
 import { parseDuration, parseParams, resolveParams } from './params';
-import { ease } from './remap';
+import { remapLib } from './remap';
 
 /** 特效 / 轉場 / 變速的預覽縮圖：閒置時一張一張算，依程式碼快取 */
 
@@ -66,7 +66,7 @@ function remapThumb(m: Module): string {
     g.beginPath(); g.moveTo(0, (THUMB_H * i) / 4); g.lineTo(THUMB_W, (THUMB_H * i) / 4); g.stroke();
   }
   try {
-    const fn = new Function('ease', `"use strict";\n${m.code}\n;return typeof remap === 'function' ? remap : null;`)(ease);
+    const fn = new Function('ease', `"use strict";\n${m.code}\n;return typeof remap === 'function' ? remap : null;`)(remapLib);
     if (fn) {
       const p = resolveParams(parseParams(m.code), {});
       const info = { dur: 1, srcDur: 10, in: 0 };

@@ -1,11 +1,12 @@
 import { $t } from '../i18n';
-import { Minimize2, Pause, PictureInPicture2, Play, Repeat, SkipBack, SkipForward, StepBack, StepForward } from 'lucide-react';
+import { Minimize2, Pause, PictureInPicture2, Play, Repeat, Repeat1, SkipBack, SkipForward, StepBack, StepForward } from 'lucide-react';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { projectDuration, useStore } from '../store';
 import { useEditorScope } from './EditorWindow';
 import { Preview } from './Preview';
 import { useLayout } from './uiStore';
 import { GridButton } from './GridOverlay';
+import { SourceOverlay, useSource } from './SourcePanel';
 
 const fmt = (t: number) => {
   const m = Math.floor(t / 60);
@@ -13,12 +14,14 @@ const fmt = (t: number) => {
   return `${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`;
 };
 
-/** 預覽面板 = 畫面 + 播放控制列（與時間軸同步） */
+/** 預覽面板 = 畫面 + 播放控制列（與時間軸同步）；打開素材預覽時暫時蓋掉 */
 export function PreviewPanel() {
+  const src = useSource((s) => s.open);
   return (
-    <div className="preview-panel">
+    <div className={`preview-panel ${src ? 'src-on' : ''}`}>
       <Preview />
       <Transport />
+      <SourceOverlay />
     </div>
   );
 }
@@ -30,6 +33,7 @@ function Transport() {
   const dur = useStore((s) => projectDuration(s));
   const clips = useStore((s) => s.clips);
   const floating = useLayout((s) => s.floating);
+  const repeat = useLayout((s) => s.repeat);
   const S = useStore.getState();
   const barRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<number | null>(null);
@@ -89,14 +93,15 @@ function Transport() {
         {hover !== null && <div className="scrub-tip" style={{ left: `${(hover / total) * 100}%` }}>{fmt(hover)}</div>}
       </div>
       <div className="transport-row">
-        <button className="tp" title={$t('回到開頭 (Home)')} onClick={() => S.setTime(t0)}><SkipBack size={15} /></button>
-        <button className="tp" title={$t('上一格 (←)')} onClick={step(-1 / 60)}><StepBack size={15} /></button>
+        <button className="tp skip" title={$t('回到開頭 (Home)')} onClick={() => S.setTime(t0)}><SkipBack size={15} /></button>
+        <button className="tp step" title={$t('上一格 (←)')} onClick={step(-1 / 60)}><StepBack size={15} /></button>
         <button className="tp play" title={$t('播放 / 暫停 (Space)')} onClick={S.togglePlay}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
-        <button className="tp" title={$t('下一格 (→)')} onClick={step(1 / 60)}><StepForward size={15} /></button>
-        <button className="tp" title={$t('到結尾 (End)')} onClick={() => S.setTime(scope ? scope.b - 1 / 60 : dur)}><SkipForward size={15} /></button>
-        <span className="tp-time">{fmt(scope ? local : time)} <span className="muted">/ {fmt(total)}</span></span>
+        <button className="tp step" title={$t('下一格 (→)')} onClick={step(1 / 60)}><StepForward size={15} /></button>
+        <button className="tp skip" title={$t('到結尾 (End)')} onClick={() => S.setTime(scope ? scope.b - 1 / 60 : dur)}><SkipForward size={15} /></button>
+        <span className="tp-time">{fmt(scope ? local : time)} <span className="muted tp-total">/ {fmt(total)}</span></span>
         <span className="spacer" />
-        {loop && !scope && <button className="tp on" title={$t('停止循環 (Esc)')} onClick={() => S.setLoop(null)}><Repeat size={15} /></button>}
+        {loop && !scope && <button className="tp on" title={$t('停止循環 (Esc)')} onClick={() => S.setLoop(null)}><Repeat1 size={15} /></button>}
+        <button className={`tp ${repeat ? 'on' : ''}`} title={$t('循環播放')} onClick={() => useLayout.getState().set({ repeat: !repeat })}><Repeat size={15} /></button>
         <GridButton />
         {!scope && (
         <button
@@ -177,8 +182,9 @@ export function FloatingWindow({ title, children }: { title: string; children: R
         r.x = Math.min(innerWidth - 80, Math.max(-r0.w + 80, r0.x + dx));
         r.y = Math.min(innerHeight - 40, Math.max(0, r0.y + dy));
       }
-      if (mode.includes('r')) r.w = Math.max(220, r0.w + dx);
-      if (mode.includes('l')) { r.w = Math.max(220, r0.w - dx); r.x = r0.x + r0.w - r.w; }
+      // 最小寬度跟停駐的預覽一樣（播放列的按鈕放得下）
+      if (mode.includes('r')) r.w = Math.max(280, r0.w + dx);
+      if (mode.includes('l')) { r.w = Math.max(280, r0.w - dx); r.x = r0.x + r0.w - r.w; }
       if (mode.includes('b')) r.h = Math.max(260, r0.h + dy);
       set({ floatRect: r });
     };

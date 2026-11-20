@@ -20,6 +20,7 @@ export const CATEGORIES: Record<ModuleKind, { id: string; label: string }[]> = {
   ],
   remap: [
     { id: 'speed', label: $t('變速') },
+    { id: 'curve', label: $t('曲線') },
     { id: 'special', label: $t('特殊') },
   ],
 };
@@ -73,9 +74,15 @@ const MAP: Record<string, string> = {
   'tr-pixelate': 'style',
   'tr-glitch': 'style',
   'remap-speed': 'speed',
-  'remap-ramp': 'speed',
-  'remap-boomerang': 'special',
   'remap-strobe': 'special',
+  'remap-curve': 'curve',
+  'remap-pingpong': 'curve',
+  'remap-reverse-forward': 'curve',
+  'remap-boomerang': 'curve',
+  'remap-freeze': 'curve',
+  'remap-ramp': 'speed',
+  'remap-easein': 'speed',
+  'remap-easeout': 'speed',
 };
 
 /** 模組的分類 id；自訂模組回傳 'custom' */

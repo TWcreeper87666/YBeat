@@ -1,6 +1,8 @@
 import { $t } from '../i18n';
 import type { Clip, Media, Module } from '../store';
 import { parseParams, resolveParams, type ParamValues } from './params';
+import { evalKeys } from './keyframes';
+import { CURVE_ID, evalCurve, type CurvePoint } from './remapCurve';
 
 type Fn = (x: number) => number;
 export const ease: Record<string, Fn> & { clamp: (x: number, a?: number, b?: number) => number } = {
@@ -23,6 +25,9 @@ export const ease: Record<string, Fn> & { clamp: (x: number, a?: number, b?: num
   clamp: (x, a = 0, b = 1) => Math.min(b, Math.max(a, x)),
 };
 
+/** 變速模組程式碼裡的 ease：緩動函式 + ease.curve（素材庫裡存的曲線，x / 回傳值都是相對片段長度的比例） */
+export const remapLib = { ...ease, curve: (c: CurvePoint[], x: number) => evalCurve(c, x) };
+
 export interface RemapInfo { dur: number; srcDur: number; in: number }
 type RemapFn = (t: number, p: ParamValues, info: RemapInfo) => number;
 
@@ -36,7 +41,7 @@ export function getRemapFn(m: Module): RemapFn | null {
     let fn: RemapFn | null = null;
     let error: string | null = null;
     try {
-      fn = new Function('ease', `"use strict";\n${m.code}\n;return typeof remap === 'function' ? remap : null;`)(ease);
+      fn = new Function('ease', `"use strict";\n${m.code}\n;return typeof remap === 'function' ? remap : null;`)(remapLib);
       if (!fn) error = $t('找不到 function remap(t, p, info)');
     } catch (err) {
       error = String(err);
@@ -60,6 +65,15 @@ export function plainSpeed(clip: Clip, modules: Map<string, Module>): number | n
 
 /** 決定性時間映射：片段內時間 local → 素材時間 src（秒），並估計瞬時播放速率 */
 export function clipSource(clip: Clip, local: number, media: Media, modules: Map<string, Module>) {
+  const maxT = Math.max(0, media.duration - 0.02);
+  // 曲線模式：素材時間直接由關鍵影格決定（不吃整體速率）
+  const keys = clip.remap.moduleId === CURVE_ID ? clip.remap.keys : undefined;
+  if (keys?.length) {
+    const at = (t: number) => Math.min(maxT, Math.max(0, clip.in + evalKeys(keys, Math.min(clip.duration, Math.max(0, t)))));
+    const dt = 1 / 60;
+    const a = at(local);
+    return { src: a, rate: (at(local + dt) - a) / dt };
+  }
   const m = modules.get(clip.remap.moduleId);
   const fn = m ? getRemapFn(m) : null;
   const p = m ? resolveParams(parseParams(m.code), clip.remap.params) : {};
@@ -76,7 +90,6 @@ export function clipSource(clip: Clip, local: number, media: Media, modules: Map
       return t;
     }
   };
-  const maxT = Math.max(0, media.duration - 0.02);
   const cl = (x: number) => Math.min(maxT, Math.max(0, clip.in + x));
   const dt = 1 / 60;
   const a = cl(f(local * rate));

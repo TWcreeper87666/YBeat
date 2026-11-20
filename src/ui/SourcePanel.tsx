@@ -2,33 +2,34 @@ import React, { useEffect, useRef, useState } from 'react';
 import { create } from 'zustand';
 import { Clapperboard, Pause, Play, SkipBack, X } from 'lucide-react';
 import { mediaUsable, useStore, type Media } from '../store';
-import { $t, displayName } from '../i18n';
-import { Renderer, getRenderer } from '../engine/renderer';
-import { parseDuration } from '../engine/params';
+import { $t } from '../i18n';
 import { scrubFrame } from '../engine/scrubCache';
-import { panelsIn } from './dockTree';
 import { useDock } from './Dock';
-import { revealSelection, stopPreviewFx, usePreviewFx } from './uiStore';
+import { revealSelection, stopPreviewFx, useEditorWindow, usePreviewFx } from './uiStore';
 
-/** 素材預覽：目前顯示的素材與入點 / 出點 */
-export const useSource = create<{ mediaId: string | null; inT: number; outT: number | null }>(() => ({ mediaId: null, inT: 0, outT: null }));
+/** 素材預覽（顯示在「預覽」面板裡）：目前的素材、入點 / 出點、是否正在顯示 */
+export const useSource = create<{ mediaId: string | null; open: boolean; inT: number; outT: number | null }>(() => ({ mediaId: null, open: false, inT: 0, outT: null }));
 
-/** 在「素材預覽」分頁打開素材 */
-export function openSource(mediaId: string, activate = true) {
+/** 在「預覽」面板打開素材 */
+export function openSource(mediaId: string) {
   stopPreviewFx();
   if (useSource.getState().mediaId !== mediaId) useSource.setState({ mediaId, inT: 0, outT: null });
-  if (activate) useDock.getState().activatePanel('source');
+  useSource.setState({ open: true });
+  useDock.getState().activatePanel('preview', true);
 }
 
-/** 版面裡有沒有「素材預覽」分頁（沒有的話特效試看就疊在主預覽上） */
-export const hasSourcePanel = () => panelsIn(useDock.getState().layout).includes('source');
+/** 回到時間軸的預覽畫面 */
+export const closeSource = () => useSource.getState().open && useSource.setState({ open: false });
 
-// 特效 / 轉場試看開始時切到「素材預覽」；時間軸開始播放時切回「預覽」
+// 特效試看、時間軸播放 / 移動播放頭、打開編輯視窗 → 回到時間軸的預覽畫面
 usePreviewFx.subscribe((s, p) => {
-  if (s.fx && !p.fx && hasSourcePanel()) useDock.getState().activatePanel('source');
+  if (s.fx && !p.fx) closeSource();
 });
 useStore.subscribe((s, p) => {
-  if (s.playing && !p.playing) useDock.getState().activatePanel('preview', true);
+  if ((s.playing && !p.playing) || s.time !== p.time) closeSource();
+});
+useEditorWindow.subscribe((s, p) => {
+  if (s.open && !p.open) closeSource();
 });
 
 const fmt = (t: number) => {
@@ -37,18 +38,12 @@ const fmt = (t: number) => {
   return `${String(m).padStart(2, '0')}:${s.toFixed(2).padStart(5, '0')}`;
 };
 
-export function SourcePanel() {
-  const fx = usePreviewFx((s) => s.fx);
+/** 預覽面板裡的素材預覽（沒有打開時回傳 null） */
+export function SourceOverlay() {
+  const open = useSource((s) => s.open);
   const id = useSource((s) => s.mediaId);
   const media = useStore((s) => s.media.find((m) => m.id === id));
-  if (fx) return <ModulePreview moduleId={fx.moduleId} t0={fx.t0} />;
-  if (!media || !mediaUsable(media)) {
-    return (
-      <div className="source-panel empty">
-        <p className="muted">{$t('沒有預覽中的素材')}</p>
-      </div>
-    );
-  }
+  if (!open || !media || !mediaUsable(media)) return null;
   return <SourceView key={media.id} media={media} />;
 }
 
@@ -124,6 +119,9 @@ function SourceView({ media }: { media: Media }) {
     const on = () => setPlaying(!el.paused);
     el.addEventListener('play', on);
     el.addEventListener('pause', on);
+    // 打開就自動播放（從入點開始）
+    el.currentTime = useSource.getState().inT;
+    el.play().catch(() => {});
     return () => {
       cancelAnimationFrame(raf);
       el.removeEventListener('seeked', onSeeked);
@@ -201,10 +199,7 @@ function SourceView({ media }: { media: Media }) {
   const setOut = () => useSource.setState({ outT: Math.max(t, inT + 0.05) });
   const range = timed ? { in: inT, duration: Math.max(0.05, out - inT) } : undefined;
   const insert = () => {
-    const S = useStore.getState();
-    const kind = media.kind === 'audio' ? 'audio' : 'video';
-    const dur = range?.duration ?? 2;
-    S.addClip(media.id, S.time, S.trackForInsert(kind, S.time, dur), range);
+    useStore.getState().insertMedia(media.id, range);
     revealSelection();
   };
 
@@ -270,6 +265,7 @@ function SourceView({ media }: { media: Media }) {
         <button className="btn primary small-h" title={$t('把入點~出點這段插入到時間軸的播放頭')} onClick={insert}>
           <Clapperboard size={14} /> {$t('插入片段')}
         </button>
+        <button className="tp" title={$t('回到時間軸 (Esc)')} onClick={closeSource}><X size={14} /></button>
       </div>
     </div>
   );
@@ -296,107 +292,4 @@ function SourceWave({ media }: { media: Media }) {
     }
   }, [media]);
   return <canvas ref={ref} className="source-wave" />;
-}
-
-// ───────────────────────── 特效 / 轉場試看 ─────────────────────────
-
-const TRANSITION_PREVIEW = 0.8;
-
-/** 轉場的「下一段」示意畫面 */
-function sampleB(w: number, h: number) {
-  const c = document.createElement('canvas');
-  c.width = w;
-  c.height = h;
-  const g = c.getContext('2d')!;
-  const grad = g.createLinearGradient(0, 0, w, h);
-  grad.addColorStop(0, '#29d3c2');
-  grad.addColorStop(1, '#3a0ca3');
-  g.fillStyle = grad;
-  g.fillRect(0, 0, w, h);
-  g.fillStyle = '#fff';
-  g.textAlign = 'center';
-  g.textBaseline = 'middle';
-  g.font = `900 ${Math.round(Math.min(w, h) * 0.4)}px system-ui, sans-serif`;
-  g.fillText('B', w / 2, h / 2);
-  return c;
-}
-
-/**
- * 試看用的渲染器：整個 App 只建一個、一直重複使用。
- * 每次切換都新建 WebGL context 的話，瀏覽器同時能開的數量有限，舊的會被強制回收，
- * 新的 shader 就會「編譯失敗」。
- */
-let shared: { canvas: HTMLCanvasElement; r: Renderer; B: HTMLCanvasElement | null; bw: number; bh: number } | null = null;
-function sharedRenderer() {
-  if (!shared || shared.r.gl.isContextLost()) {
-    const canvas = document.createElement('canvas');
-    shared = { canvas, r: new Renderer(canvas, { w: 360, h: 640 }), B: null, bw: 0, bh: 0 };
-  }
-  return shared;
-}
-
-/** 把目前的畫面（主預覽）套上點選的特效 / 轉場，循環播放 */
-function ModulePreview({ moduleId, t0 }: { moduleId: string; t0: number }) {
-  const holder = useRef<HTMLDivElement>(null);
-  const mod = useStore((s) => s.modules.find((m) => m.id === moduleId));
-  const fmtW = useStore((s) => s.format.w);
-  const fmtH = useStore((s) => s.format.h);
-  const [err, setErr] = useState<string | null>(null);
-  const compileErr = useStore((s) => s.errors[moduleId] ?? null);
-
-  useEffect(() => {
-    const el = holder.current;
-    if (!el || !mod) return;
-    let sh: ReturnType<typeof sharedRenderer>;
-    try {
-      sh = sharedRenderer();
-    } catch (e) {
-      setErr(String(e));
-      return;
-    }
-    setErr(null);
-    const sc = Math.min(1, 720 / Math.max(fmtW, fmtH));
-    const w = Math.round(fmtW * sc), h = Math.round(fmtH * sc);
-    sh.r.setSize(w, h);
-    if (!sh.B || sh.bw !== w || sh.bh !== h) {
-      sh.B = sampleB(w, h);
-      sh.bw = w;
-      sh.bh = h;
-    }
-    sh.r.onError = (id, msg) => useStore.getState().setError(id, msg);
-    el.appendChild(sh.canvas);
-    let raf = 0;
-    const loop = (now: number) => {
-      const m = useStore.getState().modules.find((x) => x.id === moduleId);
-      const main = getRenderer()?.canvas;
-      if (m && main && !sh.r.gl.isContextLost()) {
-        const dur = m.kind === 'transition' ? TRANSITION_PREVIEW : parseDuration(m.code, 0.5);
-        const e = ((now - t0) / 1000) % (dur + 0.6);
-        sh.r.thumb(m, Math.min(1, e / dur), main, sh.B!, dur);
-      }
-      raf = requestAnimationFrame(loop);
-    };
-    raf = requestAnimationFrame(loop);
-    return () => {
-      cancelAnimationFrame(raf);
-      sh.canvas.remove();
-    };
-  }, [moduleId, t0, fmtW, fmtH, mod]);
-
-  if (!mod) return null;
-  return (
-    <div className="source-panel">
-      <div className="source-view" ref={holder}>
-        {err && <div className="fatal">{err}</div>}
-        {compileErr && <pre className="err src-err">{compileErr}</pre>}
-      </div>
-      <div className="transport-row">
-        <span className={`kind ${mod.kind === 'transition' ? 'k-tr' : 'k-fx'}`}>{mod.kind === 'transition' ? $t('轉場') : $t('特效')}</span>
-        <span className="source-name">{displayName(mod.name)}</span>
-        <span className="spacer" />
-        <span className="muted small">{$t('循環試看中')}</span>
-        <button className="tp" title={$t('結束預覽 (Esc)')} onClick={stopPreviewFx}><X size={14} /></button>
-      </div>
-    </div>
-  );
 }

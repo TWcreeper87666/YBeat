@@ -293,41 +293,6 @@ function remap(t, p, info) {
 }
 `;
 
-const remapBoomerang = `// Boomerang：正播 → 瞬間倒抽 → 正播（時間範圍鎖在片段內）
-// @param speed: float = 1 (0.1..4) "正播速度"
-// @param at: float = 0.4 (0..1) "倒抽開始（比例）"
-// @param back: float = 0.15 (0.02..1) "倒抽長度（比例）"
-// @param rewind: float = 3 (1..10) "倒抽倍速"
-function remap(t, p, info) {
-  const t1 = p.at * info.dur;
-  const t2 = t1 + p.back * info.dur;
-  const peak = t1 * p.speed;
-  const dist = (t2 - t1) * p.rewind * p.speed;
-  if (t < t1) return t * p.speed;
-  if (t < t2) return peak - ease.inOutCubic((t - t1) / (t2 - t1)) * dist;
-  return peak - dist + (t - t2) * p.speed;
-}
-`;
-
-const remapRamp = `// 速度斜坡：快 → 慢動作 → 快
-// @param fast: float = 3 (1..8) "快速段倍速"
-// @param slow: float = 0.3 (0.05..1) "慢動作倍速"
-// @param center: float = 0.5 (0..1) "慢動作中心（比例）"
-// @param width: float = 0.4 (0.05..1) "慢動作寬度（比例）"
-function remap(t, p, info) {
-  // 對速度曲線做數值積分，得到素材時間（決定性，可任意 seek）
-  const n = 120, dt = t / n;
-  let s = 0;
-  for (let i = 0; i < n; i++) {
-    const x = ((i + 0.5) * dt) / info.dur;
-    const d = Math.abs(x - p.center) / (p.width / 2);
-    const k = ease.inOutCubic(ease.clamp(d));
-    s += (p.slow + (p.fast - p.slow) * k) * dt;
-  }
-  return s;
-}
-`;
-
 const remapStrobe = `// 抽幀（低格數卡頓感）
 // @param fps: float = 8 (1..30) "格數"
 // @param speed: float = 1 (0.1..4) "速度"
@@ -335,6 +300,29 @@ function remap(t, p, info) {
   return (Math.floor(t * p.fps) / p.fps) * p.speed;
 }
 `;
+
+const remapCurve = `// 曲線：素材時間用關鍵影格控制（在屬性面板的「速度」區塊編輯）
+// 曲線往上 = 正播、往下 = 倒播、越陡越快、平的 = 定格
+function remap(t, p, info) {
+  return t;
+}
+`;
+
+/** 曲線預設：套用後變成可以在屬性面板編輯的曲線（// @curve，比例：t、v 都是相對片段長度） */
+const curvePreset = (name: string, k: string) => `// ${name}（套用後可以在屬性面板調整曲線）
+// @curve ${k}
+function remap(t, p, info) {
+  return ease.curve(CURVE, t / info.dur) * info.dur;
+}
+const CURVE = ${k};
+`;
+const curve_remap_pingpong = curvePreset('正播後倒播', '[[0,0,[0.42,0,0.58,1]],[0.5,0.5,[0.42,0,0.58,1]],[1,0,[0,0,1,1]]]');
+const curve_remap_reverse_forward = curvePreset('倒播後正播', '[[0,0.5,[0.42,0,0.58,1]],[0.5,0,[0.42,0,0.58,1]],[1,0.5,[0,0,1,1]]]');
+const curve_remap_boomerang = curvePreset('Boomerang 倒抽', '[[0,0,[0,0,1,1]],[0.4,0.4,[0.42,0,0.58,1]],[0.55,0.15,[0,0,1,1]],[1,0.6,[0,0,1,1]]]');
+const curve_remap_ramp = curvePreset('速度斜坡 Speed Ramp', '[[0,0,[0,0,0.58,1]],[0.3,0.9,[0,0,1,1]],[0.7,1.02,[0.42,0,1,1]],[1,1.92,[0,0,1,1]]]');
+const curve_remap_easein = curvePreset('漸快', '[[0,0,[0.42,0,1,1]],[1,1,[0,0,1,1]]]');
+const curve_remap_easeout = curvePreset('漸慢', '[[0,0,[0,0,0.58,1]],[1,1,[0,0,1,1]]]');
+const curve_remap_freeze = curvePreset('中段定格', '[[0,0,[0,0,1,1]],[0.4,0.4,"hold"],[0.6,0.4,[0,0,1,1]],[1,0.8,[0,0,1,1]]]');
 
 const mk = (id: string, kind: ModuleKind, name: string, code: string): Module => ({ id, kind, name, code, builtin: true });
 
@@ -355,8 +343,14 @@ const BASE_MODULES: Module[] = [
   mk('tr-iris', 'transition', '圓形擴散 Iris', iris),
   mk('tr-flash', 'transition', '閃白 Flash Cut', flashCut),
   mk('remap-speed', 'remap', '變速 / 倒放', remapSpeed),
-  mk('remap-boomerang', 'remap', 'Boomerang 倒抽', remapBoomerang),
-  mk('remap-ramp', 'remap', '速度斜坡 Speed Ramp', remapRamp),
+  mk('remap-curve', 'remap', '曲線', remapCurve),
+  mk('remap-pingpong', 'remap', '正播後倒播', curve_remap_pingpong),
+  mk('remap-reverse-forward', 'remap', '倒播後正播', curve_remap_reverse_forward),
+  mk('remap-boomerang', 'remap', 'Boomerang 倒抽', curve_remap_boomerang),
+  mk('remap-ramp', 'remap', '速度斜坡 Speed Ramp', curve_remap_ramp),
+  mk('remap-easein', 'remap', '漸快', curve_remap_easein),
+  mk('remap-easeout', 'remap', '漸慢', curve_remap_easeout),
+  mk('remap-freeze', 'remap', '中段定格', curve_remap_freeze),
   mk('remap-strobe', 'remap', '抽幀 Strobe', remapStrobe),
 ];
 

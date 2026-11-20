@@ -4,17 +4,17 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { create } from 'zustand';
 import { flushSync } from 'react-dom';
 import { axisAligned, gridSnapLines, rotatedHalf, snapMoveAxis, snapScaleAxis } from '../engine/snap';
-import { projectDuration, useStore, type Clip, type Media } from '../store';
+import { projectDuration, remapFor, srcAvail, useStore, type Clip, type Media } from '../store';
 import { Renderer, computeFrame, makeCtx, setRenderer } from '../engine/renderer';
 import { setRemapErrorReporter } from '../engine/remap';
 import { syncAudioPreview, stopAudioPreview } from '../engine/audio';
 import { parseDuration } from '../engine/params';
+import { trialTransitionAt, withClip } from '../engine/trialTransition';
 import { clipTransformAt, fitSize, isAnimated, setPropsAt, type Transform } from '../engine/transform';
 import { textSize } from '../engine/text';
 import { MaskGizmos, cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { GridOverlay } from './GridOverlay';
 import { stopPreviewFx, useLayout, usePreviewFx } from './uiStore';
-import { hasSourcePanel } from './SourcePanel';
 import { useEditorWindow } from './EditorWindow';
 
 const frameAspect = () => useStore.getState().format.w / useStore.getState().format.h;
@@ -52,6 +52,7 @@ export function Preview() {
     // 渲染慢、掉幀時時間軸也不會落後，影片 / 聲音（照真實時間在播）就不用一直被拉回來對時。
     let clock: { t: number; perf: number } | null = null;
     let lastSet = NaN;
+    let trialLoop = -1; // 剪接點試看轉場：第幾圈（換圈時影片要重新對時）
     const loop = (now: number) => {
       const st = useStore.getState();
       if (!st.exporting) {
@@ -61,12 +62,26 @@ export function Preview() {
           if (!clock || Math.abs(st.time - lastSet) > 1e-9) clock = { t: st.time, perf: now };
           t = clock.t + (now - clock.perf) / 1000;
           const end = projectDuration(st);
+          // 循環播放開關：時間軸播到專案結尾、編輯視窗播到片段結尾 → 回到開頭，或停下來
+          // （時間軸上自己設的 A-B 循環一律循環）
+          const repeat = useLayout.getState().repeat;
+          const editorScope = useEditorWindow.getState().open;
           if (st.loop && t >= st.loop.b) {
-            t = st.loop.a;
-            clock = { t, perf: now };
+            if (editorScope && !repeat) {
+              t = Math.max(st.loop.a, st.loop.b - 1 / 60);
+              useStore.setState({ playing: false });
+            } else {
+              t = st.loop.a;
+              clock = { t, perf: now };
+            }
           } else if (!st.loop && t >= end) {
-            t = end;
-            useStore.setState({ playing: false });
+            if (repeat && end > 0) {
+              t = 0;
+              clock = { t, perf: now };
+            } else {
+              t = end;
+              useStore.setState({ playing: false });
+            }
           }
           lastSet = t;
           useStore.setState({ time: t });
@@ -75,18 +90,39 @@ export function Preview() {
         // 輸出比例 / 預覽畫質
         const sc = useLayout.getState().previewScale || 1;
         r.setSize(st.format.w * sc, st.format.h * sc, st.format.h);
-        const ctx = makeCtx(st);
+        let ctx = makeCtx(st);
         // 素材庫點選的特效 / 轉場：循環預覽
         let extra;
+        let rt = t, rPlaying = st.playing;
         const fx = usePreviewFx.getState().fx;
         const m = fx && ctx.modules.get(fx.moduleId);
-        // 版面有「素材預覽」分頁時，試看顯示在那裡；沒有才疊在主預覽上
-        if (fx && m && !hasSourcePanel()) {
+        const trial = !fx || !m || st.playing
+          ? null
+          : m.kind === 'transition'
+            ? trialTransitionAt(ctx, t, m, parseDuration(m.code, TRANSITION_PREVIEW), 0.1, st.activeTrack?.kind === 'video' ? st.activeTrack.idx : undefined)
+            : m.kind === 'remap'
+              ? trialRemap(st, ctx, m.id, t)
+              : null;
+        if (fx && m?.kind === 'remap' && !trial) {
+          trialLoop = -1; // 變速：沒有可以試看的影片片段就不顯示
+        } else if (fx && trial) {
+          // 轉場：播放頭在剪接點上，用前一段的尾巴、後一段的開頭試看
+          // 變速：選取的（或播放頭底下的）影片片段套上這個變速，整段循環播放
+          const span = Math.max(0.1, trial.hi - trial.lo);
+          const el = (now - fx.t0) / 1000;
+          const lap = Math.floor(el / span);
+          if (lap !== trialLoop) r.pauseAll(); // 換圈：影片重新 seek
+          trialLoop = lap;
+          ctx = trial.ctx;
+          rt = trial.lo + (el - lap * span);
+          rPlaying = true;
+        } else if (fx && m) {
+          trialLoop = -1;
           const dur = m.kind === 'transition' ? TRANSITION_PREVIEW : parseDuration(m.code, 0.5);
           const el = ((now - fx.t0) / 1000) % (dur + 0.6);
           extra = { module: m, progress: Math.min(1, el / dur), duration: dur };
-        }
-        r.render(ctx, t, 'preview', st.playing, extra);
+        } else trialLoop = -1;
+        r.render(ctx, rt, 'preview', rPlaying, extra);
         syncAudioPreview(st, t, st.playing);
         // 閒置時預先編譯 shader，播放時第一次遇到特效才不會卡
         if (!st.playing) r.warmup(ctx.modules);
@@ -182,10 +218,24 @@ export function Preview() {
   );
 }
 
+/** 變速試看的對象：選取的影片片段，沒有就用播放頭底下最上層的影片片段 */
+function trialRemap(st: ReturnType<typeof useStore.getState>, ctx: ReturnType<typeof makeCtx>, moduleId: string, t: number) {
+  let c = st.selection?.type === 'clip' ? ctx.clips.find((x) => x.id === st.selection!.id) : undefined;
+  if (!c) {
+    for (let i = ctx.videoTracks.length - 1; i >= 0 && !c; i--) {
+      if (st.tracks.video[i]?.hidden) continue;
+      c = ctx.videoTracks[i].find((x) => t >= x.start && t < x.start + x.duration && !x.text);
+    }
+  }
+  if (!c || ctx.media.get(c.mediaId)?.kind !== 'video') return null;
+  const c2 = { ...c, remap: remapFor(c, moduleId, st.modules, srcAvail(c, st.media)) };
+  return { ctx: withClip(ctx, c2), lo: c.start, hi: c.start + c.duration - 1e-3 };
+}
+
 function FxPreviewLabel() {
   const fx = usePreviewFx((s) => s.fx);
   const name = useStore((s) => (fx ? s.modules.find((m) => m.id === fx.moduleId)?.name : null));
-  if (!fx || !name || hasSourcePanel()) return null;
+  if (!fx || !name) return null;
   const label = displayName(name);
   return (
     <div className="fx-preview-label">

@@ -1,4 +1,4 @@
-import { C, R, T, findGroup, moveGroup, movePanel, panelsIn, showPanel, removePanel, type DockNode, type PanelId } from '../src/ui/dockTree';
+import { C, R, T, PANEL_MIN, dragSash, minSize, findGroup, moveGroup, movePanel, panelsIn, showPanel, removePanel, type DockNode, type PanelId } from '../src/ui/dockTree';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -109,6 +109,29 @@ const show = (n: DockNode | null): string => (!n ? 'null' : n.type === 'tabs' ? 
   ok(self === l, '拖到自己身上不動');
   const merged = moveGroup(l, g.id, { kind: 'tabs', group: groupOf(l, 'inspector').id, index: 0 })!;
   ok(groupOf(merged, 'inspector').tabs.join() === [...LIB, 'inspector'].join(), '整組插入到別的分頁列');
+}
+
+// 最小尺寸：分頁組取最大值 + 分頁列；左右分割加總寬度、上下分割加總高度
+{
+  const g = T(['media', 'preview']);
+  const m = minSize(g);
+  ok(m.w === Math.max(PANEL_MIN.media.w, PANEL_MIN.preview.w) + 2 && m.h === Math.max(PANEL_MIN.media.h, PANEL_MIN.preview.h) + 31, '分頁組：取最大的那個分頁');
+  const l = edit();
+  const ml = minSize(l);
+  const row = minSize((l as any).children[0]);
+  ok(row.w === minSize(T(LIB)).w + minSize(T(['inspector'])).w + minSize(T(['preview'])).w + 8, '左右分割：寬度加總（含分隔線）');
+  ok(ml.h === row.h + minSize(T(['timeline'])).h + 4 && ml.w === Math.max(row.w, minSize(T(['timeline'])).w), '上下分割：高度加總、寬度取最大');
+}
+// 拖分隔線：不能小於最小尺寸
+{
+  const total = 1000;
+  const mins = [300, 300, 200];
+  const a = dragSash([0.4, 0.4, 0.2], 0, -0.3, mins, total);
+  ok(Math.abs(a[0] - 0.3) < 1e-9 && Math.abs(a[0] + a[1] - 0.8) < 1e-9 && a[2] === 0.2, '往左拖太多：停在左邊的最小寬度');
+  const b = dragSash([0.4, 0.4, 0.2], 0, 0.3, mins, total);
+  ok(Math.abs(b[1] - 0.3) < 1e-9, '往右拖太多：停在右邊的最小寬度');
+  const c = dragSash([0.5, 0.5], 0, 0.1, [300, 300], 400);
+  ok(Math.abs(c[0] - 0.5) < 1e-9, '兩邊都放不下：照最小尺寸的比例分');
 }
 
 console.log(fails ? `\n${fails} 項失敗` : '\n全部通過');

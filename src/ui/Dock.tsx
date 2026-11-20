@@ -1,6 +1,6 @@
 import { $t } from '../i18n';
 import { Minimize2 } from 'lucide-react';
-import React, { useRef } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { useStore } from '../store';
@@ -8,7 +8,7 @@ import { Slot } from './PreviewPanel';
 import { useEditorWindow } from './EditorWindow';
 import { openMenu, useLayout, type MenuItem } from './uiStore';
 import {
-  C, R, T, findGroup, mapTabs, moveGroup, movePanel, panelsIn, removePanel, setSizes, showPanel,
+  C, R, T, dragSash, findGroup, mapTabs, minSize, moveGroup, movePanel, panelsIn, removePanel, setSizes, showPanel,
   type DockNode, type DropTarget, type PanelId, type Side, type SplitNode, type TabsNode,
 } from './dockTree';
 
@@ -25,7 +25,6 @@ export const PANELS: { id: PanelId; title: string }[] = [
   { id: 'code', title: $t('程式碼') },
   { id: 'ai', title: 'AI' },
   { id: 'preview', title: $t('預覽') },
-  { id: 'source', title: $t('素材預覽') },
   { id: 'timeline', title: $t('時間軸') },
 ];
 const TITLE = Object.fromEntries(PANELS.map((p) => [p.id, p.title])) as Record<PanelId, string>;
@@ -33,10 +32,10 @@ const LIB: PanelId[] = ['media', 'text', 'transition', 'effect', 'mask', 'remap'
 
 /** 內建版面 */
 export const PRESETS: { id: string; name: string; build: () => DockNode }[] = [
-  { id: 'edit', name: $t('剪輯'), build: () => C([R([T(LIB), T(['inspector', 'code', 'ai'], 'inspector'), T(['preview', 'source'], 'preview')], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
-  { id: 'right', name: $t('預覽在右'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai'], 'inspector')], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview', 'source'], 'preview')], [0.72, 0.28]) },
-  { id: 'code', name: $t('寫程式'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai'], 'code')], [0.3, 0.7]), T(['timeline'])], [0.68, 0.32]), T(['preview', 'source'], 'preview')], [0.74, 0.26]) },
-  { id: 'timeline', name: $t('大時間軸'), build: () => C([R([T([...LIB, 'inspector', 'code', 'ai'], 'media'), T(['preview', 'source'], 'preview')], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
+  { id: 'edit', name: $t('剪輯'), build: () => C([R([T(LIB), T(['inspector', 'code', 'ai'], 'inspector'), T(['preview'])], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
+  { id: 'right', name: $t('預覽在右'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai'], 'inspector')], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview'])], [0.72, 0.28]) },
+  { id: 'code', name: $t('寫程式'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai'], 'code')], [0.3, 0.7]), T(['timeline'])], [0.68, 0.32]), T(['preview'])], [0.74, 0.26]) },
+  { id: 'timeline', name: $t('大時間軸'), build: () => C([R([T([...LIB, 'inspector', 'code', 'ai'], 'media'), T(['preview'])], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
 ];
 
 interface Custom { id: string; name: string; layout: DockNode }
@@ -115,11 +114,8 @@ export const useDock = create<DockState>()(
           l && !panelsIn(l).includes('text')
             ? mapTabs(l, (t) => (t.tabs.includes('media') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'media' ? ['media', 'text'] : [x])) as PanelId[] } : t))
             : l;
-        // 「素材預覽」加在「預覽」旁邊
-        const addSource = (l: DockNode | null | undefined) =>
-          l && !panelsIn(l).includes('source')
-            ? mapTabs(l, (t) => (t.tabs.includes('preview') ? { ...t, tabs: [...t.tabs, 'source'] as PanelId[] } : t))
-            : l;
+        // 「素材預覽」分頁已併回「預覽」：舊版面裡的拿掉
+        const dropSource = (l: DockNode | null | undefined) => (l ? removePanel(l, 'source' as PanelId) : l);
         // 「遮罩」加在「特效」後面
         const addMask = (l: DockNode | null | undefined) =>
           l && !panelsIn(l).includes('mask')
@@ -135,7 +131,7 @@ export const useDock = create<DockState>()(
           l && !panelsIn(l).includes('ai')
             ? mapTabs(l, (t) => (t.tabs.includes('code') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'code' ? ['code', 'ai'] : [x])) as PanelId[] } : t))
             : l;
-        const fix = (l: DockNode | null | undefined) => addAi(addCode(addMask(addSource(addText(l)))));
+        const fix = (l: DockNode | null | undefined) => addAi(addCode(addMask(addText(dropSource(l)))));
         return {
           ...current,
           ...p,
@@ -298,15 +294,12 @@ function Split({ node, hosts }: { node: SplitNode; hosts: Record<PanelId, HTMLEl
     const total = node.dir === 'row' ? r.width : r.height;
     const p0 = node.dir === 'row' ? e.clientX : e.clientY;
     const s0 = [...node.sizes];
-    const minF = Math.min(0.45, 140 / total);
+    // 每格的最小尺寸（裡面所有分頁的按鈕都放得下）
+    const mins = node.children.map((c) => (node.dir === 'row' ? minSize(c).w : minSize(c).h));
     document.body.classList.add(node.dir === 'row' ? 'resizing-v' : 'resizing-h');
     const mv = (ev: PointerEvent) => {
       const d = ((node.dir === 'row' ? ev.clientX : ev.clientY) - p0) / total;
-      const a = Math.max(minF, Math.min(s0[i] + s0[i + 1] - minF, s0[i] + d));
-      const sizes = [...s0];
-      sizes[i] = a;
-      sizes[i + 1] = s0[i] + s0[i + 1] - a;
-      useDock.getState().resize(node.id, sizes);
+      useDock.getState().resize(node.id, dragSash(s0, i, d, mins, total));
     };
     const up = () => {
       document.body.classList.remove('resizing-v', 'resizing-h');
@@ -320,7 +313,7 @@ function Split({ node, hosts }: { node: SplitNode; hosts: Record<PanelId, HTMLEl
     <div ref={ref} className={`dock-split dir-${node.dir}`}>
       {node.children.map((c, i) => (
         <React.Fragment key={c.id}>
-          <div className="dock-cell" style={{ flex: `${node.sizes[i]} 1 0` }}>
+          <div className="dock-cell" style={{ flex: `${node.sizes[i]} 1 0`, minWidth: minSize(c).w, minHeight: minSize(c).h }}>
             <NodeView node={c} hosts={hosts} />
           </div>
           {i < node.children.length - 1 && <div className={`dock-sash dir-${node.dir}`} onPointerDown={(e) => sash(e, i)} />}
@@ -341,6 +334,26 @@ function Group({ node, hosts }: { node: TabsNode; hosts: Record<PanelId, HTMLEle
   const insertAt = t?.kind === 'tabs' && t.group === node.id ? t.index : -1;
   const active = node.tabs.includes(node.active) ? node.active : node.tabs[0];
 
+  // 分頁列放不下時：滑鼠滾輪水平捲動（要攔下來，不然會捲到外層）
+  const barRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = barRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (el.scrollWidth <= el.clientWidth) return;
+      const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+      if (!d) return;
+      e.preventDefault();
+      el.scrollLeft += e.deltaMode === 1 ? d * 30 : d;
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+  // 切換分頁時，把目前的分頁捲進看得到的範圍
+  useEffect(() => {
+    barRef.current?.querySelector<HTMLElement>(`[data-dock-tab="${active}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }, [active]);
+
   const tabMenu = (e: React.MouseEvent, p: PanelId) => {
     e.preventDefault();
     e.stopPropagation();
@@ -358,6 +371,7 @@ function Group({ node, hosts }: { node: TabsNode; hosts: Record<PanelId, HTMLEle
   return (
     <div className="dock-group" data-dock-group={node.id}>
       <div
+        ref={barRef}
         className={`dock-tabs ${drag && !drag.panel && drag.from === node.id ? 'dragging' : ''}`}
         onDoubleClick={(e) => e.target === e.currentTarget && useDock.getState().toggleMax(node.id)}
         onPointerDown={(e) => e.target === e.currentTarget && e.button === 0 && startTabDrag(e, null, node.id, rootRef?.current ?? null, node.tabs.map((x) => TITLE[x]).join(' · '))}

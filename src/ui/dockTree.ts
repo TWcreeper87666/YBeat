@@ -1,6 +1,6 @@
 /** 版面樹（純函式，不依賴 React，方便測試） */
 
-export type PanelId = 'media' | 'source' | 'text' | 'transition' | 'effect' | 'mask' | 'remap' | 'inspector' | 'code' | 'ai' | 'preview' | 'timeline';
+export type PanelId = 'media' | 'text' | 'transition' | 'effect' | 'mask' | 'remap' | 'inspector' | 'code' | 'ai' | 'preview' | 'timeline';
 export interface TabsNode { type: 'tabs'; id: string; tabs: PanelId[]; active: PanelId }
 export interface SplitNode { type: 'split'; id: string; dir: 'row' | 'col'; children: DockNode[]; sizes: number[] }
 export type DockNode = TabsNode | SplitNode;
@@ -9,6 +9,53 @@ export type DropTarget =
   | { kind: 'group'; group: string; zone: 'center' | Side } // 拖到某個群組：中間 = 併入、邊緣 = 分割
   | { kind: 'tabs'; group: string; index: number } // 拖到分頁列：插入到指定位置
   | { kind: 'root'; side: Side }; // 拖到整個視窗邊緣：佔滿整高 / 整寬
+
+/**
+ * 每種面板的最小尺寸（px，不含分頁列）：小於這個，裡面的按鈕 / 欄位就會被擠出去。
+ * 同一組分頁取最大值（切換分頁時不會突然放不下）。
+ */
+export const PANEL_MIN: Record<PanelId, { w: number; h: number }> = {
+  media: { w: 220, h: 160 },
+  text: { w: 220, h: 160 },
+  transition: { w: 220, h: 160 },
+  effect: { w: 220, h: 160 },
+  mask: { w: 220, h: 160 },
+  remap: { w: 220, h: 160 },
+  inspector: { w: 320, h: 160 },
+  code: { w: 300, h: 160 },
+  ai: { w: 280, h: 200 },
+  preview: { w: 280, h: 220 },
+  timeline: { w: 420, h: 150 },
+};
+/** 分頁列高度 + 外框、分隔線寬度（跟 styles.css 一致） */
+const TABBAR = 29, BORDER = 2, SASH = 4;
+
+/** 節點的最小尺寸：分頁組 = 各分頁最大值 + 分頁列；分割 = 沿方向加總、另一方向取最大 */
+export function minSize(n: DockNode): { w: number; h: number } {
+  if (n.type === 'tabs') {
+    const ms = n.tabs.map((t) => PANEL_MIN[t] ?? { w: 120, h: 80 });
+    return { w: Math.max(...ms.map((m) => m.w)) + BORDER, h: Math.max(...ms.map((m) => m.h)) + TABBAR + BORDER };
+  }
+  const ks = n.children.map(minSize);
+  const gaps = SASH * (ks.length - 1);
+  return n.dir === 'row'
+    ? { w: ks.reduce((a, k) => a + k.w, 0) + gaps, h: Math.max(...ks.map((k) => k.h)) }
+    : { w: Math.max(...ks.map((k) => k.w)), h: ks.reduce((a, k) => a + k.h, 0) + gaps };
+}
+
+/**
+ * 拖分隔線：第 i、i+1 格的新比例（d = 拖動量 / 總長），兩格都不小於最小尺寸（mins：各格最小 px，total：總長 px）。
+ * 兩格加起來都放不下最小尺寸時，照最小尺寸的比例分。
+ */
+export function dragSash(sizes: number[], i: number, d: number, mins: number[], total: number): number[] {
+  const pair = sizes[i] + sizes[i + 1];
+  const lo = mins[i] / total, hi = pair - mins[i + 1] / total;
+  const a = lo <= hi ? Math.min(hi, Math.max(lo, sizes[i] + d)) : (pair * mins[i]) / (mins[i] + mins[i + 1] || 1);
+  const out = [...sizes];
+  out[i] = a;
+  out[i + 1] = pair - a;
+  return out;
+}
 
 let seq = 0;
 export const nid = () => `n${Date.now().toString(36)}${(seq++).toString(36)}`;

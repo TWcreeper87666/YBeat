@@ -268,7 +268,13 @@ kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--muted); }
 .tp:hover { background: var(--panel2); color: #fff; }
 .tp.play { background: #fff; color: #000; width: 34px; margin: 0 2px; }
 .tp.on { color: var(--accent2); }
-.tp-time { font: 12px ui-monospace, Consolas, monospace; margin-left: 8px; }
+.tp-time { font: 12px ui-monospace, Consolas, monospace; margin-left: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.transport-row > .tp { flex: none; }
+/* 預覽變窄時依序收起：總長度 → 上一格 / 下一格 → 回到開頭 / 到結尾 */
+.transport { container-type: inline-size; }
+@container (max-width: 400px) { .tp-total { display: none; } }
+@container (max-width: 360px) { .transport-row > .tp.step { display: none; } }
+@container (max-width: 310px) { .transport-row > .tp.skip { display: none; } }
 
 /* 浮動視窗 */
 .float-win { position: fixed; z-index: 60; background: var(--panel); border: 1px solid #3a3f4d; border-radius: 10px; box-shadow: 0 18px 60px #000c; display: flex; flex-direction: column; overflow: hidden; }
@@ -362,7 +368,12 @@ input[type=range] { -webkit-appearance: none; appearance: none; background: tran
 input[type=range]::-webkit-slider-runnable-track { height: 3px; background: #3a3f4d; border-radius: 2px; }
 input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -4.5px; border-radius: 50%; background: #d7dae3; border: none; }
 input[type=range]:hover::-webkit-slider-thumb { background: #fff; }
-.tl-toolbar input.zoom { width: 140px; margin-right: 4px; }
+.tl-toolbar input.zoom { width: auto; flex: 0 1 140px; min-width: 60px; margin-right: 4px; }
+/* 時間軸變窄：工具列只留圖示 */
+.timeline { container-type: inline-size; }
+@container (max-width: 560px) { .tl-toolbar .tb-lbl { display: none; } }
+.tl-toolbar > * { flex-shrink: 0; }
+.tl-toolbar > input.zoom { flex-shrink: 1; }
 
 body.drag-ok, body.drag-ok * { cursor: copy !important; }
 body.drag-no, body.drag-no * { cursor: grabbing !important; }
@@ -496,7 +507,7 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .ws-add { background: none; border: none; color: var(--muted); width: 22px; font-size: 14px; }
 .ws-add:hover { color: #fff; }
 
-.dock-root { position: relative; min-height: 0; min-width: 0; display: flex; background: var(--bg); padding: 4px; }
+.dock-root { position: relative; min-height: 0; min-width: 0; display: flex; background: var(--bg); padding: 4px; overflow: auto; } /* 視窗比所有面板的最小尺寸還小時可以捲動，不會把按鈕擠出去 */
 .dock-split { display: flex; flex: 1; min-width: 0; min-height: 0; }
 .dock-split.dir-row { flex-direction: row; }
 .dock-split.dir-col { flex-direction: column; }
@@ -524,7 +535,7 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .panel-host > * { flex: 1; min-height: 0; }
 .panel-inspector.drop-here { box-shadow: inset 0 0 0 2px var(--accent2); background: #29d3c20d; }
 /* 面板預設可以捲動（上面 .panel-host 的 overflow: auto；新增面板不用再加進任何清單）；只有自己處理大小的面板不捲 */
-.panel-preview, .panel-source, .panel-timeline, .panel-code, .panel-ai { overflow: hidden; }
+.panel-preview, .panel-timeline, .panel-code, .panel-ai { overflow: hidden; }
 .dock-drop { position: absolute; z-index: 30; background: #29d3c233; border: 2px solid var(--accent2); pointer-events: none; transition: all .08s; }
 .dock-drop.center { inset: 28px 0 0 0; }
 .dock-drop.left { left: 0; top: 28px; bottom: 0; width: 50%; }
@@ -535,6 +546,7 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .dock-empty, .dock-placeholder { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; color: var(--muted); }
 .timeline { border-top: none; height: 100%; }
 .preview-panel { height: 100%; }
+.preview-panel.src-on > .preview, .preview-panel.src-on > .transport { display: none; }
 
 /* ───────────── 素材庫 ───────────── */
 /* 素材庫（所有分頁 + 挑選視窗）：搜尋列、分類籤固定在上方，只有下面的清單捲動 */
@@ -594,6 +606,7 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .inspector-panel { min-height: 100%; }
 .ec { position: relative; font-size: 12px; overflow-x: clip; } /* 播放頭在最右邊時（含箭頭）不要撐出水平捲軸；clip 不會變成捲動容器，sticky 標題列照常 */
 /* 左欄（名稱 + 數值）固定寬度（px，至少 240px）：各處一致，面板變窄只縮右邊的關鍵影格時間軸 */
+.ec-section { scroll-margin-top: 34px; }
 .ec { --ec-col: max(240px, var(--ec-left, 300px)); }
 .ec-row { display: grid; grid-template-columns: var(--ec-col) 1fr; min-height: 26px; border-bottom: 1px solid #ffffff07; }
 .ec.plain .ec-row { grid-template-columns: 1fr; }
@@ -625,6 +638,8 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .ec-sec-title { font-weight: 600; color: #d7dae3; flex: 1; }
 .twirl { width: 12px; color: var(--muted); font-size: 10px; cursor: pointer; flex: none; text-align: center; }
 .twirl.small { opacity: .7; }
+/* 屬性列（可展開曲線）的 > 往內縮，跟區塊標題的 > 分開 */
+.ec-ch { padding-left: 22px; }
 .twirl.small:hover { opacity: 1; color: #fff; }
 .ec-watch { background: none; border: none; padding: 0; width: 18px; font-size: 12px; opacity: .35; filter: grayscale(1); flex: none; }
 .ec-watch.on { opacity: 1; filter: none; }
@@ -816,6 +831,8 @@ body.dock-dragging .panel-host { pointer-events: none; }
 .source-name { padding: 4px 10px 0; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .source-panel .scrub { margin: 4px 10px 0; }
 .source-panel .transport-row { padding: 4px 8px 6px; gap: 4px; display: flex; align-items: center; }
+.source-panel .transport-row > .tp, .source-panel .transport-row > .btn { flex: none; }
+.src-len { min-width: 0; overflow: hidden; white-space: nowrap; display: inline-flex; align-items: center; }
 .source-panel .btn.small-h { display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; font-size: 12px; }
 
 /* ───────── lucide 圖示 ───────── */
@@ -936,6 +953,13 @@ body.mask-dragging, body.mask-dragging * { user-select: none; }
 .tl-row.compact .av-strip { height: 35%; }
 @keyframes tl-flash { 0%, 100% { box-shadow: 0 0 0 0 #29d3c200; } 25%, 65% { box-shadow: 0 0 0 3px var(--accent2), 0 0 18px #29d3c2aa; } }
 .clip.flash, .fxitem.flash, .audioitem.flash { animation: tl-flash 1.2s ease 1; z-index: 4; }
+/* 屬性面板：捲到新加的區塊時亮一下 */
+@keyframes ec-flash { 0%, 100% { background-color: transparent; } 25%, 65% { background-color: #29d3c22e; } }
+@keyframes ec-flash-bar { 0%, 100% { box-shadow: inset 0 0 0 #29d3c200; } 25%, 65% { box-shadow: inset 3px 0 0 var(--accent2); } }
+.ec-row.ec-flash > .ec-left, .ec-row.ec-flash > .ec-right { animation: ec-flash 1.2s ease 1; }
+.ec-row.ec-section.ec-flash { animation: ec-flash-bar 1.2s ease 1; }
+.lib-item.current .lib-thumb { border-color: var(--accent2); box-shadow: 0 0 0 1px var(--accent2) inset; }
+.remap-pick-thumb { width: 28px; height: 16px; flex: none; border-radius: 3px; background: #111419 center / cover no-repeat; }
 
 /* 軌道按鈕固定用最小的尺寸，不跟著軌道高度變 */
 .track-btns { gap: 1px; flex: none; }

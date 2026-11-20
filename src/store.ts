@@ -7,7 +7,8 @@ import { clipSource, plainSpeed } from './engine/remap';
 import { DEFAULT_TRANSFORM, EASES, normalizeScale, type EaseName, type Fit, type Transform } from './engine/transform';
 import { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualRows, type TrackKind, type TrackState, type Tracks } from './engine/tracks';
 export { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualRows, type TrackKind, type TrackState, type Tracks };
-import { ANIM_PROPS, newKey, scaleKeyMap, splitKeys, type Ease, type Keyframe, type Keys } from './engine/keyframes';
+import { ANIM_PROPS, newKey, scaleKeyList, scaleKeyMap, splitKeys, type Ease, type Keyframe, type Keys } from './engine/keyframes';
+import { CURVE_ID, curveToKeys, parseCurve } from './engine/remapCurve';
 import { fitStart, groupFits, resolveShift, type Span } from './engine/overlap';
 import { DEFAULT_TEXT, TEXT_PRESETS, type TextStyle } from './engine/text';
 import type { Mask } from './engine/mask';
@@ -75,7 +76,8 @@ export interface Clip extends ItemBase {
   start: number;
   duration: number;
   in: number;
-  remap: { moduleId: string; params: ParamValues };
+  /** keys：曲線模式（remap-curve）的素材時間曲線（片段內時間 → 素材時間，相對 in） */
+  remap: { moduleId: string; params: ParamValues; keys?: Keyframe[] };
   transitionIn: TransitionRef | null;
   /** 片段特效（由上往下依序套用） */
   effects?: ClipFx[];
@@ -221,6 +223,8 @@ interface State {
   setActiveTrack(t: { kind: TrackKind; idx: number } | null): void;
   /** 在播放頭插入：放在選中的軌道；那裡被佔用就在旁邊新增一條軌道 */
   trackForInsert(kind: TrackKind, start: number, duration: number): number;
+  /** 素材插到播放頭：選中的軌道有空位就放那裡，沒有就在它下方新增一條軌道 */
+  insertMedia(mediaId: string, range?: { in: number; duration: number }): void;
   setRemap(clipId: string, moduleId: string): void;
   addEffect(moduleId: string, start: number, track?: number): void;
   addText(presetId: string, start?: number, track?: number): void;
@@ -363,7 +367,9 @@ export function stretchPatch(type: ItemType, it: AnyItem, anchor: number, s: num
   if (type === 'clip') {
     const c = it as Clip;
     const patch: Partial<Clip> = { ...base, keys: scaleKeyMap(c.keys, s) };
-    if (c.remap.moduleId === 'remap-speed') {
+    if (c.remap.moduleId === CURVE_ID && c.remap.keys) {
+      patch.remap = { ...c.remap, keys: scaleKeyList(c.remap.keys, s) }; // 曲線跟著拉長 = 整條變慢
+    } else if (c.remap.moduleId === 'remap-speed') {
       const sp = Number(c.remap.params.speed ?? 1);
       patch.remap = { ...c.remap, params: { ...c.remap.params, speed: Math.round((sp / s) * 1000) / 1000 } };
     } else patch.rate = Math.round(((c.rate ?? 1) / s) * 1000) / 1000;
@@ -375,6 +381,35 @@ export function stretchPatch(type: ItemType, it: AnyItem, anchor: number, s: num
   if (type === 'audio') return { ...base, rate: ((it as AudioClip).rate ?? 1) / s } as Partial<AudioClip>;
   const f = it as FxItem;
   return { ...base, keys: scaleKeyMap(f.keys, s) } as Partial<FxItem>;
+}
+
+/**
+ * 換變速模式：
+ * - 素材庫裡存的曲線（程式碼有 // @curve）→ 曲線模式，曲線依片段長度展開成關鍵影格
+ * - 切到「曲線」→ 從目前的速度（含倒放）開始；本來就是曲線就保留
+ * avail：素材從 in 之後還有幾秒；曲線會用掉更多素材（例如快轉）時整條等比例壓低，不會跑到素材結尾後定格
+ */
+export function remapFor(c: Clip, moduleId: string, modules: Module[], avail?: number): Clip['remap'] {
+  const curve = parseCurve(modules.find((m) => m.id === moduleId)?.code ?? '');
+  if (curve) {
+    let keys = curveToKeys(curve, c.duration);
+    const top = Math.max(...keys.map((k) => k.v));
+    if (avail !== undefined && avail > 0 && top > avail) keys = keys.map((k) => ({ ...k, v: (k.v * avail) / top }));
+    return { moduleId: CURVE_ID, params: {}, keys };
+  }
+  if (moduleId !== CURVE_ID) return { moduleId, params: {} };
+  if (c.remap.moduleId === CURVE_ID && c.remap.keys?.length) return c.remap;
+  const lin: Ease = [0, 0, 1, 1];
+  const sp = itemSpeed('clip', c) ?? 1;
+  const end = c.duration * sp;
+  const rev = c.remap.moduleId === 'remap-speed' && !!c.remap.params.reverse;
+  return { moduleId, params: {}, keys: rev ? [newKey(0, end, lin), newKey(c.duration, 0, lin)] : [newKey(0, 0, lin), newKey(c.duration, end, lin)] };
+}
+
+/** 影片片段從 in 之後還有幾秒素材（不是影片就 undefined） */
+export function srcAvail(c: Clip, media: Media[]): number | undefined {
+  const m = media.find((x) => x.id === c.mediaId);
+  return m && m.kind === 'video' ? Math.max(0, m.duration - c.in) : undefined;
 }
 
 /** 片段目前的整體速度（顯示用） */
@@ -445,6 +480,13 @@ export const useStore = create<State>()(
           const modules = new Map(s.modules.map((m) => [m.id, m]));
           const inB = media?.kind === 'video' && !media.missing ? clipSource(c, local, media, modules).src : c.in + local;
           const [ka, kb] = splitKeys(c.keys ?? {}, local);
+          // 曲線模式：曲線也切兩段；後段的 in 變了，素材時間要扣回來
+          let remapA = c.remap, remapB = c.remap;
+          if (c.remap.moduleId === CURVE_ID && c.remap.keys?.length) {
+            const [a, b] = splitKeys({ x: c.remap.keys }, local);
+            remapA = { ...c.remap, keys: a.x };
+            remapB = { ...c.remap, keys: b.x?.map((k) => ({ ...k, v: k.v - (inB - c.in) })) };
+          }
           const fxA: ClipFx[] = [], fxB: ClipFx[] = [];
           for (const f of c.effects ?? []) {
             const a: Record<string, Keyframe[]> = {}, b: Record<string, Keyframe[]> = {};
@@ -458,13 +500,13 @@ export const useStore = create<State>()(
           }
           if (c.effects) {
             return [
-              { ...c, duration: local, keys: ka, transitionOut: null, effects: fxA },
-              { ...c, id: uid(), start: t, duration: c.duration - local, in: inB, transitionIn: null, keys: kb, effects: fxB },
+              { ...c, duration: local, keys: ka, transitionOut: null, effects: fxA, remap: remapA },
+              { ...c, id: uid(), start: t, duration: c.duration - local, in: inB, transitionIn: null, keys: kb, effects: fxB, remap: remapB },
             ];
           }
           return [
-            { ...c, duration: local, keys: ka, transitionOut: null },
-            { ...c, id: uid(), start: t, duration: c.duration - local, in: inB, transitionIn: null, keys: kb },
+            { ...c, duration: local, keys: ka, transitionOut: null, remap: remapA },
+            { ...c, id: uid(), start: t, duration: c.duration - local, in: inB, transitionIn: null, keys: kb, remap: remapB },
           ];
         }
         if (type === 'audio') {
@@ -715,19 +757,42 @@ export const useStore = create<State>()(
           if (!get().tracks[kind].length) get().addTrack(kind);
           const s = get();
           const n = s.tracks[kind].length;
-          const at = s.activeTrack?.kind === kind ? Math.min(s.activeTrack.idx, n - 1) : kind === 'video' ? n - 1 : 0;
-          const lane = `${kind}:${at}`;
+          // 選中的軌道 → 選取的項目所在的軌道 → 預設（影片 = 最上層、其他 = 第一條）
+          const sel = s.selection;
+          const selIt = sel && isItem(sel.type) && KIND_OF[sel.type] === kind ? findItem(sel.type, sel.id) : undefined;
+          const at = s.activeTrack?.kind === kind ? Math.min(s.activeTrack.idx, n - 1) : selIt ? selIt.track : kind === 'video' ? n - 1 : 0;
           const spans = spansOf(s);
-          if (Math.abs(fitStart(spans, lane, start, duration) - start) < 1e-6) return at;
-          // 被佔用：在旁邊新增一條（影片 / 特效 = 上一層；音訊 = 下面一條）
-          s.addTrack(kind, at + 1);
-          set({ activeTrack: { kind, idx: at + 1 } });
-          return at + 1;
+          if (Math.abs(fitStart(spans, `${kind}:${at}`, start, duration) - start) < 1e-6) return at;
+          // 被佔用：在它「畫面上的下方」新增一條
+          let idx: number;
+          if (kind === 'audio') {
+            // 音訊軌依 row、再依編號排：插在它後面、同一個 row = 緊接在下面
+            idx = at + 1;
+            s.addTrack('audio', idx, undefined, s.tracks.audio[at]?.row);
+          } else {
+            // 影片 / 特效：編號越大越上層；上層顯示在上面（upperAt = top）時，下方 = 同一個編號（原本的往上推）
+            idx = s.upperAt === 'top' ? at : at + 1;
+            s.addTrack(kind, idx, kind === 'fx' ? fxLevel(s.tracks, at) : undefined);
+          }
+          set({ activeTrack: { kind, idx } });
+          return idx;
+        },
+
+        insertMedia: (mediaId, range) => {
+          const s = get();
+          const media = s.media.find((m) => m.id === mediaId);
+          if (!mediaUsable(media)) return;
+          if (media.kind === 'audio' && !media.hasAudio) return;
+          const kind: TrackKind = media.kind === 'audio' ? 'audio' : 'video';
+          const dur = range?.duration ?? (media.kind === 'image' ? 2 : media.duration);
+          const t = s.time;
+          const track = s.trackForInsert(kind, t, dur);
+          get().addClip(mediaId, t, track, range);
         },
 
         setRemap: (clipId, moduleId) =>
           set((s) => ({
-            clips: s.clips.map((c) => (c.id === clipId ? { ...c, remap: { moduleId, params: {} } } : c)),
+            clips: s.clips.map((c) => (c.id === clipId ? { ...c, remap: remapFor(c, moduleId, s.modules, srcAvail(c, s.media)) } : c)),
             selection: { type: 'clip', id: clipId },
             selected: [keyOf('clip', clipId)],
             leftTab: 'editor',
@@ -1382,6 +1447,8 @@ export const useStore = create<State>()(
         togglePlay: () => {
           const s = get();
           if (!s.playing && !s.loop && s.time >= projectDuration(s) - 1e-3) set({ time: 0 });
+          // 循環範圍（編輯視窗的片段）播完停在結尾：再按播放從頭開始
+          if (!s.playing && s.loop && s.time >= s.loop.b - 2 / 60) set({ time: s.loop.a });
           set({ playing: !s.playing });
         },
         setLoop: (l) => set(l ? { loop: l, time: l.a, playing: true } : { loop: null }),

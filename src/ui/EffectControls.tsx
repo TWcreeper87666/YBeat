@@ -1,5 +1,6 @@
 import { $t } from '../i18n';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { create } from 'zustand';
 import { useStore, type Clip, type ClipFx, type FxItem } from '../store';
 import {
   ANIM_PROPS, EASE_PRESETS, easeId, evalKeys, keyAt, newKey, sortKeys, upsertKey,
@@ -75,6 +76,7 @@ export function clipHost(clipId: string): Host | null {
     setKeys(ch, list, base) {
       const cur = useStore.getState().clips.find((x) => x.id === clipId);
       if (!cur) return;
+      if (ch === REMAP_CH) return setCurve(cur, list?.length ? sortKeys(list) : [newKey(0, base ?? 0, [0, 0, 1, 1])]);
       const cf = parseCfx(ch);
       if (cf) {
         const f = cur.effects?.find((x) => x.id === cf.fxId);
@@ -96,6 +98,7 @@ export function clipHost(clipId: string): Host | null {
     setBase(ch, v) {
       const cur = useStore.getState().clips.find((x) => x.id === clipId);
       if (!cur) return;
+      if (ch === REMAP_CH) return setCurve(cur, [newKey(0, v, [0, 0, 1, 1])]);
       const cf = parseCfx(ch);
       if (cf) {
         const f = cur.effects?.find((x) => x.id === cf.fxId);
@@ -104,6 +107,26 @@ export function clipHost(clipId: string): Host | null {
       }
       useStore.getState().updateClip(clipId, { transform: { ...cur.transform, [ch]: v } });
     },
+  };
+}
+
+/** 曲線變速的「素材時間」channel（存在 clip.remap.keys；沒有 key 時至少留一個 = 定格） */
+export const REMAP_CH = 'remap.time';
+const setCurve = (c: Clip, keys: Keyframe[]) => useStore.getState().updateClip(c.id, { remap: { ...c.remap, keys } });
+
+/** 曲線變速的 channel：素材時間（秒，相對片段的 in） */
+export function curveChannel(c: Clip, media: { duration: number } | undefined, local: number): Channel {
+  const keys = c.remap.keys ?? [];
+  return {
+    id: REMAP_CH,
+    label: $t('素材時間'),
+    value: keys.length ? evalKeys(keys, local) : 0,
+    keys,
+    def: 0,
+    step: 0.01,
+    min: 0,
+    max: media ? Math.max(0, media.duration - c.in) : undefined,
+    suffix: 's',
   };
 }
 
@@ -171,6 +194,7 @@ function currentKeys(owner: string, ch: string): Keyframe[] {
   const [type, id] = [owner.slice(0, owner.indexOf(':')), owner.slice(owner.indexOf(':') + 1)];
   if (type === 'clip') {
     const c = s.clips.find((x) => x.id === id);
+    if (ch === REMAP_CH) return c?.remap.keys ?? [];
     const cf = parseCfx(ch);
     if (cf) return c?.effects?.find((f) => f.id === cf.fxId)?.keys?.[cf.ch] ?? [];
     return c?.keys[ch as AnimProp] ?? [];
@@ -424,6 +448,24 @@ export function zoomView(v: View, anchor: number, factor: number, dur: number): 
   return clampView({ a: anchor - f * next, b: anchor - f * next + next }, dur);
 }
 
+/** 屬性面板要捲到哪個區塊（'@top' = 最上面）：套用東西到片段後捲到新加的那一塊 */
+const useEcFocus = create<{ id: string | null }>(() => ({ id: null }));
+export const focusSection = (id: string) => useEcFocus.setState({ id });
+
+/** 區塊（標題列 + 底下的屬性列）亮一下，跟時間軸新增片段時一樣 */
+function flashSection(head: Element) {
+  const rows: Element[] = [head];
+  for (let n = head.nextElementSibling; n && !n.classList.contains('ec-section') && !n.classList.contains('add-cfx-row'); n = n.nextElementSibling) {
+    if (n.classList.contains('ec-row')) rows.push(n);
+  }
+  for (const r of rows) {
+    r.classList.remove('ec-flash');
+    void (r as HTMLElement).offsetWidth;
+    r.classList.add('ec-flash');
+    setTimeout(() => r.classList.remove('ec-flash'), 1300);
+  }
+}
+
 export function EffectControls({ host, sections, title, extra }: { host: Host; sections: Section[]; title?: React.ReactNode; extra?: React.ReactNode }) {
   const time = useStore((s) => s.time);
   // 左欄固定寬度（px）：不管面板多寬、屬性分頁還是編輯視窗都一樣，面板變窄只縮右邊的時間軸
@@ -436,6 +478,22 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
   const tableRef = useRef<HTMLDivElement>(null);
   const S = useStore.getState();
   const dur = host.duration;
+  const focus = useEcFocus((s) => s.id);
+  useEffect(() => {
+    const root = tableRef.current;
+    if (!focus || !root || !root.isConnected) return;
+    if (focus === '@top') {
+      root.scrollIntoView({ block: 'start' });
+      return useEcFocus.setState({ id: null });
+    }
+    // 收合的區塊先展開，下一次畫完再捲
+    if (collapsed[focus]) return useLayout.getState().set({ ecCollapsed: { ...collapsed, [focus]: false } });
+    const el = root.querySelector(`[data-sec="${CSS.escape(focus)}"]`);
+    if (!el) return; // 區塊還沒畫出來：等下一次
+    el.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    flashSection(el);
+    useEcFocus.setState({ id: null });
+  });
   const local = time - host.start;
   const inside = local >= -1e-6 && local <= dur + 1e-6;
   const lc = Math.min(dur, Math.max(0, local));
@@ -711,7 +769,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
         const isCol = collapsed[sec.id];
         return (
           <React.Fragment key={sec.id}>
-            <div className="ec-row ec-section">
+            <div className="ec-row ec-section" data-sec={sec.id}>
               <div className="ec-left" onClick={() => toggleSection(sec.id)}>
                 <span className="twirl">{isCol ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span>
                 {sec.badge}
@@ -737,7 +795,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
                   return (
                     <React.Fragment key={ch.id}>
                       <div className={`ec-row ${animated ? 'anim' : ''}`}>
-                        <div className="ec-left">
+                        <div className="ec-left ec-ch">
                           <span className="twirl small" onClick={() => setOpen({ ...open, [rowKey]: !isOpen })} title={$t('展開曲線')}>
                             {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                           </span>
@@ -876,9 +934,29 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
   const seg = targetSegment(keys, selId, lc);
   const a = seg >= 0 ? keys[seg] : undefined;
   const b = seg >= 0 ? keys[seg + 1] : undefined;
-  const dv = a && b ? b.v - a.v : 0;
-  const dt = a && b ? b.t - a.t : 0;
-  const ez = a && a.ease !== 'hold' && Math.abs(dv) > 1e-9 ? (a.ease as Bez) : null;
+
+  // 點關鍵影格：顯示它左右兩邊的把手（進入 = 前一段的後把手、離開 = 這一段的前把手）
+  // 點曲線：顯示那一段的兩個把手
+  const [keyMode, setKeyMode] = useState<string | null>(null);
+  const ki = keyMode && keyMode === selId ? keys.findIndex((k) => k.id === keyMode) : -1;
+  type H = { seg: number; which: 0 | 1 };
+  const handles: H[] = ki >= 0 ? [{ seg: ki - 1, which: 1 as const }, { seg: ki, which: 0 as const }] : seg >= 0 ? [{ seg, which: 0 }, { seg, which: 1 }] : [];
+  /** 把手的位置：anchor = 它連著的 key、p = 把手本身；這段是定格 / 平的就沒有把手 */
+  const handleAt = ({ seg: i, which }: H) => {
+    const p = keys[i], q = keys[i + 1];
+    if (!p || !q || p.ease === 'hold' || Math.abs(q.v - p.v) < 1e-9) return null;
+    const e = p.ease as Bez, sdt = q.t - p.t, sdv = q.v - p.v;
+    const anchor = which === 0 ? p : q;
+    const ax = X(anchor.t), ay = Y(anchor.v);
+    let x = X(p.t + e[which * 2] * sdt), y = Y(p.v + e[which * 2 + 1] * sdv);
+    // 把手跟 key 疊在一起（例如線性）會點不到：畫在這段的 1/3 處（一拖就照滑鼠位置算）
+    if (Math.hypot(x - ax, y - ay) < 10) {
+      const f = which === 0 ? 1 / 3 : 2 / 3;
+      x = X(p.t + f * sdt);
+      y = Y(p.v + f * sdv);
+    }
+    return { ax, ay, x, y };
+  };
 
   // 曲線：取樣點數跟寬度成正比（每 2px 一點），只在 key / 範圍 / 寬度改變時重算
   const pts = useMemo(() => {
@@ -912,6 +990,7 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
   const dragPoint = (e: React.PointerEvent, k: Keyframe) => {
     e.preventDefault();
     e.stopPropagation();
+    setKeyMode(k.id);
     useKeySel.setState({ owner: host.owner, keys: [{ ch: ch.id, id: k.id }], sel: { owner: host.owner, ch: ch.id, id: k.id }, focus: true });
     frozen.current = range;
     const p0 = pt(e);
@@ -926,10 +1005,12 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
     );
   };
 
-  const dragHandle = (e: React.PointerEvent, which: 0 | 1) => {
+  const dragHandle = (e: React.PointerEvent, { seg: i, which }: H) => {
     e.preventDefault();
     e.stopPropagation();
+    const a = keys[i], b = keys[i + 1];
     if (!a || !b) return;
+    const dt = b.t - a.t, dv = b.v - a.v;
     frozen.current = range;
     listen(
       (ev) => {
@@ -950,6 +1031,7 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
   /** 點曲線：選取那一段；雙擊：在那裡加關鍵影格 */
   const onDown = (e: React.PointerEvent) => {
     const t = T(pt(e).x);
+    setKeyMode(null);
     if (keys.length < 2) return useKeySel.setState({ owner: null, keys: [], sel: null });
     let i = keys.findIndex((k, j) => j < keys.length - 1 && t >= k.t && t < keys[j + 1].t);
     if (i < 0) i = t < keys[0].t ? 0 : keys.length - 2;
@@ -986,14 +1068,6 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
           <polyline className={`cg-curve ${keys.length ? '' : 'flat'}`} points={pts} />
           {segPts && <polyline className="cg-seg" points={segPts} />}
           <line className="cg-playhead" x1={X(lc)} x2={X(lc)} y1={0} y2={GH} />
-          {ez && a && (
-            <g className="cg-handles">
-              <line x1={X(a.t)} y1={Y(a.v)} x2={X(a.t + ez[0] * dt)} y2={Y(a.v + ez[1] * dv)} />
-              <line x1={X(b!.t)} y1={Y(b!.v)} x2={X(a.t + ez[2] * dt)} y2={Y(a.v + ez[3] * dv)} />
-              <circle r={5} cx={X(a.t + ez[0] * dt)} cy={Y(a.v + ez[1] * dv)} onPointerDown={(e) => dragHandle(e, 0)} />
-              <circle r={5} cx={X(a.t + ez[2] * dt)} cy={Y(a.v + ez[3] * dv)} onPointerDown={(e) => dragHandle(e, 1)} />
-            </g>
-          )}
           {keys.map((k) => (
             <rect
               key={k.id}
@@ -1006,6 +1080,17 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
               onPointerDown={(e) => dragPoint(e, k)}
             />
           ))}
+          <g className="cg-handles">
+            {handles.map((h) => {
+              const p = handleAt(h);
+              return p && (
+                <React.Fragment key={`${h.seg}.${h.which}`}>
+                  <line x1={p.ax} y1={p.ay} x2={p.x} y2={p.y} />
+                  <circle r={6} cx={p.x} cy={p.y} onPointerDown={(e) => dragHandle(e, h)} />
+                </React.Fragment>
+              );
+            })}
+          </g>
         </svg>
       </div>
     </div>

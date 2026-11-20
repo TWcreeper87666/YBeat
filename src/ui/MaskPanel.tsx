@@ -6,7 +6,7 @@ import { DEFAULT_MASK, type Mask, type MaskShape } from '../engine/mask';
 import { allShapes, shapeFromImage, shapeInfo, useMaskLib, type ShapeInfo } from '../engine/maskShapes';
 import { pickFiles } from '../engine/media';
 import { CLIP_MASK_ID } from '../modules/extra';
-import { FavButton, LibFilter, LibToolbar, match } from './Library';
+import { FavButton, LibFilter, LibToolbar, match, onBlank } from './Library';
 import { startLibraryDrag } from './dnd';
 import { cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { openShapeDrawer } from './ShapeDrawer';
@@ -238,7 +238,7 @@ export function MaskLibrary({ onPick, current, allowNone, drawKey }: { onPick?: 
         <button className="lib-add" title={$t('匯入自訂形狀（PNG / SVG 圖片）')} onClick={importShapes}><Plus size={15} /></button>
       </LibToolbar>
       <LibFilter id="mask" cats={cats} cur={cat} set={setCat} />
-      <div className="lib-body">
+      <div className="lib-body" onDoubleClick={onBlank(onPick ? undefined : () => openShapeDrawer({ target: drawKey ?? drawKeyForSelection() }))}>
         {list.length === 0 && <p className="muted small center">{empty}</p>}
         <div className={view === 'grid' ? 'lib-grid shapes' : 'lib-list'}>
           {allowNone && cat === 'all' && !q && (

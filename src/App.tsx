@@ -6,11 +6,12 @@ import { FORMATS, formatLabel, projectDuration, useStore } from './store';
 import { InspectorPanel, MediaPanel, ModulePanel, TextPanel } from './ui/LeftPanel';
 import { isTextField } from './ui/focus';
 import { MaskPanel } from './ui/MaskPanel';
+import { navEdge, navItem, navRow } from './ui/trackNav';
 import { CodePanel } from './ui/CodePanel';
 import { AiPanel } from './ui/AiPanel';
 import { PickerHost } from './ui/Library';
 import { Timeline, mergeOrHint } from './ui/Timeline';
-import { SourcePanel, sourceHotkey } from './ui/SourcePanel';
+import { closeSource, sourceHotkey } from './ui/SourcePanel';
 import { FloatingWindow, PreviewPanel, Slot } from './ui/PreviewPanel';
 import { DockRoot, PANELS, layoutMenuItems, panelMenuItems, useDock, type PanelId } from './ui/Dock';
 import { ConfirmHost, DragGhost, MenuBar, MenuHost, Toasts } from './ui/Menu';
@@ -413,6 +414,10 @@ function onKey(e: KeyboardEvent) {
     if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelectedKey(); return; }
   }
   if (mod) {
+    // 時間軸：Ctrl+← / → 換片段、加 Shift 延伸選取；Ctrl+Home / End 頭尾；Ctrl+↑ / ↓ 換軌道
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); return navItem(e.key === 'ArrowLeft' ? -1 : 1, e.shiftKey); }
+    if (e.key === 'Home' || e.key === 'End') { e.preventDefault(); return navEdge(e.key === 'Home' ? 'first' : 'last', e.shiftKey); }
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); return navRow(e.key === 'ArrowUp' ? -1 : 1); }
     if (k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
     else if (k === 'y') { e.preventDefault(); redo(); }
     else if (k === 'c') s.copy();
@@ -439,12 +444,13 @@ function onKey(e: KeyboardEvent) {
     case ' ': e.preventDefault(); s.togglePlay(); break;
     case 'Delete': case 'Backspace': e.preventDefault(); s.removeSelection(e.altKey ? 'all' : e.shiftKey); break;
     case 'Home': { e.preventDefault(); const r = selRange(); s.setTime(r ? r.a : 0); revealPlayhead(); break; }
-    case 'End': { e.preventDefault(); const r = selRange(); s.setTime(r ? r.b - 1 / FPS : projectDuration(s)); revealPlayhead(); break; }
+    // 跟 Premiere / DaVinci 一樣停在片段的出點（剪接點上），不是最後一格
+    case 'End': { e.preventDefault(); const r = selRange(); s.setTime(r ? r.b : projectDuration(s)); revealPlayhead(); break; }
     case 'ArrowLeft': e.preventDefault(); s.setTime(s.time - (e.shiftKey ? 1 : frame)); break;
     case 'ArrowRight': e.preventDefault(); s.setTime(s.time + (e.shiftKey ? 1 : frame)); break;
     case 'ArrowUp': { e.preventDefault(); const p = editPoints().filter((t) => t < s.time - 1e-3); if (p.length) s.setTime(p[p.length - 1]); break; }
     case 'ArrowDown': { e.preventDefault(); const p = editPoints().find((t) => t > s.time + 1e-3); if (p !== undefined) s.setTime(p); break; }
-    case 'Escape': stopPreviewFx(); s.setLoop(null); s.select(null); break;
+    case 'Escape': stopPreviewFx(); closeSource(); s.setLoop(null); s.select(null); break;
     case 'F1': e.preventDefault(); openDialog('shortcuts'); break;
     case 'Enter': if (s.selection?.type === 'clip' || s.selection?.type === 'effect') { e.preventDefault(); openEditorWindow(); } break;
     case '=': case '+': s.setPps(s.pps * 1.25); break;
@@ -522,7 +528,6 @@ export default function App() {
       <EditorWindow hosts={hosts} />
       {createPortal(<MediaPanel />, hosts.media)}
       {createPortal(<TextPanel />, hosts.text)}
-      {createPortal(<SourcePanel />, hosts.source)}
       {createPortal(<ModulePanel kind="transition" />, hosts.transition)}
       {createPortal(<ModulePanel kind="effect" />, hosts.effect)}
       {createPortal(<MaskPanel />, hosts.mask)}
