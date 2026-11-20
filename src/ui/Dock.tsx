@@ -17,6 +17,7 @@ export type { PanelId };
 export const PANELS: { id: PanelId; title: string }[] = [
   { id: 'media', title: $t('素材') },
   { id: 'text', title: $t('文字') },
+  { id: 'lyrics', title: $t('字幕／歌詞') },
   { id: 'transition', title: $t('轉場') },
   { id: 'effect', title: $t('特效') },
   { id: 'mask', title: $t('遮罩') },
@@ -28,7 +29,7 @@ export const PANELS: { id: PanelId; title: string }[] = [
   { id: 'timeline', title: $t('時間軸') },
 ];
 const TITLE = Object.fromEntries(PANELS.map((p) => [p.id, p.title])) as Record<PanelId, string>;
-const LIB: PanelId[] = ['media', 'text', 'transition', 'effect', 'mask', 'remap'];
+const LIB: PanelId[] = ['media', 'text', 'lyrics', 'transition', 'effect', 'mask', 'remap'];
 
 /** 內建版面 */
 export const PRESETS: { id: string; name: string; build: () => DockNode }[] = [
@@ -131,7 +132,11 @@ export const useDock = create<DockState>()(
           l && !panelsIn(l).includes('ai')
             ? mapTabs(l, (t) => (t.tabs.includes('code') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'code' ? ['code', 'ai'] : [x])) as PanelId[] } : t))
             : l;
-        const fix = (l: DockNode | null | undefined) => addAi(addCode(addMask(addText(dropSource(l)))));
+        const addLyrics = (l: DockNode | null | undefined) =>
+          l && !panelsIn(l).includes('lyrics')
+            ? mapTabs(l, (t) => (t.tabs.includes('text') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'text' ? ['text', 'lyrics'] : [x])) as PanelId[] } : t))
+            : l;
+        const fix = (l: DockNode | null | undefined) => addLyrics(addAi(addCode(addMask(addText(dropSource(l))))));
         return {
           ...current,
           ...p,

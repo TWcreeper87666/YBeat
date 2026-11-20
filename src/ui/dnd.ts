@@ -5,9 +5,10 @@ import { parseDuration } from '../engine/params';
 import { addMediaBlob, colorMedia } from '../engine/media';
 import { fitInGap, fitStart } from '../engine/overlap';
 import { stillDur } from '../prefs';
+import { applyMediaBatch, planMediaBatch } from '../engine/mediaBatch';
 import { TEXT_PRESETS } from '../engine/text';
 import { setClipMask, setEffectMask } from './MaskPanel';
-import { confirmDialog, toast, useDrag, useSnapLine, type DragPayload, type DragState, type DropTarget } from './uiStore';
+import { confirmDialog, revealSelection, toast, useDrag, useSnapLine, type DragPayload, type DragState, type DropTarget } from './uiStore';
 
 const SNAP_PX = 10;
 
@@ -26,6 +27,12 @@ function laneDuration(payload: DragPayload): { dur: number; label: string; accep
       label: m.name,
       accepts: (k) => k === 'video' || (k === 'audio' && m.hasAudio),
     };
+  }
+  if (payload.kind === 'mediaBatch') {
+    const items = payload.ids.map((id) => s.media.find((m) => m.id === id)).filter(mediaUsable);
+    if (!items.length) return null;
+    const dur = items.reduce((n, m) => n + (m.kind === 'image' ? stillDur() : m.duration), 0);
+    return { dur, label: $t('{0} 個素材', items.length), accepts: (k) => items.some((m) => (m.kind === 'audio' ? 'audio' : 'video') === k) };
   }
   if (payload.kind === 'module' && payload.moduleKind === 'effect') {
     const m = s.modules.find((x) => x.id === payload.id);
@@ -128,12 +135,18 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
   }
   const lane = laneEl.dataset.laneKind as TrackKind;
   const idx = Number(laneEl.dataset.laneIdx);
+  if (s.tracks[lane][idx]?.locked) return null;
   const info = laneDuration(payload);
   if (!info || !info.accepts(lane)) return null;
 
   // 時間：游標位置，吸附到同軌片段的頭尾
   const pps = s.pps;
   let time = Math.max(0, (x - laneEl.getBoundingClientRect().left) / pps);
+  if (payload.kind === 'mediaBatch') {
+    const items = planMediaBatch(payload.ids, time, { kind: lane, track: idx });
+    if (!items?.length) return null;
+    return { kind: 'lane', lane, idx, time: items[0].start, duration: info.dur, label: info.label, items };
+  }
   const list = lane === 'video' ? s.clips : lane === 'fx' ? s.effects : s.audios;
   const pts = [0, s.time];
   for (const it of list) if (it.track === idx) pts.push(it.start, it.start + it.duration, it.start - info.dur);
@@ -155,6 +168,12 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
   const s = useStore.getState();
   if (!target) {
     if (files) await importMany(files);
+    return;
+  }
+  if (payload.kind === 'mediaBatch') {
+    if (target.kind !== 'lane') return;
+    const plan = target.items ?? planMediaBatch(payload.ids, target.time, { kind: target.lane, track: target.idx });
+    if (plan?.length && applyMediaBatch(plan)) revealSelection();
     return;
   }
   if (payload.kind === 'mask') {

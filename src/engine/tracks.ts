@@ -4,6 +4,7 @@ export type TrackKind = 'video' | 'fx' | 'audio';
 export interface TrackState {
   hidden?: boolean;
   muted?: boolean;
+  locked?: boolean;
   /** 軌道高度（px），沒設定就用預設 */
   height?: number;
   /** 特效軌：下面有幾條影片軌（特效只作用在它下面的影片軌，跟調整圖層一樣）；沒設定 = 最上層 */

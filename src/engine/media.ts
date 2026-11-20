@@ -3,6 +3,7 @@ import { $t } from '../i18n';
 import { uid, useStore, type Media } from '../store';
 import { PEAKS_PER_SEC, computePeaks, getAudioBuffer } from './audio';
 import { deleteMediaBlob, saveMediaBlob } from './project';
+import { detachedMedia, detachedMediaOrder } from './detachedMedia';
 import { toast } from '../ui/uiStore';
 
 function once(el: HTMLElement, ev: string) {
@@ -140,7 +141,7 @@ export async function colorMedia(hex: string): Promise<Media | null> {
 }
 
 /** 從素材庫移除：沒被使用就直接刪；被使用就變成「遺失」狀態，片段保留 */
-export function removeMedia(id: string) {
+export function removeMedia(id: string, quiet = false) {
   const s = useStore.getState();
   const m = s.media.find((x) => x.id === id);
   if (!m) return;
@@ -150,8 +151,44 @@ export function removeMedia(id: string) {
   dropMatte(id);
   if (used) {
     useStore.setState({ media: s.media.map((x) => (x.id === id ? { ...x, url: '', thumb: x.kind === 'image' ? '' : x.thumb, missing: true } : x)) });
-    toast($t('「{0}」已移除，使用中的片段標記為遺失', m.name));
+    if (!quiet) toast($t('「{0}」已移除，使用中的片段標記為遺失', m.name));
   } else {
     useStore.setState({ media: s.media.filter((x) => x.id !== id) });
   }
 }
+
+/** 從素材庫與時間軸一起移除。保留 Blob 直到復原紀錄失效，Ctrl+Z 可還原。 */
+export function removeMediaEverywhere(ids: string[]): boolean {
+  const s = useStore.getState();
+  const removing = new Set(ids);
+  if (s.clips.some((c) => removing.has(c.mediaId) && s.tracks.video[c.track]?.locked)
+    || s.audios.some((a) => removing.has(a.mediaId) && s.tracks.audio[a.track]?.locked)) return false;
+  const clips = s.clips.filter((c) => !removing.has(c.mediaId));
+  const audios = s.audios.filter((a) => !removing.has(a.mediaId));
+  s.media.forEach((m, i) => { if (removing.has(m.id)) { detachedMedia.set(m.id, m); detachedMediaOrder.set(m.id, i); } });
+  const idsLeft = new Set([...clips.map((c) => c.id), ...audios.map((a) => a.id), ...s.effects.map((e) => e.id)]);
+  useStore.setState({
+    media: s.media.filter((m) => !removing.has(m.id)), clips, audios,
+    selected: s.selected.filter((k) => idsLeft.has(k.slice(k.indexOf(':') + 1))),
+    selection: s.selection && 'id' in s.selection && !idsLeft.has(s.selection.id) && s.selection.type !== 'module' ? null : s.selection,
+  });
+  return true;
+}
+
+/** 時間軸最後一個引用消失時，只自動移除來源遺失的素材；復原時重新顯示。 */
+useStore.subscribe((s, prev) => {
+  if (s.clips === prev.clips && s.audios === prev.audios) return;
+  const before = new Set([...prev.clips.map((c) => c.mediaId), ...prev.audios.map((a) => a.mediaId)]);
+  const after = new Set([...s.clips.map((c) => c.mediaId), ...s.audios.map((a) => a.mediaId)]);
+  const gone = s.media.filter((m) => m.missing && before.has(m.id) && !after.has(m.id));
+  const back = [...after].filter((id) => !s.media.some((m) => m.id === id) && detachedMedia.has(id)).map((id) => detachedMedia.get(id)!);
+  if (!gone.length && !back.length) return;
+  for (const m of gone) { detachedMedia.set(m.id, m); detachedMediaOrder.set(m.id, s.media.findIndex((x) => x.id === m.id)); }
+  const media = s.media.filter((m) => !gone.some((g) => g.id === m.id));
+  for (const m of back.sort((a, b) => (detachedMediaOrder.get(a.id) ?? 0) - (detachedMediaOrder.get(b.id) ?? 0))) {
+    media.splice(Math.min(media.length, detachedMediaOrder.get(m.id) ?? media.length), 0, m);
+    detachedMedia.delete(m.id);
+    detachedMediaOrder.delete(m.id);
+  }
+  useStore.setState({ media });
+});

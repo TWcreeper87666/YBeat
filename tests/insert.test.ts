@@ -186,5 +186,21 @@ for (const upperAt of ['bottom', 'top'] as const) {
     && useStore.getState().clips.find((c) => c.id === 'next')?.start === 5, '再製插入：固定接在原片段尾端並後移同軌片段');
 }
 
+// 拉長右邊緣的插入只騰出新增的長度，保留原片段前面的時間。
+{
+  const source = clipAt('source', 0, 0, 4);
+  const next = clipAt('next', 0, 4, 3);
+  const other = clipAt('other', 1, 5, 2);
+  const reset = () => useStore.setState({ clips: [{ ...source, duration: 6 } as any, next as any, other as any], audios: [], effects: [], tracks: { video: [{}, {}], fx: [], audio: [] } });
+  reset();
+  useStore.getState().resolveTimelineDrop(['clip:source'], 'insert', { start: 4, length: 2 });
+  ok(useStore.getState().clips.find((c) => c.id === 'next')?.start === 6
+    && useStore.getState().clips.find((c) => c.id === 'other')?.start === 5, '拉長右邊緣插入：同軌只從原結尾後推動，其他軌不動');
+  reset();
+  useStore.getState().resolveTimelineDrop(['clip:source'], 'insertAll', { start: 4, length: 2 });
+  ok(useStore.getState().clips.find((c) => c.id === 'next')?.start === 6
+    && useStore.getState().clips.find((c) => c.id === 'other')?.start === 7, '拉長右邊緣全軌插入：其他軌也從原結尾後推動');
+}
+
 console.log(fails ? `\n${fails} 項失敗` : '\n全部通過');
 if (fails) process.exit(1);

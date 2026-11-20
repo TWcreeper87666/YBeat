@@ -2,6 +2,7 @@ import { $t } from '../i18n';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { TrackKind } from '../store';
+import type { MediaPlacement } from '../engine/mediaBatch';
 
 // ───────────── 版面（記住在 localStorage）─────────────
 
@@ -110,6 +111,7 @@ export function confirmDialog(o: { title: string; message: string; ok?: string; 
 
 export type DragPayload =
   | { kind: 'media'; id: string }
+  | { kind: 'mediaBatch'; ids: string[] }
   | { kind: 'module'; id: string; moduleKind: 'effect' | 'transition' | 'remap' }
   | { kind: 'color'; color: string }
   | { kind: 'text'; preset: string }
@@ -117,7 +119,7 @@ export type DragPayload =
   | { kind: 'files'; count: number };
 
 export type DropTarget =
-  | { kind: 'lane'; lane: TrackKind; idx: number; time: number; duration: number; label: string }
+  | { kind: 'lane'; lane: TrackKind; idx: number; time: number; duration: number; label: string; items?: MediaPlacement[] }
   | { kind: 'clip'; clipId: string; action: 'transition' | 'transitionOut' | 'remap' | 'relink' | 'replace' | 'effect' | 'mask'; valid: boolean }
   | { kind: 'effect'; fxId: string }
   | null;

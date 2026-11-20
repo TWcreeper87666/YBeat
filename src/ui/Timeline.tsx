@@ -1,7 +1,7 @@
 import { matteCoverage, requestMatte, useMatte } from '../engine/matte';
 import { openEditorWindow } from './EditorWindow';
 import { $t, displayName } from '../i18n';
-import { ArrowLeftRight, ArrowRightLeft, CircleDashed, Eye, EyeOff, FastForward, Film, Gauge, Magnet, Minus, MoveHorizontal, Music, Plus, Redo2, Replace, Scissors, Sparkles, TriangleAlert, Undo2, Volume2, VolumeX, Group, Link2, ArrowRightFromLine, ArrowRightToLine, Drum, ChevronDown } from 'lucide-react';
+import { ArrowLeftRight, ArrowRightLeft, CircleDashed, Eye, EyeOff, FastForward, Film, Gauge, Magnet, Minus, MoveHorizontal, Music, Plus, Redo2, Replace, Scissors, Sparkles, TriangleAlert, Undo2, Volume2, VolumeX, Group, Link2, ArrowRightFromLine, ArrowRightToLine, Drum, ChevronDown, Lock, Unlock } from 'lucide-react';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { create } from 'zustand';
 import {
@@ -11,7 +11,7 @@ import {
   type AnyItem, type AudioClip, type Clip, type DropFit, type FxItem, type ItemType, type Media, type PasteResult, type PlacementGhost, type TrackKind, type Tracks, type TimelineDropMode,
 } from '../store';
 import { sortClips, transitionWindow, makeCtx, type TrWindow } from '../engine/renderer';
-import { groupFits, nextStart, prevEnd, spansOverlap, type Span } from '../engine/overlap';
+import { nextStart, prevEnd, spansOverlap, type Span } from '../engine/overlap';
 import { plainSpeed } from '../engine/remap';
 import { setScrubbing } from '../engine/audio';
 import { PPS_MAX, PPS_MIN, rulerLabel, rulerSteps, snapFrame } from '../engine/rulerTicks';
@@ -24,7 +24,6 @@ import { closeSource } from './SourcePanel';
 import { beatSnapPoints, fitToBeats, getBeats, splitAtBeats, useBeats } from './beatGrid';
 
 const SNAP_PX = 8;
-const LABEL_W = 116;
 /** 時間軸預設長度（秒）；專案比這個長才依專案長度延伸 */
 const MIN_LEN = 60;
 const NAMES: Record<TrackKind, string> = { fx: $t('特效'), video: $t('影片'), audio: $t('音訊') };
@@ -195,10 +194,14 @@ function stretchItems(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 
   const sp0 = itemSpeed(type, it) ?? 1;
   const x0 = e.clientX;
   const keys = group.map((g) => keyOf(g.type, g.it.id));
-  const others = spansOf(st, new Set(keys));
+  const movingKeys = new Set(keys);
+  let moved = false;
   document.body.classList.add('stretching');
   listen(
     (ev) => {
+      if (!moved && Math.abs(ev.clientX - x0) < 3) return;
+      if (!moved) beginHistoryTransaction();
+      moved = true;
       const sn = nearest(edge0 + (ev.clientX - x0) / pps, pts, pps);
       showSnap(sn.d !== Infinity ? sn.v : null);
       const edge = sn.v;
@@ -211,15 +214,52 @@ function stretchItems(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 
         patches[keyOf(g.type, g.it.id)] = p;
         spans.push({ lane: laneOf(g.type, g.it.track), start: p.start!, duration: p.duration! });
       }
-      // 拉長後會壓到同軌其他片段就停在上一個可以的位置
-      if (!groupFits(spans, others, 0)) return;
       useStore.getState().patchItems(patches);
+      const affected: Record<string, { left: number; width: number }> = {};
+      const now = useStore.getState();
+      for (const t of ['clip', 'effect', 'audio'] as ItemType[]) for (const other of now[LIST[t]] as AnyItem[]) {
+        const otherKey = keyOf(t, other.id);
+        if (movingKeys.has(otherKey)) continue;
+        const target = { lane: laneOf(t, other.track), start: other.start, duration: other.duration };
+        for (const span of spans) {
+          if (!spansOverlap(span, target)) continue;
+          const left = Math.max(span.start, other.start);
+          const right = Math.min(span.start + span.duration, other.start + other.duration);
+          affected[otherKey] = { left: (left - other.start) * pps, width: (right - left) * pps };
+        }
+      }
+      useMovePreview.setState({ moving: movingKeys, affected });
       useOp.setState({ op: { key, kind: 'stretch', text: `${(sp0 / sc).toFixed(2)}×`, keys } });
     },
-    () => {
+    (ev) => {
       showSnap(null);
       document.body.classList.remove('stretching');
       useOp.setState({ op: null });
+      if (!moved) return;
+      if (!Object.keys(useMovePreview.getState().affected).length) {
+        endHistoryTransaction(true);
+        clearMovePreview();
+        return;
+      }
+      const owner = `timeline-stretch-${Date.now()}`;
+      let decided = false;
+      const finish = (mode?: 'overwrite' | 'insert' | 'insertAll') => {
+        if (decided) return;
+        decided = true;
+        unsub();
+        if (mode) useStore.getState().resolveTimelineDrop(keys, mode);
+        endHistoryTransaction(!!mode);
+        clearMovePreview();
+      };
+      const unsub = useMenu.subscribe((s) => {
+        if (s.menu?.owner !== owner) queueMicrotask(() => { if (useMenu.getState().menu?.owner !== owner) finish(); });
+      });
+      openPlacementMenu(ev.clientX, ev.clientY, [
+        { label: $t('覆蓋'), action: () => finish('overwrite') },
+        { label: $t('插入'), action: () => finish('insert') },
+        { label: $t('插入並移動所有軌道'), action: () => finish('insertAll') },
+        { label: $t('取消'), action: () => finish() },
+      ], owner);
     },
   );
 }
@@ -245,6 +285,7 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
   if (e.button !== 0) return;
   e.stopPropagation();
   e.preventDefault();
+  if (useStore.getState().tracks[KIND_OF[type]][it.track]?.locked) return;
   stopPreviewFx();
   if (e.altKey && (type === 'clip' || type === 'audio')) return slipItem(e, type, it);
   const S = useStore.getState();
@@ -261,6 +302,7 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
     .map(parseKey)
     .map(({ type: t, id }) => ({ type: t, it: (st[LIST[t]] as AnyItem[]).find((x) => x.id === id)! }))
     .filter((g) => g.it);
+  if (group.some((g) => st.tracks[KIND_OF[g.type]][g.it.track]?.locked)) return;
   const pps = st.pps;
   // 吸附點不含播放頭（播放頭會跟著片段走）
   const pts = snapPoints(new Set(st.selected)).slice(0);
@@ -366,41 +408,138 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
   if (e.button !== 0) return;
   e.stopPropagation();
   e.preventDefault();
-  if (e.ctrlKey || e.metaKey) return stretchItems(e, type, it, side);
   const S = useStore.getState();
+  const key = keyOf(type, it.id);
+  if ((e.ctrlKey || e.metaKey) && (type !== 'clip' || (S.selected.includes(key) && S.selected.length > 1))) return stretchItems(e, type, it, side);
   S.select({ type, id: it.id });
   const pps = S.pps;
   const pts = snapPoints(new Set([keyOf(type, it.id)]));
   const end = it.start + it.duration;
   const inT = (it as Clip).in ?? 0;
   const x0 = e.clientX;
-  // 不能蓋到同軌的前後片段
-  const others = spansOf(S, new Set([keyOf(type, it.id)]));
+  const movingKeys = new Set([key]);
+  if (it.link) {
+    for (const t of ['clip', 'audio'] as ItemType[]) {
+      for (const linked of S[LIST[t]] as AnyItem[]) if (linked.link === it.link) movingKeys.add(keyOf(t, linked.id));
+    }
+  }
+  const timeBeforeDrag = S.time;
+  const others = spansOf(S, movingKeys);
   const lane = laneOf(type, it.track);
   const limitR = nextStart(others, lane, end);
   const limitL = prevEnd(others, lane, it.start);
-  listen((ev) => {
+  let moved = false;
+  let speedMode = false;
+  let lastClientX = x0;
+  const move = (ev: { clientX: number; ctrlKey: boolean; metaKey: boolean }) => {
+    lastClientX = ev.clientX;
+    if (!moved && Math.abs(ev.clientX - x0) < 3) return;
+    if (!moved) beginHistoryTransaction();
+    moved = true;
     const d = (ev.clientX - x0) / pps;
     let patch: Partial<Clip>;
-    if (side === 'r') {
+    const speeding = type === 'clip' && (ev.ctrlKey || ev.metaKey);
+    if (speeding) {
+      const anchor = side === 'r' ? it.start : end;
+      const edge0 = side === 'r' ? end : it.start;
+      const sn = nearest(edge0 + d, pts, pps);
+      showSnap(sn.d !== Infinity ? sn.v : null);
+      const edge = side === 'r' ? Math.max(anchor + 0.05, sn.v) : Math.max(0, Math.min(anchor - 0.05, sn.v));
+      const sc = Math.min(10, Math.max(0.1, (edge - anchor) / (edge0 - anchor || 1e-6)));
+      patch = stretchPatch(type, it, anchor, sc) as Partial<Clip>;
+      useOp.setState({ op: { key, kind: 'stretch', text: `${((itemSpeed(type, it) ?? 1) / sc).toFixed(2)}×`, keys: [key] } });
+      document.body.classList.add('stretching');
+      useStore.getState().setTime(side === 'r' ? patch.start! + patch.duration! - 1 / 60 : patch.start!);
+    } else if (side === 'r') {
       const sn = nearest(Math.max(it.start + 0.05, end + d), pts, pps);
       showSnap(sn.d !== Infinity ? sn.v : null);
-      const ne = Math.min(limitR, sn.v);
-      patch = { duration: Math.min(maxEnd - inT, Math.max(0.05, ne - it.start)) };
+      patch = { duration: Math.min(maxEnd - inT, Math.max(0.05, sn.v - it.start)) };
       useStore.getState().setTime(it.start + patch.duration! - 1 / 60);
     } else {
       const sn = nearest(it.start + d, pts, pps);
       showSnap(sn.d !== Infinity ? sn.v : null);
       let s = sn.v;
-      const minS = Math.max(limitL, hasIn ? Math.max(0, it.start - inT / (itemSpeed(type, it) ?? 1)) : 0);
+      const minS = hasIn ? Math.max(0, it.start - inT / (itemSpeed(type, it) ?? 1)) : 0;
       s = Math.min(end - 0.05, Math.max(minS, s));
       patch = { start: s, duration: end - s };
       // 素材起點跟著移動（考慮速度：2× 時拉 1 秒 = 素材 2 秒）
       if (hasIn) patch.in = Math.max(0, inT + (s - it.start) * (itemSpeed(type, it) ?? 1));
       useStore.getState().setTime(s);
     }
-    useStore.getState().patchItems({ [keyOf(type, it.id)]: patch });
-  }, () => showSnap(null));
+    if (!speeding) {
+      useOp.setState({ op: null });
+      document.body.classList.remove('stretching');
+    }
+    useStore.getState().patchItems({ [key]: speedMode !== speeding ? { ...it, ...patch } : patch });
+    speedMode = speeding;
+    const span = { lane, start: patch.start ?? it.start, duration: patch.duration! };
+    const affected: Record<string, { left: number; width: number }> = {};
+    for (const other of useStore.getState()[LIST[type]] as AnyItem[]) {
+      const otherKey = keyOf(type, other.id);
+      if (movingKeys.has(otherKey) || !spansOverlap(span, { lane: laneOf(type, other.track), start: other.start, duration: other.duration })) continue;
+      const left = Math.max(span.start, other.start);
+      const right = Math.min(span.start + span.duration, other.start + other.duration);
+      affected[otherKey] = { left: (left - other.start) * pps, width: (right - left) * pps };
+    }
+    useMovePreview.setState({ moving: movingKeys, affected });
+  };
+  const onModifier = (ev: KeyboardEvent) => {
+    if (type !== 'clip' || !moved || (ev.key !== 'Control' && ev.key !== 'Meta')) return;
+    move({ clientX: lastClientX, ctrlKey: ev.ctrlKey, metaKey: ev.metaKey });
+  };
+  window.addEventListener('keydown', onModifier);
+  window.addEventListener('keyup', onModifier);
+  listen(move, (ev) => {
+    window.removeEventListener('keydown', onModifier);
+    window.removeEventListener('keyup', onModifier);
+    showSnap(null);
+    document.body.classList.remove('stretching');
+    useOp.setState({ op: null });
+    if (!moved) return;
+    if (!Object.keys(useMovePreview.getState().affected).length) {
+      endHistoryTransaction(true);
+      clearMovePreview();
+      return;
+    }
+    const owner = `timeline-resize-${Date.now()}`;
+    let decided = false;
+    const finish = (mode?: 'overwrite' | 'insert' | 'insertAll' | 'trimFit') => {
+      if (decided) return;
+      decided = true;
+      unsub();
+      if (mode === 'trimFit') {
+        if (side === 'r') {
+          const duration = Math.max(0.05, Math.min(maxEnd - inT, limitR - it.start));
+          useStore.getState().patchItems({ [key]: { ...it, duration } });
+          useStore.getState().setTime(it.start + duration - 1 / 60);
+        } else {
+          const start = Math.max(limitL, hasIn ? Math.max(0, it.start - inT / (itemSpeed(type, it) ?? 1)) : 0);
+          useStore.getState().patchItems({ [key]: { ...it, start, duration: end - start, ...(hasIn ? { in: Math.max(0, inT + (start - it.start) * (itemSpeed(type, it) ?? 1)) } : {}) } });
+          useStore.getState().setTime(start);
+        }
+      } else if (mode) {
+        const current = (useStore.getState()[LIST[type]] as AnyItem[]).find((x) => x.id === it.id)!;
+        const length = current.start + current.duration - end;
+        useStore.getState().resolveTimelineDrop([...movingKeys], mode, side === 'r' && mode !== 'overwrite' ? { start: end, length } : undefined);
+      }
+      endHistoryTransaction(!!mode);
+      if (!mode) useStore.getState().setTime(timeBeforeDrag);
+      clearMovePreview();
+    };
+    const unsub = useMenu.subscribe((s) => {
+      if (s.menu?.owner !== owner) queueMicrotask(() => { if (useMenu.getState().menu?.owner !== owner) finish(); });
+    });
+    const items: MenuItem[] = [
+      { label: $t('覆蓋'), action: () => finish('overwrite') },
+      ...(side === 'r' ? [
+        { label: $t('插入'), action: () => finish('insert') },
+        { label: $t('插入並移動所有軌道'), action: () => finish('insertAll') },
+      ] : []),
+      { label: $t('修剪以符合長度'), action: () => finish('trimFit') },
+      { label: $t('取消'), action: () => finish() },
+    ];
+    openPlacementMenu(ev.clientX, ev.clientY, items, owner);
+  });
 }
 
 /** 拖轉場的左右邊緣改長度（以剪接點為中心，兩邊對稱） */
@@ -888,6 +1027,7 @@ export function Timeline() {
   const effects = useStore((s) => s.effects);
   const audios = useStore((s) => s.audios);
   const tracks = useStore((s) => s.tracks);
+  const labelW = 180 + Math.max(0, Math.max(...(['video', 'fx', 'audio'] as TrackKind[]).map((k) => String(tracks[k].length).length)) - 2) * 9;
   const media = useStore((s) => s.media);
   const modules = useStore((s) => s.modules);
   const pps = useStore((s) => s.pps);
@@ -927,7 +1067,7 @@ export function Timeline() {
   }, [pps]);
   const selSet = new Set(selected);
 
-  const timeAt = (clientX: number) => Math.max(0, (clientX - innerRef.current!.getBoundingClientRect().left - LABEL_W) / pps);
+  const timeAt = (clientX: number) => Math.max(0, (clientX - innerRef.current!.getBoundingClientRect().left - labelW) / pps);
 
   // 用按鈕 / 選單加入項目後：捲到它並閃一下
   const reveal = useReveal((s) => s.n);
@@ -942,7 +1082,7 @@ export function Timeline() {
     const it = sel.type === 'clip' || sel.type === 'effect' || sel.type === 'audio' ? (useStore.getState()[LIST[sel.type]] as AnyItem[]).find((x) => x.id === sel.id) : undefined;
     if (box && it) {
       const pps = useStore.getState().pps;
-      const viewW = box.clientWidth - LABEL_W;
+      const viewW = box.clientWidth - labelW;
       const a = it.start * pps, b = (it.start + it.duration) * pps;
       if (a < box.scrollLeft || a > box.scrollLeft + viewW - 40) box.scrollLeft = Math.max(0, a - Math.min(80, viewW / 4));
       else if (b > box.scrollLeft + viewW && b - a < viewW) box.scrollLeft = b - viewW + 20;
@@ -973,7 +1113,7 @@ export function Timeline() {
       e.preventDefault();
       const s = useStore.getState();
       const rect = el.getBoundingClientRect();
-      const off = e.clientX - rect.left - LABEL_W;
+      const off = e.clientX - rect.left - labelW;
       const np = Math.min(PPS_MAX, Math.max(PPS_MIN, s.pps * (e.deltaY < 0 ? 1.15 : 1 / 1.15)));
       if (np === s.pps) return;
       zoomAnchor.current = { t: (el.scrollLeft + off) / s.pps, off }; // 滑鼠底下的時間點不動
@@ -982,7 +1122,7 @@ export function Timeline() {
     el.addEventListener('wheel', onWheel, { passive: false });
     // 時間軸至少填滿看得到的寬度；自訂水平捲軸跟時間軸同步
     const updView = () => {
-      const w = el.clientWidth - LABEL_W;
+      const w = el.clientWidth - labelW;
       const sbw = el.offsetWidth - el.clientWidth;
       setView((v) => (v.w === w && v.sbw === sbw ? v : { w, sbw }));
     };
@@ -997,14 +1137,14 @@ export function Timeline() {
     // 其他方式縮放（滑桿、= / - 鍵、選單）：播放頭在畫面內就固定播放頭，否則固定畫面中間
     const unsub = useStore.subscribe((s, p) => {
       if (s.pps === p.pps || zoomAnchor.current) return;
-      const viewW = el.clientWidth - LABEL_W;
+      const viewW = el.clientWidth - labelW;
       const px = s.time * p.pps - el.scrollLeft;
       const off = px >= 0 && px <= viewW ? px : viewW / 2;
       zoomAnchor.current = { t: (el.scrollLeft + off) / p.pps, off };
     });
     const fit = () => {
       const dur = Math.max(1, projectDuration(useStore.getState()));
-      const np = Math.min(PPS_MAX, Math.max(PPS_MIN, (el.clientWidth - LABEL_W - 40) / dur));
+      const np = Math.min(PPS_MAX, Math.max(PPS_MIN, (el.clientWidth - labelW - 40) / dur));
       if (np !== useStore.getState().pps) zoomAnchor.current = { t: 0, off: 0 }; // 縮放沒變就不會重畫，不能留下錨點
       useStore.getState().setPps(np);
       el.scrollLeft = 0;
@@ -1012,7 +1152,7 @@ export function Timeline() {
     window.addEventListener('timeline-fit', fit);
     const reveal = () => {
       const x = useStore.getState().time * useStore.getState().pps;
-      const viewW = el.clientWidth - LABEL_W;
+      const viewW = el.clientWidth - labelW;
       if (x > el.scrollLeft + viewW - 40 || x < el.scrollLeft) el.scrollLeft = x - viewW / 2;
     };
     window.addEventListener('timeline-reveal-playhead', reveal);
@@ -1026,7 +1166,7 @@ export function Timeline() {
     };
   }, []);
 
-  /** 拖播放頭（尺規或播放頭本身）：即時預覽 */
+  /** 在尺規拖曳定位播放頭：即時預覽 */
   const scrub = (e: React.PointerEvent) => {
     if (e.button !== 0) return;
     e.preventDefault();
@@ -1161,6 +1301,7 @@ export function Timeline() {
       { separator: true },
       { label: st.hidden ? $t('顯示軌道') : $t('隱藏軌道'), action: kind !== 'audio' ? () => S.toggleTrack(kind, idx, 'hidden') : undefined },
       { label: st.muted ? $t('取消靜音') : $t('靜音'), action: kind !== 'fx' ? () => S.toggleTrack(kind, idx, 'muted') : undefined },
+      { label: st.locked ? $t('解鎖軌道') : $t('鎖定軌道'), action: () => S.toggleTrack(kind, idx, 'locked') },
       { label: $t('恢復預設高度'), action: st.height ? () => S.setTrackHeight(kind, idx, undefined) : undefined },
     ];
     {
@@ -1251,6 +1392,12 @@ export function Timeline() {
 
   /** 拖曳中：在目標位置顯示淡淡的「放開後的樣子」 */
   const ghostFor = (kind: TrackKind, idx: number) => {
+    const batch = drag?.target?.kind === 'lane' ? drag.target.items?.filter((g) => g.kind === kind && g.track === idx) : undefined;
+    if (batch) return batch.map((g, i) => <div
+      key={`${g.id}:${i}`}
+      className={`${kind === 'video' ? 'clip' : 'audioitem'} drop-ghost`}
+      style={{ left: g.start * pps, width: Math.max(8, g.duration * pps), backgroundImage: g.thumb ? `url(${g.thumb})` : undefined }}
+    ><span className="clip-name">{g.label}</span></div>);
     const g = drag?.target?.kind === 'lane' && drag.target.lane === kind && drag.target.idx === idx ? drag.target : null;
     if (!g) return null;
     const cls = kind === 'video' ? 'clip' : kind === 'fx' ? 'fxitem' : 'audioitem';
@@ -1288,6 +1435,7 @@ export function Timeline() {
   return (
     <div
       className="timeline"
+      style={{ '--tl-label-w': `${labelW}px` } as React.CSSProperties}
       onPointerDownCapture={(e) => {
         // 跟時間軸互動 → 其他輸入框（例如素材庫的搜尋）失去焦點，Ctrl+Z 等快捷鍵才會作用在時間軸
         const ae = document.activeElement as HTMLElement | null;
@@ -1299,7 +1447,7 @@ export function Timeline() {
     >
       <TimelineToolbar />
       <div className="tl-scroll" ref={scrollRef}>
-        <div className="tl-inner" ref={innerRef} style={{ width: LABEL_W + end * pps }}>
+        <div className="tl-inner" ref={innerRef} style={{ width: labelW + end * pps }}>
           <div className="tl-row ruler-row">
             <div className="tl-label corner" />
             <Ruler end={end} pps={pps} onPointerDown={stableScrub} />
@@ -1314,7 +1462,7 @@ export function Timeline() {
             return (
               <div
                 key={kind + idx}
-                className={`tl-row ${kind} ${activeTrack?.kind === kind && activeTrack.idx === idx ? 'active' : ''} ${dragging ? 'row-dragging' : ''} ${ov ? `row-drop drop-${ov}` : ''} ${fxBoundary(i) ? 'fx-boundary' : ''} ${compact ? 'compact' : ''}`}
+                className={`tl-row ${kind} ${st.locked ? 'locked' : ''} ${activeTrack?.kind === kind && activeTrack.idx === idx ? 'active' : ''} ${dragging ? 'row-dragging' : ''} ${ov ? `row-drop drop-${ov}` : ''} ${fxBoundary(i) ? 'fx-boundary' : ''} ${compact ? 'compact' : ''}`}
                 style={{ height: h }}
                 data-row-kind={kind}
                 data-row-idx={idx}
@@ -1327,6 +1475,7 @@ export function Timeline() {
                 >
                   <span className="tl-name">{ICONS[kind]} {NAMES[kind]} {idx + 1}</span>
                   <span className="track-btns">
+                    <button className={st.locked ? 'off' : ''} title={st.locked ? $t('解鎖軌道') : $t('鎖定軌道')} onPointerDown={(e) => e.stopPropagation()} onClick={() => S.toggleTrack(kind, idx, 'locked')}>{st.locked ? <Lock size={13} /> : <Unlock size={13} />}</button>
                     {kind !== 'audio' && (
                       <button className={st.hidden ? 'off' : ''} title={$t('顯示 / 隱藏')} onClick={() => S.toggleTrack(kind, idx, 'hidden')}>{st.hidden ? <EyeOff size={13} /> : <Eye size={13} />}</button>
                     )}
@@ -1342,12 +1491,13 @@ export function Timeline() {
                   />
                 </div>
                 <div
-                  className={`lane ${st.hidden ? 'hidden' : ''}`}
+                  className={`lane ${st.hidden ? 'hidden' : ''} ${st.locked ? 'locked' : ''}`}
                   data-lane-kind={kind}
                   data-lane-idx={idx}
                   onPointerDown={(e) => {
                     if (e.target !== e.currentTarget) return;
-                    if (e.button === 0) useStore.getState().setActiveTrack({ kind, idx });
+                    if (e.button === 0 && !st.locked) useStore.getState().setActiveTrack({ kind, idx });
+                    if (st.locked) return;
                     startMarquee(e);
                   }}
                   onContextMenu={(e) => laneMenu(e, kind, idx)}
@@ -1387,9 +1537,9 @@ export function Timeline() {
             </div>
           </div>
 
-          <div className="tl-overlay" style={{ left: LABEL_W }}>
+          <div className="tl-overlay" style={{ left: labelW }}>
             <BeatLines pps={pps} />
-            <Playhead pps={pps} scrollRef={scrollRef} onPointerDown={scrub} />
+            <Playhead pps={pps} labelW={labelW} scrollRef={scrollRef} />
             <SnapLine pps={pps} />
           </div>
         </div>
@@ -1406,7 +1556,7 @@ export function Timeline() {
         />
       )}
       {addTrack && <AddTrackPanel state={addTrack} close={() => setAddTrack(null)} />}
-      <div className="tl-hbar" ref={hbarRef} style={{ marginLeft: LABEL_W, marginRight: view.sbw }} onScroll={(e) => {
+      <div className="tl-hbar" ref={hbarRef} style={{ marginLeft: labelW, marginRight: view.sbw }} onScroll={(e) => {
         const el = scrollRef.current;
         const x = (e.currentTarget as HTMLDivElement).scrollLeft;
         if (el && Math.abs(el.scrollLeft - x) > 0.5) el.scrollLeft = x;
@@ -1517,7 +1667,7 @@ const Ruler = React.memo(function Ruler({ end, pps, onPointerDown }: { end: numb
   );
 });
 
-/** 播放頭在尺規上的頭（覆蓋在刻度上面，可直接拖）；獨立訂閱時間，播放時不用重畫整排刻度 */
+/** 播放頭在尺規上的頭；獨立訂閱時間，播放時不用重畫整排刻度 */
 /** 太密的節拍不畫（每拍至少要隔這麼多 px） */
 const BEAT_MIN_PX = 6;
 
@@ -1556,7 +1706,7 @@ window.addEventListener('pointerdown', () => (pointerHeld = true), true);
 window.addEventListener('pointerup', () => (pointerHeld = false), true);
 window.addEventListener('blur', () => (pointerHeld = false));
 
-function Playhead({ pps, scrollRef, onPointerDown }: { pps: number; scrollRef: React.RefObject<HTMLDivElement>; onPointerDown: (e: React.PointerEvent) => void }) {
+function Playhead({ pps, labelW, scrollRef }: { pps: number; labelW: number; scrollRef: React.RefObject<HTMLDivElement> }) {
   const t = useStore((s) => s.time);
   const playing = useStore((s) => s.playing);
   const x = t * pps;
@@ -1567,18 +1717,14 @@ function Playhead({ pps, scrollRef, onPointerDown }: { pps: number; scrollRef: R
     const zoomed = ppsRef.current !== pps;
     ppsRef.current = pps;
     if (!el || zoomed) return;
-    const viewW = el.clientWidth - LABEL_W;
+    const viewW = el.clientWidth - labelW;
     const out = x > el.scrollLeft + viewW - 40 || x < el.scrollLeft;
     if (!out) return;
     if (playing) el.scrollLeft = x - 80;
     // 暫停時（Home / End、方向鍵、跳剪接點…）：播放頭跑出畫面就捲到置中；滑鼠拖曳中不動，避免畫面亂跳
     else if (!pointerHeld) el.scrollLeft = x - viewW / 2;
-  }, [x, pps, playing, scrollRef]);
-  return (
-    <div className="playhead" style={{ transform: `translateX(${x}px)` }}>
-      <div className="playhead-hit" onPointerDown={onPointerDown} />
-    </div>
-  );
+  }, [x, pps, labelW, playing, scrollRef]);
+  return <div className="playhead" style={{ transform: `translateX(${x}px)` }} />;
 }
 
 /** 吸附時的垂直參考線（跨所有軌道） */

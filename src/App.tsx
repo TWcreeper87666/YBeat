@@ -25,20 +25,23 @@ import { Globe, Settings } from 'lucide-react';
 import { downloadBlob, exportMp4 } from './engine/exporter';
 import { loadDemo } from './engine/demo';
 import { undo, redo, useHistory } from './engine/history';
-import { newProject, saveNow, useSaveState } from './engine/project';
+import { newProject, saveNow, useSaveState, exportProjectPack, importProjectPack } from './engine/project';
 import { importFiles, pickFiles } from './engine/media';
+import { LyricsPanel, SubtitlesDialog } from './ui/SubtitlesDialog';
 import { EditorWindow, openEditorWindow, useEditorWindow } from './ui/EditorWindow';
 
 const FPS = 60;
 
 // ───────────── 對話框 ─────────────
 
-type Dialog = 'export' | 'shortcuts' | 'tutorial' | 'about' | 'new' | 'demo' | 'saveLayout' | 'settings' | null;
+type Dialog = 'export' | 'subtitles' | 'shortcuts' | 'tutorial' | 'about' | 'new' | 'demo' | 'saveLayout' | 'settings' | null;
 let setDialogGlobal: (d: Dialog) => void = () => {};
 const openDialog = (d: Dialog) => setDialogGlobal(d);
 
 function ExportDialog({ close }: { close: () => void }) {
   const [fps, setFps] = useState(60);
+  const [quality, setQuality] = useState(20);
+  const [filename, setFilename] = useState('YBeat_export');
   const full = useStore((s) => projectDuration(s));
   const loop = useStore((s) => s.loop);
   const [onlyLoop, setOnlyLoop] = useState(!!loop);
@@ -48,33 +51,38 @@ function ExportDialog({ close }: { close: () => void }) {
   const go = async () => {
     close();
     try {
-      downloadBlob(await exportMp4(fps, range), `edit_${Date.now()}.mp4`);
+      downloadBlob(await exportMp4(fps, range, quality * 1_000_000), `${filename.trim().replace(/[\\/:*?"<>|]/g, '_').replace(/\.mp4$/i, '') || 'YBeat_export'}.mp4`);
       toast($t('匯出完成'));
     } catch (e) {
       toast($t('匯出失敗：{0}', e instanceof Error ? e.message : e), 'error');
     }
   };
   return (
-    <div className="dialog">
+    <div className="dialog settings export-window" role="dialog" aria-modal="true" aria-label={$t('匯出影片')}>
       <h3>{$t('匯出影片')}</h3>
-      <div className="form-row"><span>{$t('解析度')}</span><b>{fmt.w} × {fmt.h}（{formatLabel(fmt)}）</b></div>
-      <div className="form-row">
-        <span>{$t('影格率')}</span>
-        <div className="seg">
-          {[30, 60].map((f) => <button key={f} className={fps === f ? 'on' : ''} onClick={() => setFps(f)}>{f} fps</button>)}
+      <div className="export-content">
+        <div className="set-sec">{$t('檔案')}</div>
+        <label className="form-row col"><span>{$t('檔名')}</span><input className="text-input" value={filename} onChange={(e) => setFilename(e.target.value)} /></label>
+        <div className="set-sec">{$t('影片')}</div>
+        <div className="form-row"><span>{$t('解析度')}</span><b>{fmt.w} × {fmt.h} <span className="muted">({formatLabel(fmt)})</span></b></div>
+        <div className="form-row col">
+          <span>{$t('影格率')}</span>
+          <div className="seg">{[24, 30, 60].map((f) => <button key={f} className={fps === f ? 'on' : ''} onClick={() => setFps(f)}>{f} fps</button>)}</div>
         </div>
-      </div>
-      {loop && (
-        <div className="form-row">
+        <div className="form-row col"><span>{$t('品質')}</span><div className="seg">{[[8, $t('較小檔案')], [20, $t('標準')], [35, $t('高品質')]].map(([rate, label]) => <button key={rate} className={quality === rate ? 'on' : ''} onClick={() => setQuality(Number(rate))}>{label}</button>)}</div></div>
+        {loop && <div className="form-row col">
           <span>{$t('範圍')}</span>
           <div className="seg">
             <button className={!onlyLoop ? 'on' : ''} onClick={() => setOnlyLoop(false)}>{$t('整個專案')}</button>
             <button className={onlyLoop ? 'on' : ''} onClick={() => setOnlyLoop(true)}>{$t('循環範圍')}</button>
           </div>
+        </div>}
+        <div className="export-summary">
+          <div><span>{$t('長度')}</span><b>{dur.toFixed(2)} {$t('秒')}</b></div>
+          <div><span>{$t('格式')}</span><b>{$t('MP4（H.264 + AAC）')}</b></div>
+          <div><span>{$t('預估大小')}</span><b>≈ {Math.round(dur * (quality + 0.192) / 8)} MB</b></div>
         </div>
-      )}
-      <div className="form-row"><span>{$t('長度')}</span><b>{dur.toFixed(2)}{' '}{$t('秒')}</b></div>
-      <div className="form-row"><span>{$t('格式')}</span><b>{$t('MP4（H.264 + AAC）')}</b></div>
+      </div>
       <div className="dialog-actions">
         <button className="btn" onClick={close}>{$t('取消')}</button>
         <button className="btn primary" disabled={dur <= 0} onClick={go}>{$t('開始匯出')}</button>
@@ -235,6 +243,7 @@ function Dialogs() {
   return (
     <div className="overlay" onPointerDown={(e) => e.target === e.currentTarget && close()}>
       {d === 'export' && <ExportDialog close={close} />}
+      {d === 'subtitles' && <SubtitlesDialog close={close} />}
       {d === 'shortcuts' && <ShortcutsDialog close={close} />}
       {d === 'tutorial' && <TutorialDialog close={close} />}
       {d === 'new' && <NewDialog close={close} />}
@@ -299,6 +308,9 @@ function menus(): { label: string; items: () => MenuItem[] }[] {
       items: () => [
         { label: $t('新專案…'), action: () => openDialog('new') },
         { label: $t('匯入媒體…'), shortcut: 'Ctrl+O', action: async () => importFiles(await pickFiles()) },
+        { label: $t('匯入專案包…'), action: async () => { const [file] = await pickFiles('.ybeat', false); if (!file) return; if (!await confirmDialog({ title: $t('匯入專案包？'), message: $t('目前專案會被取代，請先匯出專案包備份。'), ok: $t('匯入') })) return; try { await importProjectPack(file); toast($t('專案包已匯入')); } catch (e) { toast($t('匯入失敗：{0}', e instanceof Error ? e.message : e), 'error'); } } },
+        { label: $t('匯出專案包…'), action: async () => { try { downloadBlob(await exportProjectPack(), 'YBeat_project.ybeat'); toast($t('專案包已匯出')); } catch (e) { toast($t('匯出失敗：{0}', e instanceof Error ? e.message : e), 'error'); } } },
+        { label: $t('字幕／歌詞…'), action: () => useDock.getState().activatePanel('lyrics') },
         { label: $t('載入示範專案…'), action: () => (projectDuration(S()) > 0 ? openDialog('demo') : loadDemo()) },
         { separator: true },
         { label: $t('立即存檔'), shortcut: 'Ctrl+S', action: () => saveNow().then(() => toast($t('已儲存'))) },
@@ -548,6 +560,7 @@ export default function App() {
       <EditorWindow hosts={hosts} />
       {createPortal(<MediaPanel />, hosts.media)}
       {createPortal(<TextPanel />, hosts.text)}
+      {createPortal(<LyricsPanel />, hosts.lyrics)}
       {createPortal(<ModulePanel kind="transition" />, hosts.transition)}
       {createPortal(<ModulePanel kind="effect" />, hosts.effect)}
       {createPortal(<MaskPanel />, hosts.mask)}

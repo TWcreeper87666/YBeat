@@ -14,9 +14,9 @@ export function downloadBlob(blob: Blob, name: string) {
   setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
 }
 
-async function pickVideoConfig(w: number, h: number, fps: number) {
+async function pickVideoConfig(w: number, h: number, fps: number, bitrate: number) {
   for (const codec of ['avc1.640034', 'avc1.640033', 'avc1.4d0034', 'avc1.42003e']) {
-    const c: VideoEncoderConfig = { codec, width: w, height: h, bitrate: 20_000_000, framerate: fps };
+    const c: VideoEncoderConfig = { codec, width: w, height: h, bitrate, framerate: fps };
     if ((await VideoEncoder.isConfigSupported(c)).supported) return c;
   }
   return null;
@@ -37,7 +37,7 @@ async function pickAudioConfig() {
 
 /** 逐幀離線渲染 → WebCodecs 硬體編碼 → MP4（含混音，不會掉幀） */
 /** range：只輸出這段（例如循環範圍）；沒給 = 整個專案 */
-export async function exportMp4(fps: number, range?: { a: number; b: number }): Promise<Blob> {
+export async function exportMp4(fps: number, range?: { a: number; b: number }, bitrate = 20_000_000): Promise<Blob> {
   const r = getRenderer();
   if (!r) throw new Error($t('渲染器尚未就緒'));
   if (typeof VideoEncoder === 'undefined') throw new Error($t('此瀏覽器不支援 WebCodecs，請使用 Chrome / Edge'));
@@ -55,7 +55,7 @@ export async function exportMp4(fps: number, range?: { a: number; b: number }): 
   await prepareMattes(st0.clips, ctx.media, ctx.modules);
 
   const { w: FW, h: FH } = st0.format;
-  const vConfig = await pickVideoConfig(FW, FH, fps);
+  const vConfig = await pickVideoConfig(FW, FH, fps, bitrate);
   if (!vConfig) throw new Error($t('找不到可用的 H.264 編碼設定'));
 
   useStore.setState({ playing: false, exporting: { progress: 0, cancel: false } });

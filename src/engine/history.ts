@@ -1,8 +1,8 @@
 import { create } from 'zustand';
-import { useStore, type AudioClip, type Clip, type FxItem, type Tracks } from '../store';
+import { useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
 
 /** 復原 / 重做：自動記錄時間軸變更，連續的拖曳 / 滑桿操作（400ms 內）合併成一步 */
-interface Doc { clips: Clip[]; effects: FxItem[]; audios: AudioClip[]; tracks: Tracks }
+interface Doc { clips: Clip[]; effects: FxItem[]; audios: AudioClip[]; media: Media[]; tracks: Tracks }
 
 const past: Doc[] = [];
 let future: Doc[] = [];
@@ -15,7 +15,7 @@ const LIMIT = 200;
 export const useHistory = create(() => ({ canUndo: false, canRedo: false }));
 const sync = () => useHistory.setState({ canUndo: past.length > 0 || !!burstStart, canRedo: future.length > 0 });
 
-const docOf = (s: Doc): Doc => ({ clips: s.clips, effects: s.effects, audios: s.audios, tracks: s.tracks });
+const docOf = (s: Doc): Doc => ({ clips: s.clips, effects: s.effects, audios: s.audios, media: s.media, tracks: s.tracks });
 
 function flush() {
   clearTimeout(timer);
@@ -28,7 +28,7 @@ function flush() {
 
 useStore.subscribe((s, prev) => {
   if (applying) return;
-  if (s.clips === prev.clips && s.effects === prev.effects && s.audios === prev.audios && s.tracks === prev.tracks) return;
+  if (s.clips === prev.clips && s.effects === prev.effects && s.audios === prev.audios && s.media === prev.media && s.tracks === prev.tracks) return;
   if (transaction) return;
   if (!burstStart) burstStart = docOf(prev);
   future = [];
@@ -67,7 +67,7 @@ export function endHistoryTransaction(commit: boolean) {
   if (!commit) apply(before);
   else {
     const now = useStore.getState();
-    if (before.clips !== now.clips || before.effects !== now.effects || before.audios !== now.audios || before.tracks !== now.tracks) {
+    if (before.clips !== now.clips || before.effects !== now.effects || before.audios !== now.audios || before.media !== now.media || before.tracks !== now.tracks) {
       past.push(before);
       if (past.length > LIMIT) past.shift();
       future = [];

@@ -38,3 +38,14 @@
 - [x] timeline, 播放時拖曳某個片段，音訊會卡卡的，即使跟我拖曳的東西完全沒有關係(例如只是拖曳色板)
 - [x] contextMenu可以再小一些
 - [x] properties tab 的關鍵影格時間軸可以縮放（scale）
+
+- [ ] no idea speed curve how to use
+- [x] drag clip start/end should always allow overlap other clips, and press ctrl during the period should work(speed change by clip length)
+- [ ] stupid lyrics UI and function fix, should have a lyrics tab
+- [x] 鎖住軌道後就無法選取track的任何片段(選中該軌道也不行)，右鍵會出現解鎖選項，鎖住的UI簡化，就是變深色，鎖頭顏色變亮，不需要bg什麼的
+- [x] undo時media card遺失，我說的自動移除是只有missing的片段才會自動剔除
+- [ ] ghost item can't snap other track
+- [ ] video clip contextMenu add: remove sound from video
+- [ ] 吸色去背
+- [ ] AI去背，在遮罩之後?
+- [ ] beat偵測後應該要可以手動改變取樣間隔，不然有些都太大根本沒用

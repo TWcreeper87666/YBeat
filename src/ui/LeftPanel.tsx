@@ -1,10 +1,11 @@
 import { $t, displayName } from '../i18n';
 import { AlignCenter, AlignLeft, AlignRight, Bold, CircleCheck, Italic, Music, Palette, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2 } from 'lucide-react';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { attachedAudioIds, type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
 import type { Module } from '../modules/builtin';
 import { CATEGORIES, categoryOf } from '../modules/categories';
-import { colorMedia, colorName, importFiles, pickFiles, relinkWithPicker, removeMedia } from '../engine/media';
+import { colorMedia, colorName, importFiles, pickFiles, relinkWithPicker, removeMedia, removeMediaEverywhere } from '../engine/media';
+import { applyMediaBatch, planMediaBatch } from '../engine/mediaBatch';
 import { nextStart } from '../engine/overlap';
 import { FONTS, TEXT_PRESETS, DEFAULT_TEXT, renderText, type TextStyle } from '../engine/text';
 import { DEFAULT_MASK, type Mask } from '../engine/mask';
@@ -35,7 +36,7 @@ import { itemName } from './names';
 import { ensureMatte, matteCoverage, matteFrames, useMatte } from '../engine/matte';
 import { cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { closeSource, openSource, useSource } from './SourcePanel';
-import { openMenu, promptDialog, revealSelection, stopPreviewFx, toast, useLayout, usePreviewFx, type MenuItem } from './uiStore';
+import { confirmDialog, openMenu, promptDialog, revealSelection, stopPreviewFx, toast, useLayout, usePreviewFx, type MenuItem } from './uiStore';
 import { DragNumber } from './DragNumber';
 import { ModuleCode } from './ModuleCode';
 import { newModule, openModuleEditor } from './CodePanel';
@@ -189,6 +190,7 @@ function ColorSwatches() {
 }
 
 export function MediaPanel() {
+  const panelRef = useRef<HTMLDivElement>(null);
   const media = useStore((s) => s.media);
   const clips = useStore((s) => s.clips);
   const audios = useStore((s) => s.audios);
@@ -197,6 +199,8 @@ export function MediaPanel() {
   const filter = useLayout((s) => (s.libFilterOpen.media ? s.mediaFilter : 'all'));
   const [q, setQ] = useState('');
   const [sort, setSort] = useState<'added' | 'name' | 'type'>('added');
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [anchorId, setAnchorId] = useState<string | null>(null);
 
   const uses = (id: string) => clips.filter((c) => c.mediaId === id).length + audios.filter((a) => a.mediaId === id).length;
   const list = useMemo(() => {
@@ -205,6 +209,13 @@ export function MediaPanel() {
     if (sort === 'type') l.sort((a, b) => a.kind.localeCompare(b.kind));
     return l;
   }, [media, filter, q, sort]);
+  useEffect(() => {
+    const visible = new Set(list.map((m) => m.id));
+    setSelectedIds((ids) => ids.filter((id) => visible.has(id)));
+    if (anchorId && !visible.has(anchorId)) setAnchorId(null);
+  }, [list, anchorId]);
+  const selected = new Set(selectedIds);
+  const picked = selectedIds.map((id) => list.find((m) => m.id === id)).filter((m): m is Media => !!m);
   const missing = media.filter((m) => m.missing).length;
   const previewing = useSource((s) => (s.open ? s.mediaId : null));
   /** 色板分頁：不用先打開分類籤也能直接切過去（素材庫是空的時候也找得到） */
@@ -214,15 +225,58 @@ export function MediaPanel() {
     else L.set({ mediaFilter: 'color', libFilterOpen: { ...L.libFilterOpen, media: true } });
   };
 
+  const selectMedia = (e: React.MouseEvent, m: Media) => {
+    panelRef.current?.focus();
+    if (e.shiftKey) {
+      const from = list.findIndex((x) => x.id === anchorId);
+      const to = list.findIndex((x) => x.id === m.id);
+      const range = from < 0 ? [m.id] : list.slice(Math.min(from, to), Math.max(from, to) + 1).map((x) => x.id);
+      setSelectedIds(e.ctrlKey || e.metaKey ? [...new Set([...selectedIds, ...range])] : range);
+      return;
+    }
+    setAnchorId(m.id);
+    if (e.ctrlKey || e.metaKey) { setSelectedIds((ids) => ids.includes(m.id) ? ids.filter((id) => id !== m.id) : [...ids, m.id]); return; }
+    setSelectedIds([m.id]);
+    if (m.missing) relinkWithPicker(m.id);
+    else openSource(m.id);
+  };
+
+  const insertPicked = (items: Media[]) => {
+    const plan = planMediaBatch(items.map((m) => m.id), useStore.getState().time);
+    const count = plan ? applyMediaBatch(plan) : 0;
+    if (count) { revealSelection(); toast($t('已插入 {0} 個素材', count)); }
+  };
+
+  const removePicked = async (items: Media[], everywhere = false) => {
+    if (!items.length) return;
+    if ((items.length > 1 || everywhere) && !await confirmDialog({
+      title: everywhere ? $t('連時間軸一起移除 {0} 個素材？', items.length) : $t('移除 {0} 個素材？', items.length),
+      message: everywhere ? $t('這些素材在時間軸上的所有片段也會移除。') : $t('使用中的片段會標記為遺失素材。'),
+      ok: $t('移除'), danger: true,
+    })) return;
+    if (everywhere) {
+      if (!removeMediaEverywhere(items.map((m) => m.id))) return void toast($t('鎖定軌道上的片段無法移除'), 'error');
+    } else for (const m of items) removeMedia(m.id, true);
+    setSelectedIds([]);
+    setAnchorId(null);
+    if (items.some((m) => m.id === previewing)) closeSource();
+    toast($t('已移除 {0} 個素材', items.length));
+  };
+
   const itemMenu = (e: React.MouseEvent, m: Media) => {
     e.preventDefault();
     e.stopPropagation();
+    panelRef.current?.focus();
+    const items = selected.has(m.id) ? picked : [m];
+    if (!selected.has(m.id)) { setSelectedIds([m.id]); setAnchorId(m.id); }
     const n = uses(m.id);
+    const inTimeline = items.some((item) => uses(item.id) > 0);
     openMenu(e.clientX, e.clientY, [
-      { label: $t('插入到播放頭'), action: mediaUsable(m) ? () => { useStore.getState().insertMedia(m.id); revealSelection(); } : undefined },
-      { label: m.missing ? $t('重新連結檔案…') : $t('替換檔案…'), action: () => relinkWithPicker(m.id) },
+      { label: items.length > 1 ? $t('插入選取的 {0} 個素材', items.length) : $t('插入到播放頭'), action: items.some(mediaUsable) ? () => insertPicked(items) : undefined },
+      { label: m.missing ? $t('重新連結檔案…') : $t('替換檔案…'), action: items.length === 1 ? () => relinkWithPicker(m.id) : undefined },
       { separator: true },
-      { label: n ? $t('從素材庫移除（{0} 個片段使用中）', n) : $t('從素材庫移除'), action: () => removeMedia(m.id), danger: true },
+      { label: items.length > 1 ? $t('移除選取的 {0} 個素材', items.length) : n ? $t('從素材庫移除（{0} 個片段使用中）', n) : $t('從素材庫移除'), action: () => removePicked(items), danger: true },
+      { label: $t('從素材庫與時間軸移除'), action: inTimeline ? () => removePicked(items, true) : undefined, danger: true },
     ]);
   };
 
@@ -246,7 +300,11 @@ export function MediaPanel() {
   };
 
   return (
-    <div className="lib" onContextMenu={bgMenu}>
+    <div ref={panelRef} className="lib media-panel" tabIndex={0} onContextMenu={bgMenu} onKeyDown={(e) => {
+      if ((e.key !== 'Delete' && e.key !== 'Backspace') || e.target instanceof HTMLInputElement || !picked.length) return;
+      e.preventDefault(); e.stopPropagation();
+      void removePicked(picked);
+    }}>
       <LibToolbar id="media" query={q} setQuery={setQ} filter={{ active: filter !== 'all', reset: () => useLayout.getState().set({ mediaFilter: 'all' }) }}>
         <button className="lib-add" title={$t('匯入媒體 (Ctrl+O)')} onClick={async () => importFiles(await pickFiles())}><Plus size={15} /></button>
         <button className={`lib-add ${filter === 'color' ? 'on' : ''}`} title={$t('色板')} onClick={toggleColors}><Palette size={14} /></button>
@@ -263,7 +321,7 @@ export function MediaPanel() {
       {filter === 'color' ? (
         <div className="lib-body"><ColorSwatches /></div>
       ) : (
-      <div className="lib-body" onClick={onBlank(closeSource)} onDoubleClick={onBlank(async () => importFiles(await pickFiles()))}>
+      <div className="lib-body" onClick={onBlank(() => { closeSource(); setSelectedIds([]); setAnchorId(null); })} onDoubleClick={onBlank(async () => importFiles(await pickFiles()))}>
         {missing > 0 && <div className="warn"><TriangleAlert size={13} /> {missing}{' '}{$t('個素材遺失')}</div>}
         {media.length === 0 && <p className="muted small center">{$t('還沒有素材')}<br />{$t('雙擊匯入')}</p>}
         {media.length > 0 && list.length === 0 && <p className="muted small center">{$t('沒有符合的素材')}</p>}
@@ -271,9 +329,14 @@ export function MediaPanel() {
           {list.map((m) => (
             <div
               key={m.id}
-              className={`lib-item ${m.missing ? 'missing' : ''} ${previewing === m.id ? 'previewing' : ''}`}
-              onPointerDown={(e) => mediaUsable(m) && startLibraryDrag(e, { kind: 'media', id: m.id }, m.name, m.kind === 'audio' ? undefined : m.thumb)}
-              onClick={() => (m.missing ? relinkWithPicker(m.id) : openSource(m.id))}
+              className={`lib-item ${m.missing ? 'missing' : ''} ${previewing === m.id ? 'previewing' : ''} ${selected.has(m.id) ? 'selected' : ''}`}
+              onPointerDown={(e) => {
+                if (e.ctrlKey || e.metaKey || e.shiftKey || !mediaUsable(m)) return;
+                const batch = selected.has(m.id) && picked.length > 1 ? picked.filter(mediaUsable) : [];
+                if (batch.length > 1) startLibraryDrag(e, { kind: 'mediaBatch', ids: batch.map((x) => x.id) }, $t('{0} 個素材', batch.length), m.kind === 'audio' ? undefined : m.thumb);
+                else startLibraryDrag(e, { kind: 'media', id: m.id }, m.name, m.kind === 'audio' ? undefined : m.thumb);
+              }}
+              onClick={(e) => selectMedia(e, m)}
               onContextMenu={(e) => itemMenu(e, m)}
               title={m.missing ? $t('{0}（遺失，點擊重新連結）', m.name) : m.name}
             >
@@ -684,6 +747,7 @@ function textSection(clip: Clip & { text: TextStyle }): Section {
     id: 'text',
     title: $t('文字'),
     rows: [
+      { label: $t('列入字幕／歌詞匯出'), node: <Switch v={!!clip.caption} on={(v) => useStore.getState().updateClip(clip.id, { caption: v })} /> },
       {
         label: $t('內容'),
         node: <textarea className="text-area" rows={Math.min(6, Math.max(2, t.text.split('\n').length))} value={t.text} onChange={(e) => set({ text: e.target.value })} onKeyDown={(e) => e.stopPropagation()} />,

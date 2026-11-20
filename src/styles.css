@@ -162,7 +162,7 @@ code { background: var(--panel2); padding: 1px 5px; border-radius: 4px; }
 .tl-row.fx { height: 38px; }
 .tl-row.audio { height: 50px; }
 .tl-row.add-row { height: 30px; border-bottom: none; }
-.tl-label { position: sticky; left: 0; z-index: 6; width: 116px; flex: none; display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 0 6px 0 10px; font-size: 12px; color: var(--muted); background: var(--panel); border-right: 1px solid var(--line); }
+.tl-label { position: sticky; left: 0; z-index: 6; width: var(--tl-label-w, 180px); flex: none; display: flex; align-items: center; justify-content: space-between; gap: 4px; padding: 0 6px 0 10px; font-size: 12px; color: var(--muted); background: var(--panel); border-right: 1px solid var(--line); }
 .tl-label.add { gap: 2px; padding: 0 4px; justify-content: flex-start; }
 .tl-label.add button { background: none; border: 1px dashed var(--line); border-radius: 4px; color: var(--muted); font-size: 10px; padding: 1px 4px; cursor: pointer; }
 .tl-label.add button:hover { color: var(--text); border-color: var(--muted); }
@@ -384,9 +384,8 @@ input[type=range]:hover::-webkit-slider-thumb { background: #fff; }
 body.drag-ok, body.drag-ok * { cursor: copy !important; }
 body.drag-no, body.drag-no * { cursor: grabbing !important; }
 
-/* 播放頭：頭在尺規上（蓋住刻度），線可以直接拖 */
+/* 播放頭：頭在尺規上（蓋住刻度），軌道上的線只顯示位置 */
 .playhead::before { display: none; }
-.playhead-hit { position: absolute; top: 0; bottom: 0; left: -5px; width: 11px; pointer-events: auto; cursor: ew-resize; }
 .ruler-playhead { position: absolute; top: 0; bottom: 0; left: 0; width: 2px; margin-left: -1px; background: var(--accent); pointer-events: none; z-index: 2; }
 .ruler-playhead::before { content: ""; position: absolute; top: 0; left: -6px; width: 14px; height: 12px; background: var(--accent); clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%); }
 .ruler .loop-region { top: 0; height: 100%; z-index: 1; }
@@ -600,6 +599,9 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 @keyframes shimmer { from { transform: translateX(-100%); } to { transform: translateX(100%); } }
 .lib-item:hover .lib-thumb { border-color: #4a5163; }
 .lib-item.previewing .lib-thumb { border-color: var(--accent2); box-shadow: 0 0 0 2px #29d3c255; }
+.lib-item.selected .lib-thumb { border-color: var(--accent2); box-shadow: 0 0 0 2px var(--accent2); }
+.lib-list .lib-item.selected { background: #29d3c222; }
+.media-panel:focus { outline: none; }
 .lib-item.missing .lib-thumb { filter: grayscale(1) brightness(.5); border-color: #ff3d6e88; }
 .lib-meta { min-width: 0; }
 .lib-name { font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #c9cdd8; }
@@ -1210,3 +1212,32 @@ body.panning, body.panning * { cursor: grabbing !important; }
 /* 時間軸片段：AI 去背進度（漸層 = 哪些地方的遮罩已經好了） */
 .clip-matte { position: absolute; left: 0; right: 0; bottom: 0; height: 4px; background-color: #000a; z-index: 3; }
 .clip-matte.busy { box-shadow: 0 -1px 6px #29d3c255; }
+.tl-row.locked .tl-label, .tl-row.locked.active .tl-label { background: #101115; color: #626775; box-shadow: none; }
+.tl-row.locked .track-btns button { color: #626775; opacity: .45; }
+.tl-row.locked .track-btns button:first-child { background: none; color: #fff; border: 0; opacity: 1; filter: none; }
+.lane.locked { background: #0b0c10; }
+.lane.locked .clip, .lane.locked .fxitem, .lane.locked .audioitem, .lane.locked .transition { filter: brightness(.55); }
+.dialog.settings.export-window { width: min(480px, calc(100vw - 32px)); max-height: calc(100vh - 32px); }
+.export-content { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow: auto; padding: 0 2px 2px; }
+.export-content .set-sec { margin: 2px 0 0; }
+.export-content .form-row.col .seg { width: 100%; }
+.export-content .form-row.col .seg button { min-height: 30px; }
+.export-content .form-row.col .text-input { width: 100%; box-sizing: border-box; }
+.export-content .form-row b { font-size: 12px; font-weight: 600; }
+.export-summary { display: grid; gap: 8px; padding: 12px; background: var(--panel2); border: 1px solid var(--line); border-radius: 7px; font-size: 12px; }
+.export-summary > div { display: flex; justify-content: space-between; gap: 12px; }
+.export-summary span { color: var(--muted); }
+.subtitle-dialog { width: min(850px, 95vw); max-height: min(85vh, 800px); }
+.subtitle-actions, .subtitle-shift { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.subtitle-shift { padding: 8px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.subtitle-shift input { width: 90px; margin-left: 6px; }
+.subtitle-list { min-height: 80px; max-height: 55vh; overflow: auto; }
+.subtitle-head, .subtitle-row { display: grid; grid-template-columns: 36px 88px 88px minmax(120px, 1fr); gap: 8px; align-items: start; }
+.subtitle-head { color: var(--muted); font-size: 11px; padding: 2px 0 6px; border-bottom: 1px solid var(--line); }
+.subtitle-row { padding: 6px 0; border-bottom: 1px solid #ffffff0d; }
+.subtitle-row input, .subtitle-row textarea { width: 100%; box-sizing: border-box; }
+.subtitle-row textarea { resize: vertical; min-height: 30px; }
+.subtitle-index { background: none; border: 0; color: var(--accent2); cursor: pointer; padding: 5px 0; text-align: left; }
+.lyrics-panel { display: flex; flex-direction: column; gap: 8px; min-height: 0; height: 100%; padding: 10px; box-sizing: border-box; }
+.lyrics-panel h3 { margin: 0; font-size: 14px; }
+.lyrics-panel .subtitle-list { max-height: none; flex: 1; }

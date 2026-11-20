@@ -345,6 +345,31 @@ export function copyKeys(): boolean {
   return true;
 }
 
+/** 屬性名稱選單：只複製該屬性的關鍵影格。 */
+function copyChannelKeys(owner: string, ch: string): boolean {
+  const keys = currentKeys(owner, ch).map((k) => ({ ch, id: k.id }));
+  if (!keys.length) return false;
+  selectKeys(owner, keys);
+  return copyKeys();
+}
+
+/** 屬性名稱選單：將單一來源屬性貼到指定目標屬性，可跨片段。 */
+function pasteChannelKeys(host: Host, ch: string): boolean {
+  if (!keyClipboard.length || keyClipboard.some((k) => k.ch !== keyClipboard[0].ch)) return false;
+  const lc = Math.min(host.duration, Math.max(0, useStore.getState().time - host.start));
+  let list = currentKeys(host.owner, ch);
+  const added: KeyRef[] = [];
+  for (const k of keyClipboard) {
+    const t = Math.min(host.duration, lc + k.t);
+    list = upsertKey(list, t, k.v).map((x) => (Math.abs(x.t - t) < 1 / 120 ? { ...x, ease: k.ease } : x));
+    const hit = keyAt(list, t);
+    if (hit) added.push({ ch, id: hit.id });
+  }
+  host.setKeys(ch, list);
+  selectKeys(host.owner, added);
+  return true;
+}
+
 /** 貼上到播放頭（同名屬性） */
 export function pasteKeys(): boolean {
   const host = currentHost();
@@ -652,6 +677,25 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
     if (k) seek(k.t);
   };
 
+  const channelMenu = (e: React.MouseEvent, ch: Channel) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openMenu(e.clientX, e.clientY, [
+      { label: $t('重設'), action: () => { host.setKeys(ch.id, null, ch.def); clearKeys(); } },
+      { separator: true },
+      { label: $t('全選關鍵影格'), action: ch.keys.length ? () => selectKeys(host.owner, currentKeys(host.owner, ch.id).map((k) => ({ ch: ch.id, id: k.id }))) : undefined },
+      { label: $t('複製關鍵影格'), action: ch.keys.length ? () => copyChannelKeys(host.owner, ch.id) : undefined },
+      { label: $t('貼上到播放頭'), action: keyClipboard.length && keyClipboard.every((k) => k.ch === keyClipboard[0].ch) ? () => pasteChannelKeys(host, ch.id) : undefined },
+    ]);
+  };
+
+  const sectionResetMenu = (e: React.MouseEvent, sec: Section) => {
+    if (!sec.onReset) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openMenu(e.clientX, e.clientY, [{ label: $t('重設這個區塊'), action: sec.onReset }]);
+  };
+
   /** 點關鍵影格：Ctrl 切換、Shift 加選；拖曳 = 選取的整組一起移動（吸附播放頭與其他關鍵影格） */
   const dragKey = (e: React.PointerEvent, ch: Channel, k: Keyframe) => {
     if (e.button !== 0) return;
@@ -788,7 +832,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
         return (
           <React.Fragment key={sec.id}>
             <div className="ec-row ec-section" data-sec={sec.id}>
-              <div className="ec-left" onClick={() => toggleSection(sec.id)}>
+              <div className="ec-left" onClick={() => toggleSection(sec.id)} onContextMenu={(e) => sectionResetMenu(e, sec)}>
                 <span className="twirl">{isCol ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span>
                 {sec.badge}
                 <span className={`ec-sec-title ${sec.dim ? 'dim' : ''}`}>{sec.title}</span>
@@ -801,7 +845,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
               <>
                 {sec.rows?.map((r) => (
                   <div key={r.label} className="ec-row">
-                    <div className="ec-left ec-plain"><span className="ec-label" title={typeof r.label === 'string' ? r.label : undefined}>{r.label}</span><div className="ec-node">{r.node}</div></div>
+                    <div className="ec-left ec-plain" onContextMenu={(e) => sectionResetMenu(e, sec)}><span className="ec-label" title={typeof r.label === 'string' ? r.label : undefined}>{r.label}</span><div className="ec-node">{r.node}</div></div>
                     <div className="ec-right ec-dim" onPointerDown={startMarquee} onContextMenu={(e) => laneMenu(e)} />
                   </div>
                 ))}
@@ -820,7 +864,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
                           <button className={`ec-watch ${animated ? 'on' : ''}`} title={animated ? $t('關閉動畫（移除所有關鍵影格）') : $t('開啟動畫（在播放頭加關鍵影格）')} onClick={() => toggleAnim(ch)}>
                             <Timer size={13} />
                           </button>
-                          <span className="ec-label" title={$t('{0}（右鍵數值可重設）', ch.label)}>{ch.label}</span>
+                          <span className="ec-label" title={ch.label} onContextMenu={(e) => channelMenu(e, ch)}>{ch.label}</span>
                           <DragNumber variant="text" value={ch.value} step={ch.step} min={ch.min} max={ch.max} suffix={ch.suffix} display={ch.display} def={ch.def} onChange={(v) => setValue(ch, v)} />
                           <span className="ec-nav">
                             {animated && (
