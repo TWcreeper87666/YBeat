@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { updateText } from '../engine/textAnchor';
 import { Film, MoreHorizontal, Plus, Replace, TriangleAlert } from 'lucide-react';
 import { $t } from '../i18n';
 import { downloadBlob } from '../engine/exporter';
@@ -253,7 +254,7 @@ export function LyricsPanel() {
                 value={c.text!.text}
                 disabled={locked}
                 onFocus={() => { const s = useStore.getState(); if (s.selection?.id !== c.id) s.select({ type: 'clip', id: c.id }); }}
-                onChange={(e) => useStore.getState().updateClip(c.id, { text: { ...c.text!, text: e.target.value } })}
+                onChange={(e) => updateText(c.id, { text: e.target.value })}
                 onKeyDown={(e) => onTextKey(e, c, i)}
               />
             </div>

@@ -1,6 +1,6 @@
 import { $t } from '../i18n';
 import { create } from 'zustand';
-import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, makeClip, useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
+import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, mergeModules, makeClip, useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
 import type { Module } from '../modules/builtin';
 import { resetHistory } from './history';
 import { clearDetachedMedia } from './detachedMedia';
@@ -137,7 +137,7 @@ export async function restoreProject() {
         audios: (data.audios ?? []).map((a) => makeAudio(a)),
         tracks: data.tracks ?? DEFAULT_TRACKS,
         format: data.format ?? DEFAULT_FORMAT,
-        ...(data.modules ? { modules: data.modules } : {}),
+        ...(data.modules ? { modules: mergeModules(data.modules) } : {}),
       });
     }
   } catch (e) {
@@ -229,7 +229,7 @@ export async function importProjectPack(file: Blob): Promise<void> {
     media, clips: pack.project.clips.map(makeClip), effects: pack.project.effects,
     audios: pack.project.audios.map(makeAudio), tracks: pack.project.tracks,
     format: pack.project.format ?? DEFAULT_FORMAT,
-    ...(pack.project.modules ? { modules: pack.project.modules } : {}),
+    ...(pack.project.modules ? { modules: mergeModules(pack.project.modules) } : {}),
     selection: null, selected: [], time: 0, playing: false, loop: null,
   });
   resetHistory();

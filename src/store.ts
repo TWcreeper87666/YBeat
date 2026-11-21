@@ -101,8 +101,6 @@ export interface Clip extends ItemBase {
   rate: number;
   /** 文字 / 字幕片段（沒有素材，mediaId 為空字串） */
   text?: TextStyle;
-  /** 字幕／歌詞片段；一般標題文字不參與 SRT / LRC 匯出 */
-  caption?: boolean;
   /** 影片原音變速時保持音調（沒設定 = 保持；有連結音訊時看音訊片段的設定） */
   keepPitch?: boolean;
   /** 混合模式（疊到下面圖層的方式），預設 normal */
@@ -340,7 +338,8 @@ export function makeClip(p: Partial<Clip> & { mediaId: string }): Clip {
     rate: 1,
     ...p,
   };
-  if (c.caption === undefined && c.text && (c.text.size === 64 || c.text.size === 60) && Math.abs(c.transform.y - .3) < .01) c.caption = true;
+  // 文字樣式缺欄位時用預設值補（例如新加的 fill / strokes），不然渲染會出錯
+  if (c.text) c.text = { ...DEFAULT_TEXT, ...c.text };
   // 舊版只有 scale → scaleX / scaleY（transformEnd 也要轉，下面的舊版動態轉換才拿得到值）
   Object.assign(c, normalizeScale(c));
   if (c.transformEnd && (c.transformEnd as { scale?: number }).scale !== undefined) {
@@ -975,7 +974,6 @@ export const useStore = create<State>()(
             duration: dur,
             fit: 'contain',
             text: user ? { ...DEFAULT_TEXT, ...user.style } : { ...DEFAULT_TEXT, ...p.style },
-            caption: user ? user.caption : presetId === 'subtitle' || presetId === 'boxed',
             transform: user ? { ...DEFAULT_TRANSFORM, ...user.transform } : { ...DEFAULT_TRANSFORM, y: p.y },
           });
           // 我的樣式：一起套上存下來的轉場與片段特效（模組已刪除的略過）
@@ -1707,19 +1705,22 @@ export const useStore = create<State>()(
       // 模組（你寫的程式碼）存在 localStorage；專案與素材另外存在 IndexedDB（見 engine/project.ts）
       partialize: (s) => ({ modules: s.modules }),
       merge: (persisted, current) => {
-        const saved: Module[] = (persisted as { modules?: Module[] })?.modules ?? [];
-        const byId = new Map(saved.map((m) => [m.id, m]));
-        // 存檔裡的內建模組程式碼（可能被使用者改過）只在版本相同時沿用
-        const modules = BUILTIN_MODULES.map((b) => {
-          const m = byId.get(b.id);
-          return m && (m.rev ?? 1) === (b.rev ?? 1) ? { ...b, code: m.code } : b;
-        });
-        for (const m of saved) if (!BUILTIN_MODULES.some((b) => b.id === m.id)) modules.push(m);
-        return { ...current, modules };
+        return { ...current, modules: mergeModules((persisted as { modules?: Module[] })?.modules ?? []) };
       },
     },
   ),
 );
+
+/** 存檔（localStorage / 專案 / 匯入）裡的模組 + 目前的內建模組：內建模組的程式碼只在版本相同時沿用存檔的 */
+export function mergeModules(saved: Module[]): Module[] {
+  const byId = new Map(saved.map((m) => [m.id, m]));
+  const modules = BUILTIN_MODULES.map((b) => {
+    const m = byId.get(b.id);
+    return m && (m.rev ?? 1) === (b.rev ?? 1) ? { ...b, code: m.code } : b;
+  });
+  for (const m of saved) if (!BUILTIN_MODULES.some((b) => b.id === m.id)) modules.push(m);
+  return modules;
+}
 
 // ───────────────────────── 影音連結：一邊改了，另一邊跟著改 ─────────────────────────
 

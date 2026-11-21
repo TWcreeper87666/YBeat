@@ -30,6 +30,7 @@ import { importFiles, pickFiles } from './engine/media';
 import { LyricsPanel } from './ui/SubtitlesDialog';
 import { ColorPanel } from './ui/ColorPanel';
 import { EditorWindow, openEditorWindow, useEditorWindow } from './ui/EditorWindow';
+import { snapToDevicePixels } from './ui/pixelSnap';
 
 const FPS = 60;
 
@@ -494,7 +495,7 @@ function onKey(e: KeyboardEvent) {
     case 'ArrowDown': { e.preventDefault(); const p = editPoints().find((t) => t > s.time + 1e-3); if (p !== undefined) s.setTime(p); break; }
     case 'Escape': stopPreviewFx(); closeSource(); s.setLoop(null); s.select(null); break;
     case 'F1': e.preventDefault(); openDialog('shortcuts'); break;
-    case 'Enter': if (s.selection?.type === 'clip' || s.selection?.type === 'effect') { e.preventDefault(); openEditorWindow(); } break;
+    case 'Enter': if (s.selection?.type === 'clip' || s.selection?.type === 'effect' || s.selection?.type === 'transition') { e.preventDefault(); openEditorWindow(); } break;
     case '=': case '+': s.setPps(s.pps * 1.25); break;
     case '-': s.setPps(s.pps / 1.25); break;
     case '\\': window.dispatchEvent(new Event('timeline-fit')); break;
@@ -517,6 +518,7 @@ export default function App() {
     for (const p of PANELS) {
       const d = document.createElement('div');
       d.className = `panel-host panel-${p.id}`;
+      snapToDevicePixels(d);
       h[p.id] = d;
     }
     return h;

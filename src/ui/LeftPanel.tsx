@@ -7,13 +7,16 @@ import { CATEGORIES, categoryOf } from '../modules/categories';
 import { importFiles, pickFiles, relinkWithPicker, removeMedia, removeMediaEverywhere } from '../engine/media';
 import { applyMediaBatch, planMediaBatch } from '../engine/mediaBatch';
 import { nextStart } from '../engine/overlap';
-import { FONTS, TEXT_PRESETS, DEFAULT_TEXT, renderText, type TextStyle } from '../engine/text';
+import { FONTS, TEXT_PRESETS, DEFAULT_TEXT, MAX_STROKES, defaultShadow, newStroke, renderText, shadowOf, type Shadow, type Stroke, type TextStyle } from '../engine/text';
+import { PaintEdit } from './PaintEdit';
 import { DEFAULT_MASK, type Mask } from '../engine/mask';
 import { CLIP_MASK_ID } from '../modules/extra';
 import { mediaBeats } from '../engine/beats';
 import { shapeName } from '../engine/maskShapes';
-import type { Keyframe } from '../engine/keyframes';
-import { parseDuration, parseParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
+import type { Bez, Keyframe } from '../engine/keyframes';
+import { isNumeric, parseDuration, parseParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
+import { CurveEdit } from './CurveEdit';
+import { updateText } from '../engine/textAnchor';
 import { computeFrame, transitionWindow, sortClips, makeCtx } from '../engine/renderer';
 import { DEFAULT_TRANSFORM, FITS, type Fit } from '../engine/transform';
 import { plainSpeed } from '../engine/remap';
@@ -322,7 +325,6 @@ async function saveTextStyle(clipId: string) {
     name: name.trim(),
     style: { ...c.text, text: sample },
     transform: { ...c.transform },
-    caption: !!c.caption,
     transitionIn: c.transitionIn ? structuredClone(c.transitionIn) : null,
     transitionOut: c.transitionOut ? structuredClone(c.transitionOut) : null,
     effects: structuredClone(c.effects ?? []),
@@ -622,7 +624,21 @@ function ColorParamWidget({ value, onChange, onSample }: { value: string; onChan
   );
 }
 
+/** point 參數（不打 key 的，例如轉場）：X / Y 兩個欄位，像素顯示 */
+function PointWidget({ v, def, onChange }: { v: number[]; def: number[]; onChange: (v: number[]) => void }) {
+  const fmt = useStore((s) => s.format);
+  return (
+    <div className="point-row">
+      {[0, 1].map((a) => (
+        <DragNumber key={a} variant="text" value={v[a]} step={0.001} display={a ? fmt.h : fmt.w} suffix=" px" def={def[a]} onChange={(x) => onChange(a ? [v[0], x] : [x, v[1]])} />
+      ))}
+    </div>
+  );
+}
+
 function ParamWidget({ d, v, onChange, sampleColor }: { d: ParamDef; v: ParamValue; onChange: (v: ParamValue) => void; sampleColor?: boolean }) {
+  if (d.type === 'point') return <PointWidget v={(Array.isArray(v) ? v : d.def) as number[]} def={d.def as number[]} onChange={onChange} />;
+  if (d.type === 'curve') return <CurveEdit value={(Array.isArray(v) && v.length === 4 ? v : d.def) as Bez} onChange={onChange} />;
   if (d.type === 'bool') return <label className="switch"><input type="checkbox" checked={Boolean(v)} onChange={(e) => onChange(e.target.checked)} /><span /></label>;
   if (d.type === 'color') return <ColorParamWidget value={String(v)} onChange={onChange} onSample={sampleColor ? onChange : undefined} />;
   return <DragNumber variant="text" value={Number(v)} step={d.type === 'int' ? 1 : undefined} min={d.min} max={d.max} decimals={d.type === 'int' ? 0 : undefined} def={Number(d.def)} onChange={(x) => onChange(d.type === 'int' ? Math.round(x) : x)} />;
@@ -699,25 +715,25 @@ function MatteStatus({ clip, media }: { clip: Clip; media: Media }) {
 
 /** 文字片段的內容與樣式 */
 function textSection(clip: Clip & { text: TextStyle }): Section {
-  const set = (p: Partial<TextStyle>) => {
-    const cur = useStore.getState().clips.find((c) => c.id === clip.id);
-    if (cur?.text) useStore.getState().updateClip(clip.id, { text: { ...cur.text, ...p } });
-  };
+  // 靠左 / 靠右對齊時，改內容或樣式後對齊的那一邊不動
+  const set = (p: Partial<TextStyle>) => updateText(clip.id, p);
   const t = clip.text;
+  const sh = shadowOf(t);
+  // 所在的影片軌有接收字幕 → 可以把設定套用到全部字幕
+  const captioned = !useStore.getState().tracks.video[clip.track]?.noCaptions;
   return {
     id: 'text',
     title: $t('文字'),
     actions: (
       <>
-        {clip.caption && <button className="ec-icon" title={$t('套用到全部字幕')} onClick={(e) => captionApplyMenu(e, clip.id)}><CopyCheck size={13} /></button>}
+        {captioned && <button className="ec-icon" title={$t('套用到全部字幕')} onClick={(e) => captionApplyMenu(e, clip.id)}><CopyCheck size={13} /></button>}
         <button className="ec-icon" title={$t('存成我的樣式')} onClick={() => saveTextStyle(clip.id)}><BookmarkPlus size={13} /></button>
       </>
     ),
     rows: [
-      { label: $t('列入字幕／歌詞匯出'), node: <Switch v={!!clip.caption} on={(v) => useStore.getState().updateClip(clip.id, { caption: v })} /> },
       {
         label: $t('內容'),
-        node: <textarea className="text-area" rows={Math.min(6, Math.max(2, t.text.split('\n').length))} value={t.text} onChange={(e) => set({ text: e.target.value })} onKeyDown={(e) => e.stopPropagation()} />,
+        node: <textarea className="text-area" rows={Math.min(6, Math.max(1, t.text.split('\n').length))} value={t.text} onChange={(e) => set({ text: e.target.value })} onKeyDown={(e) => e.stopPropagation()} />,
       },
       {
         label: $t('字型'),
@@ -729,39 +745,78 @@ function textSection(clip: Clip & { text: TextStyle }): Section {
         ),
       },
       { label: $t('大小'), node: <DragNumber variant="text" value={t.size} min={8} max={600} step={1} decimals={0} suffix=" px" def={DEFAULT_TEXT.size} onChange={(v) => set({ size: Math.round(v) })} /> },
-      { label: $t('顏色'), node: <input type="color" className="color" value={t.color} onChange={(e) => set({ color: e.target.value })} /> },
+      { label: $t('填色'), node: <PaintEdit value={t.fill} onChange={(fill) => set({ fill })} /> },
       {
         label: $t('樣式'),
         node: (
-          <div className="seg small-seg">
-            <button className={t.bold ? 'on' : ''} onClick={() => set({ bold: !t.bold })} title={$t('粗體')}><Bold size={13} /></button>
-            <button className={t.italic ? 'on' : ''} onClick={() => set({ italic: !t.italic })} title={$t('斜體')}><Italic size={13} /></button>
-            {(['left', 'center', 'right'] as const).map((a) => (
-              <button key={a} className={t.align === a ? 'on' : ''} onClick={() => set({ align: a })} title={a === 'left' ? $t('靠左') : a === 'center' ? $t('置中') : $t('靠右')}>
-                {a === 'left' ? <AlignLeft size={13} /> : a === 'center' ? <AlignCenter size={13} /> : <AlignRight size={13} />}
-              </button>
-            ))}
+          // 粗體 / 斜體（各自開關）跟對齊（三選一）分成兩組
+          <div className="seg-group">
+            <div className="seg small-seg">
+              <button className={t.bold ? 'on' : ''} onClick={() => set({ bold: !t.bold })} title={$t('粗體')}><Bold size={13} /></button>
+              <button className={t.italic ? 'on' : ''} onClick={() => set({ italic: !t.italic })} title={$t('斜體')}><Italic size={13} /></button>
+            </div>
+            <div className="seg small-seg">
+              {(['left', 'center', 'right'] as const).map((a) => (
+                <button key={a} className={t.align === a ? 'on' : ''} onClick={() => set({ align: a })} title={a === 'left' ? $t('靠左') : a === 'center' ? $t('置中') : $t('靠右')}>
+                  {a === 'left' ? <AlignLeft size={13} /> : a === 'center' ? <AlignCenter size={13} /> : <AlignRight size={13} />}
+                </button>
+              ))}
+            </div>
           </div>
         ),
       },
       { label: $t('行高'), node: <DragNumber variant="text" value={t.lineHeight} min={0.6} max={3} step={0.05} def={DEFAULT_TEXT.lineHeight} onChange={(v) => set({ lineHeight: v })} /> },
-      { label: $t('描邊顏色'), node: <input type="color" className="color" value={t.stroke} onChange={(e) => set({ stroke: e.target.value })} /> },
-      { label: $t('描邊粗細'), node: <DragNumber variant="text" value={t.strokeW} min={0} max={60} step={0.5} suffix=" px" def={0} onChange={(v) => set({ strokeW: v })} /> },
+      // 多層外框：第一層最靠近字，後面每一層接在前一層外面
       {
-        label: $t('描邊轉角'),
+        label: $t('外框'),
         node: (
-          <div className="seg small-seg">
-            {(['round', 'miter', 'bevel'] as const).map((j) => (
-              <button key={j} className={(t.strokeJoin ?? 'round') === j ? 'on' : ''} onClick={() => set({ strokeJoin: j })}>
-                {j === 'round' ? $t('圓角') : j === 'miter' ? $t('尖角') : $t('斜切')}
-              </button>
-            ))}
-          </div>
+          <button className="btn small-h" disabled={t.strokes.length >= MAX_STROKES} onClick={() => set({ strokes: [...t.strokes, newStroke(t.strokes.length ? '#ffffff' : '#000000', 8)] })}>
+            <Plus size={12} /> {$t('新增外框')}
+          </button>
         ),
       },
+      ...t.strokes.flatMap((k, i) => {
+        const setK = (p: Partial<Stroke>) => set({ strokes: t.strokes.map((x, j) => (j === i ? { ...x, ...p } : x)) });
+        return [
+          {
+            label: $t('外框 {0}', i + 1),
+            node: (
+              <div className="stroke-head">
+                <PaintEdit value={k.paint} onChange={(paint) => setK({ paint })} />
+                <button className="ec-icon danger" title={$t('移除外框')} onClick={() => set({ strokes: t.strokes.filter((_, j) => j !== i) })}><Trash2 size={13} /></button>
+              </div>
+            ),
+          },
+          {
+            label: $t('粗細 / 轉角'),
+            node: (
+              <div className="stroke-head">
+                <DragNumber variant="text" value={k.width} min={0} max={60} step={0.5} suffix=" px" def={8} onChange={(width) => setK({ width })} />
+                <select className="select" value={k.join} onChange={(e) => setK({ join: e.target.value as Stroke['join'] })}>
+                  <option value="round">{$t('圓角')}</option>
+                  <option value="miter">{$t('尖角')}</option>
+                  <option value="bevel">{$t('斜切')}</option>
+                </select>
+              </div>
+            ),
+          },
+        ];
+      }),
       { label: $t('底框顏色'), node: <input type="color" className="color" value={t.bg} onChange={(e) => set({ bg: e.target.value })} /> },
       { label: $t('底框不透明度'), node: <DragNumber variant="text" value={t.bgOpacity} min={0} max={1} step={0.01} display={100} suffix="%" def={0} onChange={(v) => set({ bgOpacity: v })} /> },
-      { label: $t('陰影'), node: <Switch v={t.shadow} on={(v) => set({ shadow: v })} /> },
+      { label: $t('陰影'), node: <Switch v={!!sh} on={(v) => set({ shadow: v ? defaultShadow(t.size) : null })} /> },
+      ...(sh
+        ? (() => {
+            const setSh = (p: Partial<Shadow>) => set({ shadow: { ...sh, ...p } });
+            return [
+              { label: $t('陰影顏色'), node: <input type="color" className="color" value={sh.color} onChange={(e) => setSh({ color: e.target.value })} /> },
+              { label: $t('陰影不透明度'), node: <DragNumber variant="text" value={sh.opacity} min={0} max={1} step={0.01} display={100} suffix="%" def={0.8} onChange={(opacity) => setSh({ opacity })} /> },
+              { label: $t('陰影角度'), node: <DragNumber variant="text" value={sh.angle} min={-360} max={360} step={1} decimals={0} suffix="°" def={90} onChange={(v) => setSh({ angle: Math.round(v) })} /> },
+              { label: $t('陰影距離'), node: <DragNumber variant="text" value={sh.distance} min={0} max={200} step={0.5} suffix=" px" def={defaultShadow(t.size).distance} onChange={(distance) => setSh({ distance })} /> },
+              { label: $t('陰影模糊'), node: <DragNumber variant="text" value={sh.blur} min={0} max={200} step={0.5} suffix=" px" def={defaultShadow(t.size).blur} onChange={(blur) => setSh({ blur })} /> },
+            ];
+          })()
+        : []),
     ],
     onReset: () => set({ ...DEFAULT_TEXT, text: t.text }),
   };
@@ -1050,7 +1105,7 @@ function effectSections(
   const ch = o.ch ?? ((x: string) => x);
   const mapCh = (l: Channel[]) => l.map((c) => ({ ...c, id: ch(c.id) }));
   const defs = mod ? parseParams(mod.code) : [];
-  const other = defs.filter((d) => d.type === 'bool' || d.type === 'color');
+  const other = defs.filter((d) => d.type === 'bool' || d.type === 'color' || d.type === 'curve');
   const name = o.title ?? (mod ? displayName(mod.name) : $t('特效'));
   const { rows: maskRows, chs: maskChs, reset: resetMask } = maskBlock(f, local, update, { fresh: o.fresh, editKey: o.maskKey, drawKey: o.drawKey, ch });
 
@@ -1071,7 +1126,7 @@ function effectSections(
     sections.push({ id: `${o.idBase}.mask`, title: $t('遮罩'), rows: [{ ...maskRows[0], label: $t('形狀') }, ...maskRows.slice(1)], channels: maskChs, onReset: resetMask });
   }
   // 音訊反應：數值參數跟著音量 / 節拍變化
-  const numeric = defs.filter((d) => d.type === 'float' || d.type === 'int');
+  const numeric = defs.filter(isNumeric);
   if (numeric.length) {
     const setDrive = (n: string, v: AudioDrive | null) => {
       const cur = { ...(f.audio ?? {}) };
@@ -1221,7 +1276,7 @@ function EffectInspector({ id }: { id: string }) {
 }
 
 /** 沒有時間軸的屬性列表（轉場、音訊） */
-function PlainControls({ title, rows, footer }: { title: React.ReactNode; rows: { label: string; node: React.ReactNode }[]; footer?: React.ReactNode }) {
+function PlainControls({ title, rows, footer, actions }: { title: React.ReactNode; rows: { label: string; node: React.ReactNode }[]; footer?: React.ReactNode; actions?: { title: string; node: React.ReactNode } }) {
   return (
     <div className="ec plain">
       <div className="ec-row ec-header"><div className="ec-left">{title}</div></div>
@@ -1230,6 +1285,12 @@ function PlainControls({ title, rows, footer }: { title: React.ReactNode; rows: 
           <div className="ec-left ec-plain"><span className="ec-label">{r.label}</span><div className="ec-node">{r.node}</div></div>
         </div>
       ))}
+      {actions && (
+        <>
+          <div className="ec-row ec-section plain-actions-head"><div className="ec-left"><span className="ec-sec-title">{actions.title}</span></div></div>
+          <div className="ec-footer">{actions.node}</div>
+        </>
+      )}
       {footer && <div className="ec-footer">{footer}</div>}
     </div>
   );
@@ -1274,18 +1335,18 @@ function TransitionInspector({ selId }: { selId: string }) {
           { label: $t('轉場'), node: <ModuleSelect kind="transition" value={tr.moduleId} onChange={(m) => setTransition(clipId, m, side)} /> },
           { label: $t('長度'), node: <DragNumber variant="text" value={Math.min(tr.duration, maxD)} min={0.05} max={maxD} step={0.01} suffix="s" def={0.4} onChange={(v) => upd({ duration: v })} /> },
           ...paramRows(defs, tr.params, (p) => upd({ params: p })),
-          {
-            label: $t('套用到同軌'),
-            node: (
-              <div className="btn-row">
-                <button className="btn small-h" onClick={() => apply('cuts')} title={$t('套用到這條軌道的所有剪接點')}>{$t('剪接點')}</button>
-                <button className="btn small-h" onClick={() => apply('heads')} title={$t('套用到這條軌道所有片段的開頭（從透明轉入）')}>{$t('開頭')}</button>
-                <button className="btn small-h" onClick={() => apply('tails')} title={$t('套用到這條軌道所有片段的結尾（轉到透明）')}>{$t('結尾')}</button>
-                <button className="btn small-h" onClick={syncAll} title={$t('這條軌道上已經有的轉場，全部改成跟這個一樣（種類、參數、長度）')}>{$t('同步現有')}</button>
-              </div>
-            ),
-          },
         ]}
+        actions={{
+          title: $t('套用到同軌'),
+          node: (
+            <div className="tr-apply">
+              <button className="btn" onClick={() => apply('cuts')} title={$t('套用到這條軌道的所有剪接點')}>{$t('剪接點')}</button>
+              <button className="btn" onClick={() => apply('heads')} title={$t('套用到這條軌道所有片段的開頭（從透明轉入）')}>{$t('開頭')}</button>
+              <button className="btn" onClick={() => apply('tails')} title={$t('套用到這條軌道所有片段的結尾（轉到透明）')}>{$t('結尾')}</button>
+              <button className="btn" onClick={syncAll} title={$t('這條軌道上已經有的轉場，全部改成跟這個一樣（種類、參數、長度）')}>{$t('同步現有')}</button>
+            </div>
+          ),
+        }}
         footer={mod && <ModuleCode module={mod} onFork={(nid) => upd({ moduleId: nid })} />}
       />
     </>

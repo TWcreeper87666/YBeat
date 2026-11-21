@@ -27,6 +27,7 @@ export const ANIM_PROPS: { prop: AnimProp; label: string; step: number; suffix?:
 export const EASE_PRESETS: { id: string; label: string; ease: Ease }[] = [
   { id: 'linear', label: $t('線性'), ease: [0, 0, 1, 1] },
   { id: 'inOut', label: $t('緩入緩出'), ease: [0.42, 0, 0.58, 1] },
+  { id: 'inOut3', label: $t('強緩入緩出'), ease: [0.65, 0, 0.35, 1] },
   { id: 'in', label: $t('漸快 (Ease In)'), ease: [0.42, 0, 1, 1] },
   { id: 'out', label: $t('漸慢 (Ease Out)'), ease: [0, 0, 0.58, 1] },
   { id: 'expoOut', label: $t('急停 (Expo Out)'), ease: [0.16, 1, 0.3, 1] },

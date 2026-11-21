@@ -46,11 +46,13 @@ const zoomPulse = `// 縮放脈衝（Zoom Bounce）：鼓點上彈一下
 // @param amount: float = 0.15 (0..1) "放大量"
 // @param blur: float = 0.4 (0..1) "放射模糊"
 // @param bounce: bool = true "回彈"
+// @param center: point = 0.5,0.5 "中心"
+// @param ease: curve = inOut3 "回落曲線"
 vec4 effect(vec2 uv) {
   float p = u_progress;
-  float k = p < 0.2 ? easeOutExpo(p / 0.2) : 1.0 - easeInOutCubic((p - 0.2) / 0.8);
+  float k = p < 0.2 ? easeOutExpo(p / 0.2) : 1.0 - curve(ease, (p - 0.2) / 0.8);
   if (bounce) k -= 0.25 * sin(PI * clamp((p - 0.55) / 0.45, 0.0, 1.0));
-  vec2 c = vec2(0.5);
+  vec2 c = center;
   vec2 base = zoomUV(uv, 1.0 + amount * k, c);
   vec4 acc = vec4(0.0);
   for (int i = 0; i < 12; i++) acc += tex(mirrorUV(mix(base, c, float(i) / 11.0 * blur * max(k, 0.0) * 0.12)));
@@ -169,13 +171,14 @@ const twirl = `// 漩渦 Twirl
 // @param angle: float = 3 (-10..10) "旋轉量"
 // @param radius: float = 0.6 (0.1..1.5) "範圍"
 // @param decay: float = 2 (0..6) "衰減"
+// @param center: point = 0.5,0.5 "中心"
 vec4 effect(vec2 uv) {
-  vec2 p = uv - 0.5;
+  vec2 p = uv - center;
   p.x *= ASPECT;
   float k = angle * pow(1.0 - u_progress, decay) * smoothstep(radius, 0.0, length(p));
   p = rot(k) * p;
   p.x /= ASPECT;
-  return tex(mirrorUV(p + 0.5));
+  return tex(mirrorUV(p + center));
 }
 `;
 
@@ -218,8 +221,9 @@ const kaleido = `// 萬花筒 Kaleidoscope
 // @param segments: float = 6 (2..16) "分割數"
 // @param spin: float = 0.5 (-4..4) "旋轉速度"
 // @param zoom: float = 1 (0.3..3) "縮放"
+// @param center: point = 0.5,0.5 "中心"
 vec4 effect(vec2 uv) {
-  vec2 p = uv - 0.5;
+  vec2 p = uv - center;
   p.x *= ASPECT;
   float a = atan(p.y, p.x) + u_local * spin;
   float r = length(p) / zoom;
@@ -227,7 +231,7 @@ vec4 effect(vec2 uv) {
   a = abs(mod(a, seg) - seg * 0.5);
   vec2 q = vec2(cos(a), sin(a)) * r;
   q.x /= ASPECT;
-  return tex(mirrorUV(q + 0.5));
+  return tex(mirrorUV(q + center));
 }
 `;
 
@@ -370,8 +374,9 @@ vec4 transition(vec2 uv) {
 const stretch = `// 拉伸擠壓 Stretch
 // @param vertical: bool = false "垂直"
 // @param power: float = 6 (1..20) "拉伸量"
+// @param ease: curve = inOut3 "曲線"
 vec4 transition(vec2 uv) {
-  float p = easeInOutCubic(progress);
+  float p = curve(ease, progress);
   vec2 q = uv - 0.5;
   float k = p < 0.5 ? 1.0 + power * pow(p * 2.0, 2.0) : 1.0 + power * pow((1.0 - p) * 2.0, 2.0);
   if (vertical) q.y /= k; else q.x /= k;
@@ -397,10 +402,9 @@ vec4 transition(vec2 uv) {
 const zoomBlurTr = `// 縮放模糊轉場（拉遠 → 推近）
 // @param strength: float = 0.6 (0..2) "縮放量"
 // @param blur: float = 0.5 (0..1) "模糊"
-// @param cx: float = 0.5 (0..1) "中心 X"
-// @param cy: float = 0.5 (0..1) "中心 Y"
+// @param center: point = 0.5,0.5 "中心"
 vec4 radialS(sampler2D s, vec2 uv, float z, float b) {
-  vec2 c = vec2(cx, cy);
+  vec2 c = center;
   vec2 base = zoomUV(uv, z, c);
   vec4 acc = vec4(0.0);
   for (int i = 0; i < 14; i++) acc += texture(s, mirrorUV(mix(base, c, float(i) / 13.0 * b)));
@@ -435,14 +439,14 @@ vec4 effect(vec2 uv) {
 `;
 
 const scaleIn = `// 縮放推入：新畫面從小放大蓋上來
-// @param from: float = 0.3 (0..1) "起始大小"
-// @param cx: float = 0.5 (0..1) "中心 X"
-// @param cy: float = 0.5 (0..1) "中心 Y"
+// @param center: point = 0.5,0.5 "中心"
+// @param from: float = 0.3 (0..1) "起始大小" @box(center)
+// @param ease: curve = back "曲線"
 vec4 transition(vec2 uv) {
-  float p = easeOutBack(clamp(progress, 0.0, 1.0));
+  float p = curve(ease, progress);
   float z = mix(from, 1.0, p);
-  vec2 q = zoomUV(uv, z, vec2(cx, cy));
-  vec4 b = getFrom(zoomUV(uv, 1.0 + progress * 0.15, vec2(cx, cy))) * (1.0 - progress * 0.4);
+  vec2 q = zoomUV(uv, z, center);
+  vec4 b = getFrom(zoomUV(uv, 1.0 + progress * 0.15, center)) * (1.0 - progress * 0.4);
   if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0) return b;
   vec4 t = getTo(q) * smoothstep(0.0, 0.25, progress);
   return t + b * (1.0 - t.a);
@@ -450,13 +454,13 @@ vec4 transition(vec2 uv) {
 `;
 
 const scaleOut = `// 縮放推出：舊畫面縮小飛走，露出新畫面
-// @param to: float = 0.2 (0..1) "結束大小"
+// @param center: point = 0.5,0.5 "中心"
+// @param to: float = 0.2 (0..1) "結束大小" @box(center)
 // @param spin: float = 0 (-2..2) "旋轉圈數"
-// @param cx: float = 0.5 (0..1) "中心 X"
-// @param cy: float = 0.5 (0..1) "中心 Y"
+// @param ease: curve = inOut3 "曲線"
 vec4 transition(vec2 uv) {
-  float p = easeInOutCubic(clamp(progress, 0.0, 1.0));
-  vec2 c = vec2(cx, cy);
+  float p = curve(ease, progress);
+  vec2 c = center;
   vec2 q = rotateUV(zoomUV(uv, mix(1.0, to, p), c), -spin * 2.0 * PI * p, c);
   vec4 b = getTo(zoomUV(uv, mix(0.85, 1.0, p), c));
   if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0) return b;
@@ -468,8 +472,9 @@ vec4 transition(vec2 uv) {
 const pushTr = `// 推移：新畫面把舊畫面推出去（帶一點動態模糊）
 // @param dir: int = 0 (0..3) "方向（0 左 1 右 2 上 3 下）"
 // @param blur: float = 0.4 (0..1) "模糊"
+// @param ease: curve = inOut3 "曲線"
 vec4 transition(vec2 uv) {
-  float p = easeInOutCubic(clamp(progress, 0.0, 1.0));
+  float p = curve(ease, progress);
   vec2 d = dir == 0 ? vec2(-1.0, 0.0) : dir == 1 ? vec2(1.0, 0.0) : dir == 2 ? vec2(0.0, 1.0) : vec2(0.0, -1.0);
   float sp = sin(progress * PI) * blur * 0.08;
   vec4 acc = vec4(0.0);
@@ -486,8 +491,9 @@ vec4 transition(vec2 uv) {
 
 const flipTr = `// 翻轉：像卡片一樣水平翻面
 // @param depth: float = 0.4 (0..1) "透視"
+// @param ease: curve = inOut3 "曲線"
 vec4 transition(vec2 uv) {
-  float p = easeInOutCubic(clamp(progress, 0.0, 1.0));
+  float p = curve(ease, progress);
   float a = p * PI;
   float w = abs(cos(a));
   if (w < 1e-3) return vec4(0.0);
@@ -532,17 +538,17 @@ const mk = (id: string, kind: ModuleKind, name: string, code: string, rev?: numb
 export const EXTRA_MODULES: Module[] = [
   mk('fx-shakeblur', 'effect', '模糊晃動 Shake Blur', shakeBlur),
   mk('fx-motionblur', 'effect', '動態模糊 Motion Blur', motionBlur),
-  mk('fx-zoompulse', 'effect', '縮放脈衝 Zoom Bounce', zoomPulse),
+  mk('fx-zoompulse', 'effect', '縮放脈衝 Zoom Bounce', zoomPulse, 2),
   mk('fx-glitch', 'effect', '故障 Glitch', glitch),
   mk('fx-strobe', 'effect', '頻閃 Strobe', strobe),
   mk('fx-invert', 'effect', '反相閃 Invert', invert),
   mk('fx-hue', 'effect', '色相偏移 Hue Shift', hueShift),
   mk('fx-glow', 'effect', '光暈 Glow', glow),
   mk('fx-wave', 'effect', '波浪扭曲 Wave Warp', wave),
-  mk('fx-twirl', 'effect', '漩渦 Twirl', twirl),
+  mk('fx-twirl', 'effect', '漩渦 Twirl', twirl, 2),
   mk('fx-mirror', 'effect', '鏡像 Mirror', mirror),
   mk('fx-split', 'effect', '分割畫面 Split Screen', split),
-  mk('fx-kaleido', 'effect', '萬花筒 Kaleidoscope', kaleido),
+  mk('fx-kaleido', 'effect', '萬花筒 Kaleidoscope', kaleido, 2),
   mk('fx-pixelate', 'effect', '像素化 Pixelate', pixelate),
   mk('fx-bw', 'effect', '黑白高反差 B&W', bw),
   mk('fx-vhs', 'effect', 'VHS 掃描線', vhs),
@@ -554,12 +560,12 @@ export const EXTRA_MODULES: Module[] = [
   mk(CLIP_MASK_ID, 'effect', '片段遮罩 Clip Mask', clipMask),
   mk('tr-pixelate', 'transition', '像素化 Pixelate', pixelTr),
   mk('tr-glitch', 'transition', '故障 Glitch', glitchTr),
-  mk('tr-stretch', 'transition', '拉伸 Stretch', stretch),
+  mk('tr-stretch', 'transition', '拉伸 Stretch', stretch, 2),
   mk('tr-clock', 'transition', '時鐘擦除 Radial', clockWipe),
-  mk('tr-zoomblur', 'transition', '縮放模糊 Zoom Blur', zoomBlurTr, 2),
-  mk('tr-scalein', 'transition', '縮放推入 Scale In', scaleIn),
-  mk('tr-scaleout', 'transition', '縮放推出 Scale Out', scaleOut),
-  mk('tr-push', 'transition', '推移 Push', pushTr),
-  mk('tr-flip', 'transition', '翻轉 Flip', flipTr),
+  mk('tr-zoomblur', 'transition', '縮放模糊 Zoom Blur', zoomBlurTr, 3),
+  mk('tr-scalein', 'transition', '縮放推入 Scale In', scaleIn, 2),
+  mk('tr-scaleout', 'transition', '縮放推出 Scale Out', scaleOut, 2),
+  mk('tr-push', 'transition', '推移 Push', pushTr, 2),
+  mk('tr-flip', 'transition', '翻轉 Flip', flipTr, 2),
   mk('tr-rewind', 'transition', '倒帶 Rewind', rewindTr),
 ];

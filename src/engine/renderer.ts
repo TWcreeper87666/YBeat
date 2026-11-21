@@ -6,7 +6,7 @@ import { maskAt, type Mask } from './mask';
 import { FIELD_RANGE, getShapeField, maskFieldKey, type ShapeField } from './maskShapes';
 import { CLIP_MASK_ID } from '../modules/extra';
 import { renderText, textKey } from './text';
-import { hexToRgb, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
+import { hexToRgb, isNumeric, paramAt, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
 import { clipSource, plainSpeed } from './remap';
 import { MATTE_SIZE, matteAt, requestMatte } from './matte';
 import { clipTransformAt } from './transform';
@@ -116,10 +116,21 @@ float easeOutExpo(float x) { return x >= 1.0 ? 1.0 : 1.0 - pow(2.0, -10.0 * x); 
 float easeInExpo(float x) { return x <= 0.0 ? 0.0 : pow(2.0, 10.0 * x - 10.0); }
 float easeInOutCubic(float x) { return x < 0.5 ? 4.0 * x * x * x : 1.0 - pow(-2.0 * x + 2.0, 3.0) / 2.0; }
 float easeOutBack(float x) { float c1 = 1.70158, c3 = c1 + 1.0; return 1.0 + c3 * pow(x - 1.0, 3.0) + c1 * pow(x - 1.0, 2.0); }
+// curve 參數（cubic-bezier x1, y1, x2, y2）在 x 的值
+float curve(vec4 b, float x) {
+  x = clamp(x, 0.0, 1.0);
+  float lo = 0.0, hi = 1.0, t = x;
+  for (int i = 0; i < 20; i++) {
+    float bx = 3.0 * (1.0 - t) * (1.0 - t) * t * b.x + 3.0 * (1.0 - t) * t * t * b.z + t * t * t;
+    if (bx < x) lo = t; else hi = t;
+    t = (lo + hi) * 0.5;
+  }
+  return 3.0 * (1.0 - t) * (1.0 - t) * t * b.y + 3.0 * (1.0 - t) * t * t * b.w + t * t * t;
+}
 `;
 
 function paramUniforms(defs: ParamDef[]) {
-  const t = { float: 'float', int: 'int', bool: 'bool', color: 'vec3' } as const;
+  const t = { float: 'float', int: 'int', bool: 'bool', color: 'vec3', point: 'vec2', curve: 'vec4' } as const;
   return defs.map((d) => `uniform ${t[d.type]} ${d.name};`).join('\n');
 }
 
@@ -450,17 +461,14 @@ export class Renderer {
     for (const d of p.defs) {
       const l = this.loc(p, d.name);
       if (!l) continue;
-      const k = keys?.[d.name];
       const dr = drive?.[d.name];
-      const x =
-        dr && (d.type === 'float' || d.type === 'int')
-          ? dr.min + (dr.max - dr.min) * (dr.source === 'beat' ? this.sig.beat : this.sig.level)
-          : k?.length && (d.type === 'float' || d.type === 'int')
-            ? evalKeys(k, local)
-            : v[d.name];
+      const x = dr && isNumeric(d) ? dr.min + (dr.max - dr.min) * (dr.source === 'beat' ? this.sig.beat : this.sig.level) : paramAt(d, v, keys, local);
       if (d.type === 'float') gl.uniform1f(l, Number(x));
       else if (d.type === 'int') gl.uniform1i(l, Math.round(Number(x)));
       else if (d.type === 'bool') gl.uniform1i(l, x ? 1 : 0);
+      // point：存的是畫面座標（y 向下），shader 裡是 uv（y 向上）
+      else if (d.type === 'point') gl.uniform2f(l, (x as number[])[0], 1 - (x as number[])[1]);
+      else if (d.type === 'curve') gl.uniform4f(l, ...(x as [number, number, number, number]));
       else gl.uniform3f(l, ...hexToRgb(String(x)));
     }
   }

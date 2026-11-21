@@ -274,6 +274,17 @@ kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--muted); }
 .tp:hover { background: var(--panel2); color: #fff; }
 .tp.play { background: #fff; color: #000; width: 34px; margin: 0 2px; }
 .tp.on { color: var(--accent2); }
+.tp-vol { position: relative; display: flex; flex: none; }
+/* 滑過喇叭時，往上浮出垂直的音量條（下面的控制列已經很滿） */
+.tp-vol-pop { position: absolute; left: 50%; bottom: 100%; transform: translateX(-50%); padding-bottom: 6px; display: none; z-index: 20; }
+.tp-vol:hover .tp-vol-pop, .tp-vol:focus-within .tp-vol-pop, .tp-vol.dragging .tp-vol-pop { display: block; }
+.tp-vol-box { display: flex; flex-direction: column; align-items: center; gap: 5px; width: 34px; box-sizing: border-box; padding: 8px 0 5px; background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; box-shadow: 0 4px 14px #0009; }
+/* 自己畫的垂直音量條：底跟把手一樣寬，音量以下填色 */
+.tp-vol-track { position: relative; width: 12px; height: 62px; border-radius: 2px; background: #3a3f4d; cursor: pointer; touch-action: none; outline: none; }
+.tp-vol-fill { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 2px; background: var(--accent2); }
+.tp-vol-thumb { position: absolute; left: 0; right: 0; height: 3px; margin-bottom: -1.5px; border-radius: 1px; background: #fff; box-shadow: 0 0 0 1px #000a; }
+.tp-vol-track:focus-visible { box-shadow: 0 0 0 1px var(--accent2); }
+.tp-vol-box span { font: 10.5px ui-monospace, Consolas, monospace; color: var(--muted); }
 .tp-time { font: 12px ui-monospace, Consolas, monospace; margin-left: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .transport-row > .tp { flex: none; }
 /* 預覽變窄時依序收起：總長度 → 上一格 / 下一格 → 回到開頭 / 到結尾 */
@@ -371,6 +382,8 @@ kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--muted); }
 .form-row > span { color: var(--muted); }
 .form-row .seg { width: 160px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 6px; }
+/* 鍵盤（← / →）選中的按鈕：Enter 會按下它 */
+.dialog-actions .btn.sel { outline: 1px solid var(--accent2); outline-offset: 2px; }
 .shortcut-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 18px; max-height: 60vh; overflow: auto; }
 .sc-row { display: flex; gap: 10px; align-items: baseline; font-size: 12px; padding: 3px 0; border-bottom: 1px solid #ffffff08; }
 .sc-row kbd { flex: none; min-width: 120px; color: var(--text); }
@@ -453,6 +466,10 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .code-head .lang { color: var(--muted); font-weight: 600; }
 .code-block.open .code-head .lang { color: var(--accent2); }
 .err-dot { color: var(--err); font-size: 11px; }
+/* 屬性面板的模組列（GLSL / JavaScript）：固定一行，不換行 */
+.code-link { display: flex; align-items: center; gap: 8px; white-space: nowrap; min-width: 0; }
+.code-link > * { flex: none; }
+.code-link > .muted { overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
 .code-block .cm { border: none; border-radius: 0; }
 .code-block .code-resize { border: none; border-top: 1px solid var(--line); border-radius: 0; }
 .code-block .err { border-radius: 0; border: none; border-top: 1px solid #5a2228; }
@@ -548,6 +565,9 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .panel-inspector.drop-here { box-shadow: inset 0 0 0 2px var(--accent2); background: #29d3c20d; }
 /* 面板預設可以捲動（上面 .panel-host 的 overflow: auto；新增面板不用再加進任何清單）；只有自己處理大小的面板不捲 */
 .panel-preview, .panel-timeline, .panel-code, .panel-ai { overflow: hidden; }
+/* 屬性面板：播放頭在最右邊時（含箭頭）不要撐出水平捲軸。
+   不要改用 .ec 的 overflow-x: clip：sticky 標題列包在 clip 裡，捲到最底時滑鼠一動畫面就會上下抖 1px */
+.panel-inspector { overflow-x: hidden; }
 .dock-drop { position: absolute; z-index: 30; background: #29d3c233; border: 2px solid var(--accent2); pointer-events: none; transition: all .08s; }
 .dock-drop.center { inset: 28px 0 0 0; }
 .dock-drop.left { left: 0; top: 28px; bottom: 0; width: 50%; }
@@ -619,7 +639,7 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 
 /* ───────────── 效果控制（屬性） ───────────── */
 .inspector-panel { min-height: 100%; }
-.ec { position: relative; font-size: 12px; overflow-x: clip; } /* 播放頭在最右邊時（含箭頭）不要撐出水平捲軸；clip 不會變成捲動容器，sticky 標題列照常 */
+.ec { position: relative; font-size: 12px; }
 /* 左欄（名稱 + 數值）固定寬度（px，至少 240px）：各處一致，面板變窄只縮右邊的關鍵影格時間軸 */
 .ec-section { scroll-margin-top: 34px; }
 .ec { --ec-col: max(240px, var(--ec-left, 300px)); }
@@ -844,9 +864,17 @@ input[type=range].cpk-hue::-moz-range-thumb { width: 12px; height: 12px; border-
 .lib-thumb.text-thumb { background: repeating-conic-gradient(#2a2e3a 0 25%, #1d2029 0 50%) 0 0 / 14px 14px; background-size: contain, 14px 14px; background-repeat: no-repeat, repeat; background-position: center; }
 .lib-item.mod.mk-text .lib-thumb { border-bottom: 2px solid #ffd27a; }
 .kind.k-text { background: #ffd27a; color: #000; }
-.text-area { width: 100%; resize: vertical; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: inherit; color: var(--text); }
+.text-area { width: 100%; resize: vertical; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; font: inherit; line-height: 1.45; color: var(--text); display: block; }
+/* 屬性面板的文字內容：最少一行、跟著內容長高，最多 6 行後捲動 */
+.ec-node .text-area { field-sizing: content; min-height: calc(1lh + 12px); max-height: calc(6lh + 12px); }
 .text-area:focus { border-color: var(--accent2); outline: none; }
 .seg.small-seg button { padding: 3px 8px; white-space: nowrap; }
+/* 文字的填色 / 外框：類型下拉 + 顏色（漸層兩個）+ 角度 */
+.paint-edit, .stroke-head { display: flex; align-items: center; gap: 6px; justify-content: flex-end; flex-wrap: wrap; }
+.paint-edit .select { padding: 2px 6px; font-size: 12px; }
+.stroke-head .select { padding: 2px 6px; font-size: 12px; }
+/* 好幾組按鈕並排（例如文字的 粗體 / 斜體 ｜ 對齊）：各組分開，不連在一起 */
+.seg-group { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
 
 /* ───────── 預覽：遮罩框 ───────── */
 .lang-btn { background: none; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-size: 11px; font-weight: 700; padding: 2px 7px; cursor: pointer; margin-right: 4px; }
@@ -950,6 +978,10 @@ svg.lucide { flex: none; }
 .transition.tail { border-top-right-radius: 2px; border-bottom-right-radius: 2px; background: linear-gradient(90deg, #ffb02ecc, #ffb02e33); }
 .info-note { margin: 8px; padding: 6px 8px; border-radius: 6px; font-size: 12px; color: #bfe9e3; background: #13302d; border: 1px solid #2a5a55; }
 .btn-row { display: flex; flex-wrap: wrap; gap: 4px; }
+/* 屬性面板的動作區塊（例如轉場的「套用到同軌」）：跟上面的參數分開 */
+.plain-actions-head { border-top: 1px solid var(--line); }
+.plain-actions-head .ec-left { cursor: default; padding-left: 8px; }
+.tr-apply { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px; }
 .btn-row .btn.small-h { padding: 2px 8px; font-size: 11.5px; }
 .src-err { position: absolute; left: 10px; right: 10px; bottom: 10px; max-height: 40%; overflow: auto; } .source-view { position: relative; }
 
@@ -983,6 +1015,25 @@ svg.lucide { flex: none; }
 .mask-rot::after { content: ""; position: absolute; left: 5px; top: 12px; width: 1px; height: 18px; background: #ffd27a; }
 .mask-fh { position: absolute; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px; transform: rotate(45deg); background: #ffd27a; border: 1px solid #000; cursor: ew-resize; z-index: 2; }
 body.mask-dragging, body.mask-dragging * { user-select: none; }
+/* 預覽上直接改字的輸入框 */
+/* 透明：字也透明，看到的是畫面上真正渲染的文字，只留游標與反白 */
+.text-inline { position: absolute; z-index: 9; box-sizing: border-box; resize: none; overflow: hidden; white-space: pre; margin: 0; border: none; outline: none; background: transparent; color: transparent; caret-color: var(--accent2); transform-origin: 50% 50%; }
+/* 反白用系統的選取色（跟網頁反白文字一樣的藍），半透明才看得到底下真正的文字 */
+.text-inline::selection { background: color-mix(in srgb, Highlight 45%, transparent); color: transparent; }
+/* 參數把手（point / @box）：沿用遮罩框的樣式，換成強調色 */
+.mask-gizmo.param-box { border-color: var(--accent2); pointer-events: none; }
+.mask-gizmo.param-box .mask-h { pointer-events: auto; border-color: var(--accent2); }
+.mask-gizmo.param-box .mask-tag, .param-pt .mask-tag { background: var(--accent2); }
+.param-pt { position: absolute; width: 18px; height: 18px; margin: -9px 0 0 -9px; border: 1.5px solid #fff; border-radius: 50%; box-shadow: 0 0 0 1px #000a; cursor: move; z-index: 7; }
+.param-pt::before, .param-pt::after { content: ''; position: absolute; background: var(--accent2); }
+.param-pt::before { left: 50%; top: -6px; bottom: -6px; width: 1.5px; margin-left: -.75px; }
+.param-pt::after { top: 50%; left: -6px; right: -6px; height: 1.5px; margin-top: -.75px; }
+.param-pt .mask-tag { left: 14px; top: -20px; }
+.point-row { display: flex; gap: 6px; }
+.point-row > * { flex: 1; min-width: 0; }
+.curve-edit { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.curve-edit-svg { background: #0e0f13; border: 1px solid var(--line); border-radius: 4px; }
+.curve-edit .select { padding: 2px 6px; font-size: 12px; }
 .btn.on-accent { background: #13302d; border-color: var(--accent2); color: var(--accent2); }
 
 /* 時間尺固定在上方（.tl-row 的 position: relative 不能蓋掉 sticky） */

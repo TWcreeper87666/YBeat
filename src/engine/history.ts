@@ -76,6 +76,26 @@ export function endHistoryTransaction(commit: boolean) {
   sync();
 }
 
+/** 目前的專案狀態（例如打開編輯視窗時記下來，取消時還原） */
+export type HistoryDoc = Doc;
+export const snapshotDoc = (): Doc => docOf(useStore.getState());
+/** 跟記下來的狀態比，專案有沒有變更 */
+export const docChanged = (d: Doc) => !sameDoc(docOf(useStore.getState()), d);
+const sameDoc = (a: Doc, b: Doc) => a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.media === b.media && a.tracks === b.tracks;
+
+/** 還原成某個狀態；還原本身算一步，可以再 Ctrl+Z 拿回來。回傳有沒有變更 */
+export function restoreDoc(d: Doc): boolean {
+  flush();
+  const now = docOf(useStore.getState());
+  if (sameDoc(now, d)) return false;
+  past.push(now);
+  if (past.length > LIMIT) past.shift();
+  future = [];
+  apply(d);
+  sync();
+  return true;
+}
+
 export function undo() {
   flush();
   const d = past.pop();

@@ -52,3 +52,4 @@
 - [x] waveform放大後畫質變很差
 - [x] round value like property
 - [x] multiselect items across track types, resize matching edges together
+- [x] preview tab, volume slider

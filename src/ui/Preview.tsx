@@ -14,6 +14,8 @@ import { clipTransformAt, fitSize, isAnimated, setPropsAt, type Transform } from
 import { textSize } from '../engine/text';
 import { MaskGizmos, cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { GridOverlay } from './GridOverlay';
+import { ParamGizmos } from './ParamGizmos';
+import { TextInlineEdit } from './TextInlineEdit';
 import { stopPreviewFx, toast, useColorPick, useLayout, usePreviewFx } from './uiStore';
 import { useEditorWindow } from './EditorWindow';
 
@@ -323,6 +325,8 @@ const sameRect = (a: Rect, b: Rect) => a.left === b.left && a.top === b.top && a
 function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> }) {
   const [rect, setRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const [guides, setGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
+  /** 正在預覽上直接改字的文字片段 */
+  const [editingText, setEditingText] = useState<string | null>(null);
   const layerRef = useRef<HTMLDivElement>(null);
   const sel = useStore((s) => s.selection);
   const clip = useStore((s) => (sel?.type === 'clip' ? s.clips.find((c) => c.id === sel.id) : undefined));
@@ -508,11 +512,13 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
         </svg>
       )}
       <MaskGizmos W={W} H={H} />
-      {box && clip && (
+      <ParamGizmos W={W} H={H} />
+      {box && clip && editingText !== clip.id && (
         <div
           className="gizmo"
           style={{ left: box.cx - box.w / 2, top: box.cy - box.h / 2, width: box.w, height: box.h, transform: `rotate(${box.rot}deg)` }}
           onPointerDown={(e) => e.button === 0 && begin(e, clip, media, 'move')}
+          onDoubleClick={() => clip.text && setEditingText(clip.id)}
         >
           {(['x', 'y', 'scaleX', 'scaleY', 'rotation'] as const).some((p) => isAnimated(clip, p)) && <span className="gizmo-tag"><Diamond size={10} fill="currentColor" /> {$t('關鍵影格')}</span>}
           {['tl', 'tr', 'bl', 'br'].map((k) => (
@@ -524,6 +530,7 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
           <div className="grot" onPointerDown={(e) => begin(e, clip, media, 'rotate')} title={$t('拖曳旋轉（Shift = 15° 一格）')} />
         </div>
       )}
+      {box && clip?.text && editingText === clip.id && <TextInlineEdit clip={clip} box={box} scaleX={box.xf.scaleX} scaleY={box.xf.scaleY} H={H} onClose={() => setEditingText(null)} />}
     </div>
   );
 }

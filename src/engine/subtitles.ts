@@ -3,7 +3,8 @@ import { makeClip, uid, useStore, type Clip } from '../store';
 import type { Tracks } from './tracks';
 
 export interface Cue { start: number; end: number; text: string }
-export const isCaptionClip = (c: Clip) => !!c.text && (c.caption ?? (c.name === 'SRT' || c.name === 'LRC'));
+/** 文字片段都算字幕；要排除整條軌道用軌道的「不接收字幕」 */
+export const isCaptionClip = (c: Clip) => !!c.text;
 
 const parseTime = (s: string) => {
   const m = s.trim().match(/^(\d+):(\d{2}):(\d{2})[,.](\d{1,3})$/);
@@ -63,7 +64,7 @@ export function addSrtCues(cues: Cue[], source: 'SRT' | 'LRC' = 'SRT'): number {
   const preset = TEXT_PRESETS.find((p) => p.id === 'subtitle')!;
   const clips = cues.map((cue) => makeClip({
     id: uid(), mediaId: '', track, start: cue.start, duration: cue.end - cue.start,
-    fit: 'contain', name: source, caption: true, text: { ...DEFAULT_TEXT, ...preset.style, text: cue.text },
+    fit: 'contain', name: source, text: { ...DEFAULT_TEXT, ...preset.style, text: cue.text },
     transform: { ...makeClip({ mediaId: '' }).transform, y: preset.y },
   }));
   useStore.setState({ clips: [...useStore.getState().clips, ...clips] });
@@ -135,7 +136,7 @@ export function addCue(time: number): string | null {
   const preset = TEXT_PRESETS.find((p) => p.id === 'subtitle')!;
   const base = makeClip({ mediaId: '' });
   const clip = makeClip({
-    id: uid(), mediaId: '', track, start, duration, fit: 'contain', caption: true,
+    id: uid(), mediaId: '', track, start, duration, fit: 'contain',
     text: { ...(ref?.text ?? { ...DEFAULT_TEXT, ...preset.style }), text: '' },
     transform: ref ? { ...ref.transform } : { ...base.transform, y: preset.y },
     transitionIn: ref?.transitionIn ? structuredClone(ref.transitionIn) : null,

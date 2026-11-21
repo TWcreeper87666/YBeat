@@ -12,17 +12,19 @@ export interface Module {
 
 // ───────────────────────── 特效（GLSL）─────────────────────────
 // 寫一個 vec4 effect(vec2 uv)；可用：tex(uv)、u_progress(0→1)、u_local(秒)、
-// u_duration、u_time、ASPECT、PI、rand()、noise1()、rotateUV()、zoomUV()、mirrorUV()、easeXxx()
+// u_duration、u_time、ASPECT、PI、rand()、noise1()、rotateUV()、zoomUV()、mirrorUV()、easeXxx()、curve(曲線參數, x)
 
 const crashZoom = `// 衝擊變焦：一開始猛衝進去再快速回穩
 // @duration 0.4
 // @param amount: float = 0.6 (0..2) "變焦量"
 // @param blur: float = 0.6 (0..1) "放射模糊"
 // @param zoomOut: bool = false "反向（拉遠）"
+// @param center: point = 0.5,0.5 "中心"
+// @param ease: curve = expoOut "曲線"
 vec4 effect(vec2 uv) {
-  float k = 1.0 - easeOutExpo(u_progress);      // 1 → 0
+  float k = 1.0 - curve(ease, u_progress);      // 1 → 0
   float z = zoomOut ? 1.0 / (1.0 + amount * k) : 1.0 + amount * k;
-  vec2 c = vec2(0.5);
+  vec2 c = center;
   vec2 base = zoomUV(uv, z, c);
   float s = blur * k * 0.25;
   vec4 col = vec4(0.0);
@@ -84,14 +86,15 @@ const lens = `// 魚眼 / 鏡頭扭曲
 // @duration 0.4
 // @param amount: float = 0.6 (-1..2) "扭曲量"
 // @param decay: float = 2 (0..6) "衰減"
+// @param center: point = 0.5,0.5 "中心"
 vec4 effect(vec2 uv) {
   float k = amount * pow(1.0 - u_progress, decay);
-  vec2 p = uv - 0.5;
+  vec2 p = uv - center;
   p.x *= ASPECT;
   float r2 = dot(p, p);
   p *= (1.0 - k * 0.3) + k * r2;
   p.x /= ASPECT;
-  return tex(mirrorUV(p + 0.5));
+  return tex(mirrorUV(p + center));
 }
 `;
 
@@ -103,9 +106,10 @@ const speedLines = `// 速度線（漫畫集中線）
 // @param speed: float = 14 (0..60) "閃動速度"
 // @param opacity: float = 0.85 (0..1) "不透明度"
 // @param tint: color = #ffffff "顏色"
+// @param center: point = 0.5,0.5 "中心"
 vec4 effect(vec2 uv) {
   vec4 c = tex(uv);
-  vec2 p = uv - 0.5;
+  vec2 p = uv - center;
   p.x *= ASPECT;
   float ang = atan(p.y, p.x) / (2.0 * PI) + 0.5;
   float r = length(p);
@@ -126,10 +130,10 @@ const entrance = `// 進場變換：位置 / 縮放 / 旋轉 + 過衝回彈
 // @param fromX: float = 0 (-1..1) "起始 X"
 // @param fromY: float = -0.3 (-1..1) "起始 Y"
 // @param fromRot: float = 0.4 (-3.14..3.14) "起始旋轉"
-// @param overshoot: bool = true "過衝回彈"
+// @param ease: curve = back "曲線"
 // @param bg: color = #000000 "背景色"
 vec4 effect(vec2 uv) {
-  float p = overshoot ? easeOutBack(u_progress) : easeOutExpo(u_progress);
+  float p = curve(ease, u_progress);
   float s = mix(fromScale, 1.0, p);
   vec2 off = mix(vec2(fromX, fromY), vec2(0.0), p);
   float a = mix(fromRot, 0.0, p);
@@ -163,9 +167,9 @@ vec4 effect(vec2 uv) {
 // 寫一個 vec4 transition(vec2 uv)；可用：getFrom(uv)、getTo(uv)、progress(0→1)、u_from、u_to
 
 const crossfade = `// 溶接
-// @param eased: bool = true "平滑曲線"
+// @param ease: curve = inOut3 "曲線"
 vec4 transition(vec2 uv) {
-  float p = eased ? easeInOutCubic(progress) : progress;
+  float p = curve(ease, progress);
   return mix(getFrom(uv), getTo(uv), p);
 }
 `;
@@ -173,8 +177,9 @@ vec4 transition(vec2 uv) {
 const crashZoomTr = `// 衝擊變焦轉場：前一段衝進去，下一段從放大狀態回穩
 // @param strength: float = 1.2 (0..3) "變焦強度"
 // @param blur: float = 0.7 (0..1) "放射模糊"
+// @param center: point = 0.5,0.5 "中心"
 vec4 radial(sampler2D s, vec2 uv, float z, float b) {
-  vec2 c = vec2(0.5);
+  vec2 c = center;
   vec2 base = zoomUV(uv, z, c);
   vec4 acc = vec4(0.0);
   for (int i = 0; i < 16; i++) {
@@ -197,6 +202,7 @@ const whipPan = `// 高速甩鏡 + 方向動態模糊
 // @param vertical: bool = false "垂直方向"
 // @param reverse: bool = false "反向"
 // @param blur: float = 0.25 (0..0.6) "模糊長度"
+// @param ease: curve = inOut3 "曲線"
 vec4 strip(vec2 q, vec2 d, float sgn) {
   float a = dot(q, d);
   bool fromSide = sgn > 0.0 ? a < 1.0 : a >= 0.0;
@@ -205,7 +211,7 @@ vec4 strip(vec2 q, vec2 d, float sgn) {
 vec4 transition(vec2 uv) {
   vec2 d = vertical ? vec2(0.0, 1.0) : vec2(1.0, 0.0);
   float sgn = reverse ? -1.0 : 1.0;
-  float e = easeInOutCubic(progress);
+  float e = curve(ease, progress);
   float b = sin(progress * PI) * blur;
   vec4 acc = vec4(0.0);
   for (int i = 0; i < 24; i++) {
@@ -220,15 +226,17 @@ const spin = `// 旋轉衝擊
 // @param turns: float = 1 (0..4) "圈數"
 // @param zoom: float = 0.5 (0..2) "拉遠量"
 // @param blur: float = 0.6 (0..1.5) "旋轉模糊"
+// @param center: point = 0.5,0.5 "中心"
+// @param ease: curve = inOut3 "曲線"
 vec4 transition(vec2 uv) {
-  float e = easeInOutCubic(progress);
+  float e = curve(ease, progress);
   float a = e * turns * 2.0 * PI;
   float z = 1.0 / (1.0 + zoom * sin(progress * PI));
   float spread = blur * sin(progress * PI) * 0.5;
   vec4 acc = vec4(0.0);
   for (int i = 0; i < 14; i++) {
     float f = float(i) / 13.0 - 0.5;
-    vec2 q = mirrorUV(zoomUV(rotateUV(uv, a + f * spread, vec2(0.5)), z, vec2(0.5)));
+    vec2 q = mirrorUV(zoomUV(rotateUV(uv, a + f * spread, center), z, center));
     acc += progress < 0.5 ? getFrom(q) : getTo(q);
   }
   return acc / 14.0;
@@ -240,13 +248,14 @@ const diagonal = `// 斜切遮罩
 // @param softness: float = 0.01 (0..0.3) "邊緣柔化"
 // @param lineWidth: float = 0.012 (0..0.06) "邊線寬"
 // @param lineColor: color = #ffffff "邊線顏色"
+// @param ease: curve = inOut3 "曲線"
 vec4 transition(vec2 uv) {
   vec2 d = vec2(cos(angle), sin(angle));
   vec2 p = uv - 0.5;
   p.x *= ASPECT;
   float proj = dot(p, d);
   float ext = abs(d.x) * ASPECT * 0.5 + abs(d.y) * 0.5 + softness + lineWidth;
-  float edge = mix(-ext, ext, easeInOutCubic(progress));
+  float edge = mix(-ext, ext, curve(ease, progress));
   float m = smoothstep(edge - softness, edge + softness, proj);
   vec4 c = mix(getTo(uv), getFrom(uv), m);
   float line = (1.0 - smoothstep(lineWidth, lineWidth + 0.003, abs(proj - edge))) * step(0.0001, lineWidth);
@@ -255,14 +264,14 @@ vec4 transition(vec2 uv) {
 `;
 
 const iris = `// 圓形擴散遮罩
-// @param cx: float = 0.5 (0..1) "中心 X"
-// @param cy: float = 0.5 (0..1) "中心 Y"
+// @param center: point = 0.5,0.5 "中心"
 // @param softness: float = 0.02 (0..0.3) "邊緣柔化"
+// @param ease: curve = inOut3 "曲線"
 vec4 transition(vec2 uv) {
-  vec2 p = uv - vec2(cx, cy);
+  vec2 p = uv - center;
   p.x *= ASPECT;
-  float maxR = length(vec2(max(cx, 1.0 - cx) * ASPECT, max(cy, 1.0 - cy)));
-  float r = easeInOutCubic(progress) * (maxR + softness);
+  float maxR = length(vec2(max(center.x, 1.0 - center.x) * ASPECT, max(center.y, 1.0 - center.y)));
+  float r = curve(ease, progress) * (maxR + softness);
   float m = smoothstep(r - softness, r, length(p));
   return mix(getTo(uv), getFrom(uv), m);
 }
@@ -324,23 +333,23 @@ const curve_remap_easein = curvePreset('漸快', '[[0,0,[0.42,0,1,1]],[1,1,[0,0,
 const curve_remap_easeout = curvePreset('漸慢', '[[0,0,[0,0,0.58,1]],[1,1,[0,0,1,1]]]');
 const curve_remap_freeze = curvePreset('中段定格', '[[0,0,[0,0,1,1]],[0.4,0.4,"hold"],[0.6,0.4,[0,0,1,1]],[1,0.8,[0,0,1,1]]]');
 
-const mk = (id: string, kind: ModuleKind, name: string, code: string): Module => ({ id, kind, name, code, builtin: true });
+const mk = (id: string, kind: ModuleKind, name: string, code: string, rev?: number): Module => ({ id, kind, name, code, builtin: true, ...(rev ? { rev } : {}) });
 
 const BASE_MODULES: Module[] = [
-  mk('fx-crashzoom', 'effect', '衝擊變焦 Crash Zoom', crashZoom),
+  mk('fx-crashzoom', 'effect', '衝擊變焦 Crash Zoom', crashZoom, 2),
   mk('fx-shake', 'effect', '相機震動 Shake', shake),
   mk('fx-flash', 'effect', '閃白 Flash', flash),
   mk('fx-rgb', 'effect', 'RGB 色差', rgbSplit),
-  mk('fx-lens', 'effect', '魚眼扭曲 Lens', lens),
-  mk('fx-speedlines', 'effect', '速度線 Speed Lines', speedLines),
-  mk('fx-entrance', 'effect', '進場變換 Entrance', entrance),
+  mk('fx-lens', 'effect', '魚眼扭曲 Lens', lens, 2),
+  mk('fx-speedlines', 'effect', '速度線 Speed Lines', speedLines, 2),
+  mk('fx-entrance', 'effect', '進場變換 Entrance', entrance, 2),
   mk('fx-grade', 'effect', '調色 Grade', grade),
-  mk('tr-crossfade', 'transition', '溶接 Crossfade', crossfade),
-  mk('tr-crashzoom', 'transition', '衝擊變焦 Crash Zoom', crashZoomTr),
-  mk('tr-whip', 'transition', '甩鏡 Whip Pan', whipPan),
-  mk('tr-spin', 'transition', '旋轉 Spin', spin),
-  mk('tr-diagonal', 'transition', '斜切 Diagonal Wipe', diagonal),
-  mk('tr-iris', 'transition', '圓形擴散 Iris', iris),
+  mk('tr-crossfade', 'transition', '溶接 Crossfade', crossfade, 2),
+  mk('tr-crashzoom', 'transition', '衝擊變焦 Crash Zoom', crashZoomTr, 2),
+  mk('tr-whip', 'transition', '甩鏡 Whip Pan', whipPan, 2),
+  mk('tr-spin', 'transition', '旋轉 Spin', spin, 2),
+  mk('tr-diagonal', 'transition', '斜切 Diagonal Wipe', diagonal, 2),
+  mk('tr-iris', 'transition', '圓形擴散 Iris', iris, 2),
   mk('tr-flash', 'transition', '閃白 Flash Cut', flashCut),
   mk('remap-speed', 'remap', '變速 / 倒放', remapSpeed),
   mk('remap-curve', 'remap', '曲線', remapCurve),
@@ -363,7 +372,8 @@ export const BUILTIN_MODULES: Module[] = [...BASE_MODULES, ...EXTRA_MODULES]
 
 export const NEW_MODULE_TEMPLATES: Record<ModuleKind, string> = {
   effect: `// 新特效：寫 vec4 effect(vec2 uv)
-// 可用：tex(uv)、u_progress(0→1)、u_local(秒)、u_time、ASPECT、easeOutExpo() ...
+// 可用：tex(uv)、u_progress(0→1)、u_local(秒)、u_time、ASPECT、easeOutExpo()、curve(曲線參數, x) ...
+// 參數型別：float、int、bool、color、point（中心點，可在預覽上拖）、curve（緩動曲線）
 // @duration 0.5
 // @param amount: float = 0.8 (0..1) "強度"
 vec4 effect(vec2 uv) {
@@ -373,10 +383,11 @@ vec4 effect(vec2 uv) {
 }
 `,
   transition: `// 新轉場：寫 vec4 transition(vec2 uv)
-// 可用：getFrom(uv)、getTo(uv)、progress(0→1)
+// 可用：getFrom(uv)、getTo(uv)、progress(0→1)、curve(曲線參數, x)
 // @param slide: float = 1 (0..2) "滑動量"
+// @param ease: curve = inOut3 "曲線"
 vec4 transition(vec2 uv) {
-  float e = easeInOutCubic(progress);
+  float e = curve(ease, progress);
   vec2 off = vec2(0.0, e * slide);
   return uv.y + off.y < 1.0 ? getFrom(uv + off) : getTo(uv + off - vec2(0.0, 1.0));
 }

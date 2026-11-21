@@ -1,5 +1,7 @@
 import { $t } from '../i18n';
-import { Minimize2, Pause, PictureInPicture2, Play, Repeat, Repeat1, SkipBack, SkipForward, StepBack, StepForward } from 'lucide-react';
+import { Minimize2, Pause, PictureInPicture2, Play, Repeat, Repeat1, SkipBack, SkipForward, StepBack, StepForward, Volume1, Volume2, VolumeX } from 'lucide-react';
+import { useMonitor } from '../engine/audio';
+import { resnap } from './pixelSnap';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { projectDuration, useStore } from '../store';
 import { useEditorScope } from './EditorWindow';
@@ -102,6 +104,7 @@ function Transport() {
         <button className="tp skip" title={$t('到結尾 (End)')} onClick={() => S.setTime(scope ? scope.b - 1 / 60 : dur)}><SkipForward size={15} /></button>
         <span className="tp-time">{fmt(scope ? local : time)} <span className="muted tp-total">/ {fmt(total)}</span></span>
         <span className="spacer" />
+        <MonitorVolume />
         {loop && !scope && <button className="tp on" title={$t('停止循環 (Esc)')} onClick={() => S.setLoop(null)}><Repeat1 size={15} /></button>}
         <button className={`tp ${repeat ? 'on' : ''}`} title={$t('循環播放')} onClick={() => useLayout.getState().set({ repeat: !repeat })}><Repeat size={15} /></button>
         <GridButton />
@@ -115,6 +118,63 @@ function Transport() {
         </button>
         )}
       </div>
+    </div>
+  );
+}
+
+/** 預覽音量（只影響預覽時聽到的聲音，不影響匯出）：滑過喇叭往上浮出垂直音量條 */
+function MonitorVolume() {
+  const { volume, muted } = useMonitor();
+  const [dragging, setDragging] = useState(false);
+  const level = muted ? 0 : volume;
+  const pct = Math.round(level * 100);
+  const Icon = level === 0 ? VolumeX : level < 0.5 ? Volume1 : Volume2;
+  const setVol = (v: number) => useMonitor.setState({ volume: Math.round(Math.min(1, Math.max(0, v)) * 100) / 100, muted: false });
+  return (
+    <div className={`tp-vol ${dragging ? 'dragging' : ''}`}>
+      <div className="tp-vol-pop">
+        <div className="tp-vol-box">
+          <div
+            className="tp-vol-track"
+            role="slider"
+            tabIndex={0}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={pct}
+            title={$t('預覽音量 {0}%', pct)}
+            onPointerDown={(e) => {
+              if (e.button !== 0) return;
+              e.preventDefault();
+              const el = e.currentTarget;
+              const r = el.getBoundingClientRect();
+              const at = (y: number) => setVol(1 - (y - r.top) / r.height);
+              at(e.clientY);
+              setDragging(true);
+              const mv = (ev: PointerEvent) => at(ev.clientY);
+              const up = () => {
+                setDragging(false);
+                window.removeEventListener('pointermove', mv);
+                window.removeEventListener('pointerup', up);
+              };
+              window.addEventListener('pointermove', mv);
+              window.addEventListener('pointerup', up);
+            }}
+            onKeyDown={(e) => {
+              const d = e.key === 'ArrowUp' || e.key === 'ArrowRight' ? 0.05 : e.key === 'ArrowDown' || e.key === 'ArrowLeft' ? -0.05 : 0;
+              if (!d) return;
+              e.preventDefault();
+              e.stopPropagation();
+              setVol(level + d);
+            }}
+            onDoubleClick={() => setVol(1)}
+          >
+            <div className="tp-vol-fill" style={{ height: `${pct}%` }} />
+            <div className="tp-vol-thumb" style={{ bottom: `${pct}%` }} />
+          </div>
+          <span>{pct}</span>
+        </div>
+      </div>
+      <button className={`tp ${muted ? 'on' : ''}`} title={muted ? $t('取消靜音') : $t('預覽靜音')} onClick={() => useMonitor.setState({ muted: !muted })}><Icon size={15} /></button>
     </div>
   );
 }
@@ -143,6 +203,7 @@ export function Slot({ host }: { host: HTMLElement }) {
     const el = ref.current!;
     saveScroll(host);
     el.appendChild(host);
+    resnap(host);
     restoreScroll(host);
     // 新位置的大小可能下一幀才定：再補一次
     const raf = requestAnimationFrame(() => restoreScroll(host));

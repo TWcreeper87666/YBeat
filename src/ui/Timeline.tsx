@@ -20,7 +20,6 @@ import { undo, redo, useHistory, beginHistoryTransaction, endHistoryTransaction 
 import { relinkWithPicker } from '../engine/media';
 import { confirmDialog, openMenu, promptDialog, stopPreviewFx, toast, useDrag, useLayout, useReveal, useSnapLine, useMenu, type MenuItem } from './uiStore';
 import { itemName } from './names';
-import { useDock } from './Dock';
 import { closeSource } from './SourcePanel';
 import { beatSnapPoints, fitToBeats, getBeats, splitAtBeats, useBeats } from './beatGrid';
 
@@ -726,6 +725,13 @@ function resizeTransition(e: React.PointerEvent, c: Clip, side: TrSide, handle: 
   );
 }
 
+/** 雙擊轉場：選取並在編輯視窗打開（預覽範圍 = 轉場長度） */
+function openTransitionEditor(c: Clip, side: TrSide) {
+  stopPreviewFx();
+  useStore.getState().select({ type: 'transition', id: trSelId(c.id, side) });
+  openEditorWindow();
+}
+
 /** 轉場的右鍵選單：編輯 / 移除（批次套用在轉場卡片的右鍵選單、屬性面板） */
 export function transitionMenu(x: number, y: number, c: Clip, side: TrSide) {
   const S = useStore.getState();
@@ -734,10 +740,8 @@ export function transitionMenu(x: number, y: number, c: Clip, side: TrSide) {
   openMenu(x, y, [
     {
       label: $t('編輯轉場'),
-      action: () => {
-        S.select({ type: 'transition', id: trSelId(c.id, side) });
-        useDock.getState().activatePanel('inspector'); // 屬性分頁被關掉了也要打開
-      },
+      shortcut: $t('雙擊'),
+      action: () => openTransitionEditor(c, side),
     },
     { separator: true },
     { label: $t('移除轉場'), action: () => S.setTransition(c.id, null, side), danger: true },
@@ -1092,8 +1096,9 @@ const TransitionView = React.memo(function TransitionView({ c, prev, next, side,
       style={{ left: w.t0 * pps, width: Math.max(14, w.d * pps) }}
       onPointerDown={(e) => {
         e.stopPropagation();
-        if (e.button === 0) { stopPreviewFx(); S.select({ type: 'transition', id: trSelId(c.id, side) }); }
+        if (e.button === 0) { stopPreviewFx(); S.select({ type: 'transition', id: trSelId(c.id, side) }); S.setTime(w.t0); }
       }}
+      onDoubleClick={(e) => { e.stopPropagation(); openTransitionEditor(c, side); }}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();

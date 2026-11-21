@@ -1,3 +1,4 @@
+import { EasePresetsMini } from './CurveEdit';
 import { $t } from '../i18n';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { create } from 'zustand';
@@ -7,7 +8,7 @@ import {
   type AnimProp, type Bez, type Ease, type Keyframe,
 } from '../engine/keyframes';
 import { clipTransformAt } from '../engine/transform';
-import { parseParams, resolveParams } from '../engine/params';
+import { isNumeric, parseParams, parsePointCh, pointCh, resolveParams } from '../engine/params';
 import { DEFAULT_MASK, MASK_PROPS, maskKey } from '../engine/mask';
 import { DragNumber } from './DragNumber';
 import { setScrubbing } from '../engine/audio';
@@ -156,9 +157,17 @@ export function fxHost(fxId: string): Host | null {
   };
 }
 
-/** 特效的固定值：一般參數存在 params，遮罩（mask.x…）存在 mask */
-function fxBasePatch<T extends { params: FxItem['params']; mask?: FxItem['mask'] }>(f: T, ch: string, v: number): Partial<T> {
+/** 特效的固定值：一般參數存在 params，遮罩（mask.x…）存在 mask，point 的一軸（center.x）存在陣列裡 */
+function fxBasePatch<T extends { moduleId: string; params: FxItem['params']; mask?: FxItem['mask'] }>(f: T, ch: string, v: number): Partial<T> {
   if (ch.startsWith('mask.')) return { mask: { ...DEFAULT_MASK, ...f.mask, [ch.slice(5)]: v } } as Partial<T>;
+  const pc = parsePointCh(ch);
+  if (pc) {
+    const mod = useStore.getState().modules.find((m) => m.id === f.moduleId);
+    const defs = mod ? parseParams(mod.code) : [];
+    const cur = [...(resolveParams(defs, f.params)[pc.name] as number[] | undefined ?? [0.5, 0.5])];
+    cur[pc.axis] = v;
+    return { params: { ...f.params, [pc.name]: cur } } as Partial<T>;
+  }
   return { params: { ...f.params, [ch]: v } } as Partial<T>;
 }
 
@@ -228,25 +237,42 @@ export function clipChannels(c: Clip, local: number): Channel[] {
   });
 }
 
-/** 特效的動畫屬性（只有數值型參數可以打 key） */
+/** 特效的動畫屬性（數值型參數、point 的 X / Y 可以打 key） */
 export function fxChannels(f: FxItem, code: string, local: number): Channel[] {
   const defs = parseParams(code);
   const base = resolveParams(defs, f.params);
-  return defs
-    .filter((d) => d.type === 'float' || d.type === 'int')
-    .map((d) => {
+  const fmt = useStore.getState().format;
+  const out: Channel[] = [];
+  for (const d of defs) {
+    if (isNumeric(d)) {
       const keys = f.keys?.[d.name] ?? [];
-      return {
+      out.push({
         id: d.name,
         label: $t(d.label),
         value: keys.length ? evalKeys(keys, local) : Number(base[d.name]),
         keys,
         def: Number(d.def),
         step: d.type === 'int' ? 1 : niceStep((d.max - d.min) / 200),
-        min: undefined,
-        max: undefined,
-      };
-    });
+      });
+    } else if (d.type === 'point') {
+      // 位置用像素顯示（跟遮罩、片段位置一樣）
+      for (const axis of [0, 1] as const) {
+        const id = pointCh(d.name, axis);
+        const keys = f.keys?.[id] ?? [];
+        out.push({
+          id,
+          label: `${$t(d.label)} ${axis ? 'Y' : 'X'}`,
+          value: keys.length ? evalKeys(keys, local) : (base[d.name] as number[])[axis],
+          keys,
+          def: (d.def as number[])[axis],
+          step: 0.001,
+          suffix: ' px',
+          display: axis ? fmt.h : fmt.w,
+        });
+      }
+    }
+  }
+  return out;
 }
 
 function niceStep(x: number) {
@@ -1141,27 +1167,6 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
           </g>
         </svg>
       </div>
-    </div>
-  );
-}
-
-/** 小型緩動預設按鈕（直接看形狀選） */
-function EasePresetsMini({ current, onPick }: { current: string; onPick: (e: Ease) => void }) {
-  return (
-    <div className="ease-mini">
-      {EASE_PRESETS.map((p) => {
-        const d: string[] = [];
-        for (let i = 0; i <= 16; i++) {
-          const x = i / 16;
-          const y = p.ease === 'hold' ? (x < 1 ? 0 : 1) : evalKeys([{ id: 'a', t: 0, v: 0, ease: p.ease }, { id: 'b', t: 1, v: 1, ease: p.ease }], x);
-          d.push(`${2 + x * 20},${20 - y * 16}`);
-        }
-        return (
-          <button key={p.id} className={current === p.id ? 'on' : ''} title={p.label} onClick={() => onPick(p.ease)}>
-            <svg width={24} height={24}><polyline points={d.join(' ')} /></svg>
-          </button>
-        );
-      })}
     </div>
   );
 }

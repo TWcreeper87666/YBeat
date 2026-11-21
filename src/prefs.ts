@@ -10,7 +10,6 @@ export interface UserTextStyle {
   name: string;
   style: TextStyle;
   transform: Transform;
-  caption: boolean;
   transitionIn: TransitionRef | null;
   transitionOut: TransitionRef | null;
   effects: ClipFx[];

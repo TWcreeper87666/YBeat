@@ -34,14 +34,14 @@ assert.ok(!readingSpeed('Hello there, friend', 2).fast);
 console.log('PASS 每秒字數判斷');
 
 // 字幕編輯
-const cap = (id: string, start: number, duration: number, text: string): Clip => makeClip({ id, mediaId: '', track: 1, start, duration, caption: true, fit: 'contain', text: { ...DEFAULT_TEXT, text } });
+const cap = (id: string, start: number, duration: number, text: string): Clip => makeClip({ id, mediaId: '', track: 1, start, duration, fit: 'contain', text: { ...DEFAULT_TEXT, text } });
 const reset = () => useStore.setState({ media: [], clips: [cap('a', 0, 2, 'Hello world'), cap('b', 3, 2, '第二段')], audios: [], effects: [], tracks: { video: [{}, {}], fx: [], audio: [] }, selection: null, selected: [] });
 
 reset();
 const added = addCue(2.5)!;
 let s = useStore.getState();
 let c = s.clips.find((x) => x.id === added)!;
-assert.ok(c.caption && c.track === 1 && c.start === 2.5 && Math.abs(c.duration - 0.5) < 1e-9 && c.text!.text === '', '新字幕接在播放頭所在空位，長度不超過下一段');
+assert.ok(!!c.text && c.track === 1 && c.start === 2.5 && Math.abs(c.duration - 0.5) < 1e-9 && c.text!.text === '', '新字幕接在播放頭所在空位，長度不超過下一段');
 reset();
 const added2 = addCue(1)!;
 c = useStore.getState().clips.find((x) => x.id === added2)!;

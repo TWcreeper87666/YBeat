@@ -10,7 +10,7 @@ import { SHORTCUTS, TUTORIAL } from '../ui/helpText';
 const LANG_NAME: Record<string, string> = { zh: 'Traditional Chinese (Taiwan)', en: 'English', ja: 'Japanese' };
 
 /** 當範例的內建模組（短、各有代表性） */
-const EXAMPLES = ['fx-rgb', 'fx-shake', 'fx-zoompulse', 'tr-iris', 'tr-push', 'remap-boomerang'];
+const EXAMPLES = ['fx-rgb', 'fx-shake', 'fx-zoompulse', 'tr-iris', 'tr-scaleout', 'remap-boomerang'];
 
 const SPEC = `
 ## Module format
@@ -20,7 +20,11 @@ YBeat effects, transitions and speed remaps are small code modules. The app wrap
 ### Parameters (all kinds)
 Declare tweakable parameters with comment lines; the UI builds sliders from them and the app declares the GLSL uniforms for you (never declare them yourself):
   // @param NAME: TYPE = DEFAULT (MIN..MAX) "Label"
-TYPE is float | int | bool | color. color is a vec3 in GLSL and its default is a hex like #ff3d6e. Range and label are optional.
+TYPE is float | int | bool | color | point | curve. Range and label are optional.
+- color: vec3 in GLSL; default is a hex like #ff3d6e.
+- point: vec2 in GLSL, already in uv space (use it directly, e.g. zoomUV(uv, z, center)); default is "x,y" in screen space 0..1 with y DOWN, e.g. 0.5,0.5. The user drags it on the preview. Use it for any center / focus / origin.
+- curve: vec4 cubic-bezier in GLSL; evaluate with curve(NAME, x) (x 0..1 → eased value). Default is a preset (linear, inOut, inOut3, in, out, expoOut, expoIn, back) or "x1,y1,x2,y2". The user edits it in a curve editor. Use it instead of hard-coded easeXxx() for the main motion, e.g. float p = curve(ease, progress);
+- A float can add @box(POINT) after the label, e.g. // @param to: float = 0.2 (0..1) "End size" @box(center). The preview then draws the whole frame scaled by that value around that point (zoomUV(uv, value, point)) and the user drags its corners. Use it for scale / size amounts that scale about the point.
 Effects may also set a default clip length:  // @duration 0.5
 
 ### Effect (GLSL ES 3.00, fragment only)
@@ -61,7 +65,7 @@ const OUTPUT_RULES = `
 ## When you write a module
 - Put the complete module in ONE fenced block: \`\`\`glsl for effects/transitions, \`\`\`js for remaps.
 - First line: a comment with a short name, then a colon and one-line description, e.g. // Neon Edge: glowing outline
-- Expose the interesting numbers as @param so the user can tune them.
+- Expose the interesting numbers as @param so the user can tune them; use point for centers and curve for the main easing.
 - The app compiles your code. If it reports an error, reply with the full corrected module in one block.
 `;
 

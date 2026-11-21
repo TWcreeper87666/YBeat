@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { useMonitor } from '../engine/audio';
 import { create } from 'zustand';
 import { Clapperboard, Pause, Play, SkipBack, X } from 'lucide-react';
 import { mediaUsable, useStore, type Media } from '../store';
@@ -68,6 +69,11 @@ function SourceView({ media }: { media: Media }) {
   const keys = useRef<Keys | null>(null);
   const overlay = useRef<HTMLCanvasElement>(null);
   const ref = useRef<HTMLVideoElement & HTMLAudioElement>(null);
+  // 預覽音量也套用在素材預覽
+  const level = useMonitor((m) => (m.muted ? 0 : m.volume));
+  useEffect(() => {
+    if (ref.current) ref.current.volume = level;
+  }, [level, media.id]);
   const barRef = useRef<HTMLDivElement>(null);
   const [t, setT] = useState(0);
   const [playing, setPlaying] = useState(false);

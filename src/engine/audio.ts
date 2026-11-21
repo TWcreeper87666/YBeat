@@ -1,3 +1,4 @@
+import { create } from 'zustand';
 import type { AudioClip, Clip, Media, Tracks } from '../store';
 import type { Module } from '../modules/builtin';
 import { plainSpeed } from './remap';
@@ -225,6 +226,28 @@ function killItem(it: LiveItem) {
   it.node.disconnect();
 }
 
+// ───────────── 預覽音量：只影響播放 / 拖播放頭時聽到的聲音，匯出不受影響 ─────────────
+
+export const useMonitor = create<{ volume: number; muted: boolean }>(() => ({ volume: 1, muted: false }));
+/** 實際的預覽音量（0~1） */
+export const monitorLevel = () => {
+  const m = useMonitor.getState();
+  return m.muted ? 0 : m.volume;
+};
+let monitor: { ctx: AudioContext; gain: GainNode } | null = null;
+function monitorOut(ctx: AudioContext): AudioNode {
+  if (monitor?.ctx !== ctx) {
+    const gain = ctx.createGain();
+    gain.gain.value = monitorLevel();
+    gain.connect(ctx.destination);
+    monitor = { ctx, gain };
+  }
+  return monitor.gain;
+}
+useMonitor.subscribe(() => {
+  if (monitor) monitor.gain.gain.setTargetAtTime(monitorLevel(), monitor.ctx.currentTime, 0.015);
+});
+
 function stopLive() {
   for (const it of live.values()) killItem(it);
   live = new Map();
@@ -250,7 +273,7 @@ function reconcile(ctx: AudioContext, plan: AudioPlanItem[]) {
     next.set(key, it);
     void sourceFor(p).then((r) => {
       if (!r || it.dead) return;
-      it.node = schedule(ctx, ctx.destination, r.buf, r.p, t0, c0);
+      it.node = schedule(ctx, monitorOut(ctx), r.buf, r.p, t0, c0);
     });
   }
   for (const [k, it] of live) if (!next.has(k)) killItem(it);
@@ -302,7 +325,7 @@ function scrubGrain(ctx: AudioContext, plan: AudioPlanItem[], t: number) {
     g.gain.linearRampToValueAtTime(vol, now + 0.008);
     g.gain.setValueAtTime(vol, now + GRAIN - 0.015);
     g.gain.linearRampToValueAtTime(0, now + GRAIN);
-    src.connect(g).connect(ctx.destination);
+    src.connect(g).connect(monitorOut(ctx));
     src.start(now, offset);
     src.stop(now + GRAIN + 0.01);
     src.onended = () => g.disconnect();

@@ -179,14 +179,28 @@ export function DragGhost() {
 export function ConfirmHost() {
   const req = useConfirm((s) => s.req);
   const [text, setText] = useState('');
-  useEffect(() => setText(req?.input ?? ''), [req]);
+  /** 目前選中的按鈕：0 = 取消、1 = 確定（預設確定，跟以前按 Enter 的結果一樣） */
+  const [sel, setSel] = useState(1);
+  useEffect(() => {
+    setText(req?.input ?? '');
+    setSel(1);
+    // 沒有輸入框：讓原本的焦點（例如屬性面板的欄位）離開，← / → / Enter 才會作用在對話框的按鈕上
+    if (req && req.input === undefined) (document.activeElement as HTMLElement | null)?.blur?.();
+  }, [req]);
   useEffect(() => {
     if (!req) return;
     const k = (e: KeyboardEvent) => {
+      const inText = isTextField(e.target);
       if (e.key === 'Escape') done(false);
-      else if (e.key === 'Enter') done(true);
+      // 輸入框裡按 Enter = 確定；其他時候 Enter 按下目前選中的按鈕
+      else if (e.key === 'Enter') { e.preventDefault(); done(inText ? true : sel === 1); }
+      // ← / → 切換按鈕（輸入框裡留給游標移動）
+      else if (!inText && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'Tab')) {
+        e.preventDefault();
+        setSel(e.key === 'ArrowLeft' ? 0 : e.key === 'ArrowRight' ? 1 : 1 - sel);
+      }
       // 輸入框要能打字；其他按鍵不要觸發編輯器快捷鍵
-      else if (isTextField(e.target)) return;
+      else if (inText) return;
       e.stopPropagation();
     };
     window.addEventListener('keydown', k, true);
@@ -206,8 +220,8 @@ export function ConfirmHost() {
           <input className="text-input" autoFocus value={text} onChange={(e) => setText(e.target.value)} onFocus={(e) => e.currentTarget.select()} />
         )}
         <div className="dialog-actions">
-          <button className="btn" onClick={() => done(false)}>{$t('取消')}</button>
-          <button className={`btn ${req.danger ? 'danger-fill' : 'primary'}`} autoFocus={req.input === undefined} onClick={() => done(true)}>{req.ok}</button>
+          <button className={`btn ${sel === 0 && req.input === undefined ? 'sel' : ''}`} onClick={() => done(false)} onPointerEnter={() => setSel(0)}>{$t('取消')}</button>
+          <button className={`btn ${req.danger ? 'danger-fill' : 'primary'} ${sel === 1 && req.input === undefined ? 'sel' : ''}`} onClick={() => done(true)} onPointerEnter={() => setSel(1)}>{req.ok}</button>
         </div>
       </div>
     </div>
@@ -289,7 +303,7 @@ export function installAppBehavior() {
       const browserOnly = ['s', 'p', 'o', 'e', 'g', 'h', 'j', 'u'];
       const appKeys = ['d', 'b', 'k', 'l', 'f'];
       if (browserOnly.includes(k) || (appKeys.includes(k) && !isTextField(document.activeElement))) e.preventDefault();
-      if (['=', '+', '-', '0'].includes(k)) e.preventDefault(); // 瀏覽器縮放
+      // Ctrl + / Ctrl - / Ctrl 0 交給瀏覽器縮放整個介面（介面放大縮小都能正常用）；Ctrl+滾輪仍然攔下（觸控板手勢很容易誤觸）
     },
     { capture: true },
   );
