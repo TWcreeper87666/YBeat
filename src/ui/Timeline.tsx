@@ -22,6 +22,7 @@ import { undo, redo, useHistory, beginHistoryTransaction, endHistoryTransaction 
 import { relinkWithPicker } from '../engine/media';
 import { confirmDialog, openMenu, promptDialog, stopPreviewFx, toast, useDrag, useLayout, useReveal, useSnapLine, useMenu, type MenuItem } from './uiStore';
 import { itemName } from './names';
+import { clickTrack, moveRows, moveRowsToEnd, rowKey, useTrackSel } from './trackSel';
 import { closeSource } from './SourcePanel';
 import { beatSnapPoints, fitToBeats, getBeats, splitAtBeats, useBeats } from './beatGrid';
 
@@ -933,6 +934,23 @@ export function bottomSlot(kind: TrackKind): { at: number; level?: number } {
   return upperAtBottom ? { at: n, level: s.tracks.video.length } : { at: 0, level: 0 };
 }
 
+/** 在某條軌道下方（畫面上）插入新軌道：先加在清單最後（原本軌道的編號不變），再排到那條軌道下面 */
+function insertTracksBelow(kind: TrackKind, idx: number, count: Record<TrackKind, number>) {
+  const S = useStore.getState();
+  const before = displayRows(S.tracks, S.upperAt);
+  const pos = before.findIndex((r) => r.kind === kind && r.idx === idx);
+  const added: { kind: TrackKind; idx: number }[] = [];
+  for (const k of KINDS) {
+    for (let i = 0; i < count[k]; i++) {
+      added.push({ kind: k, idx: useStore.getState().tracks[k].length });
+      useStore.getState().addTrack(k);
+    }
+  }
+  const order = [...before];
+  order.splice(pos < 0 ? order.length : pos + 1, 0, ...added);
+  useStore.getState().reorderTracks(order);
+}
+
 /** 一次可以新增好幾種、好幾條軌道 */
 function AddTrackPanel({ state, close }: { state: AddTrackState; close: () => void }) {
   const tracks = useStore((s) => s.tracks);
@@ -950,7 +968,14 @@ function AddTrackPanel({ state, close }: { state: AddTrackState; close: () => vo
     const r = ref.current!.getBoundingClientRect();
     setPos({ x: Math.max(8, Math.min(state.x, innerWidth - r.width - 8)), y: Math.max(8, Math.min(state.y, innerHeight - r.height - 8)) });
     const down = (e: PointerEvent) => !ref.current?.contains(e.target as Node) && close();
-    const key = (e: KeyboardEvent) => e.key === 'Escape' && close();
+    const key = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') close();
+      else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        e.stopPropagation();
+        addRef.current();
+      }
+    };
     window.addEventListener('pointerdown', down, true);
     window.addEventListener('keydown', key);
     return () => {
@@ -965,18 +990,7 @@ function AddTrackPanel({ state, close }: { state: AddTrackState; close: () => vo
   const add = () => {
     const S = useStore.getState();
     if (anchored) {
-      const before = displayRows(S.tracks, S.upperAt);
-      const pos = before.findIndex((r) => r.kind === state.kind && r.idx === state.above);
-      const added: { kind: TrackKind; idx: number }[] = [];
-      for (const k of KINDS) {
-        for (let i = 0; i < count[k]; i++) {
-          added.push({ kind: k, idx: useStore.getState().tracks[k].length });
-          useStore.getState().addTrack(k); // 加在清單最後：原本軌道的編號不會變
-        }
-      }
-      const order = [...before];
-      order.splice(pos < 0 ? order.length : pos + 1, 0, ...added);
-      useStore.getState().reorderTracks(order);
+      insertTracksBelow(state.kind, state.above!, count);
       if (total) toast($t('已新增 {0} 條軌道', total));
       return close();
     }
@@ -993,6 +1007,8 @@ function AddTrackPanel({ state, close }: { state: AddTrackState; close: () => vo
     if (total) toast($t('已新增 {0} 條軌道', total));
     close();
   };
+  const addRef = useRef(add);
+  addRef.current = () => total && add();
   const setN = (k: TrackKind, n: number) => setCount({ ...count, [k]: Math.max(0, Math.min(8, n)) });
 
   return (
@@ -1243,7 +1259,9 @@ const AudioView = React.memo(function AudioView({ a, m, pps, sel }: { a: AudioCl
 
 // ───────────────────────── 軌道層級（特效軌插在影片軌之間） ─────────────────────────
 
-const rowH = (tracks: Tracks, kind: TrackKind, idx: number) => tracks[kind][idx]?.height ?? TRACK_H[kind];
+/** 設定「軌道高度」大 / 中 / 小：沒有自己調過高度的軌道用這個 */
+const TRACK_SCALE = { s: 0.75, m: 1, l: 1.35 } as const;
+const rowH = (tracks: Tracks, kind: TrackKind, idx: number) => tracks[kind][idx]?.height ?? Math.round(TRACK_H[kind] * TRACK_SCALE[useLayout.getState().trackSize]);
 
 /** 軌道在畫面上往上 / 下移一格（任何種類的軌道都可以互相交錯）；to = 'top' / 'bottom' 直接移到最上 / 最下 */
 function moveRow(kind: TrackKind, idx: number, to: -1 | 1 | 'top' | 'bottom') {
@@ -1267,7 +1285,7 @@ function fxLevelLabel(tracks: Tracks, idx: number) {
 
 // ───────────────────────── 時間軸 ─────────────────────────
 
-type TrackDrag = { kind: TrackKind; from: number; over: { kind: TrackKind; idx: number; edge: 'top' | 'bottom' } | null };
+type TrackDrag = { moving: string[]; over: { kind: TrackKind; idx: number; edge: 'top' | 'bottom' } | null };
 
 export function Timeline() {
   const clips = useStore((s) => s.clips);
@@ -1294,6 +1312,11 @@ export function Timeline() {
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const [addTrack, setAddTrack] = useState<AddTrackState | null>(null);
   const [trackDrag, setTrackDrag] = useState<TrackDrag | null>(null);
+  useLayout((s) => s.trackSize); // 改設定時重畫
+  const trackSel = useTrackSel((s) => s.keys);
+  // 軌道增減 → 編號會變，清掉軌道多選
+  const trackCount = tracks.video.length + tracks.fx.length + tracks.audio.length;
+  useEffect(() => useTrackSel.setState({ keys: [], anchor: null }), [trackCount]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const innerRef = useRef<HTMLDivElement>(null);
@@ -1508,6 +1531,11 @@ export function Timeline() {
     const y0 = e.clientY;
     let moved = false;
     let over: TrackDrag['over'] = null;
+    const me = rowKey({ kind, idx });
+    const mode = e.ctrlKey || e.metaKey ? 'toggle' : e.shiftKey ? 'range' : 'single';
+    // 拖選取中的軌道 = 整組一起移動；拖沒選取的 = 只移動這條
+    const sel0 = useTrackSel.getState().keys;
+    const moving = mode === 'single' && sel0.includes(me) ? sel0 : [me];
     listen(
       (ev) => {
         if (!moved && Math.abs(ev.clientY - y0) < 4) return;
@@ -1519,24 +1547,37 @@ export function Timeline() {
           // 任何軌道都可以拖到任何位置：滑鼠在目標軌道的上半 = 插在它上面、下半 = 下面
           const r = (el as HTMLElement).getBoundingClientRect();
           over = { kind: d.rowKind as TrackKind, idx: Number(d.rowIdx), edge: ev.clientY < r.top + r.height / 2 ? 'top' : 'bottom' };
+          // 同一個縫隙只用一種表示：「下一條的上緣」一律換成「上一條的下緣」（上一條在拖曳的軌道裡就不換）
+          if (over.edge === 'top') {
+            const st = useStore.getState();
+            const rows = displayRows(st.tracks, st.upperAt);
+            const prev = rows[rows.findIndex((x) => x.kind === over!.kind && x.idx === over!.idx) - 1];
+            if (prev && !moving.includes(rowKey(prev))) over = { kind: prev.kind, idx: prev.idx, edge: 'bottom' };
+          }
           break;
         }
-        setTrackDrag({ kind, from: idx, over });
+        setTrackDrag({ moving, over });
       },
       () => {
         setTrackDrag(null);
-        if (!moved) return useStore.getState().setActiveTrack({ kind, idx });
-        if (!over) return;
         const st = useStore.getState();
         const rows = displayRows(st.tracks, st.upperAt);
-        const from = rows.findIndex((r) => r.kind === kind && r.idx === idx);
-        const target = rows.findIndex((r) => r.kind === over!.kind && r.idx === over!.idx);
-        if (from < 0 || target < 0 || from === target) return;
-        const rest = rows.filter((_, i) => i !== from);
-        const at = Math.max(0, Math.min(rest.length, rest.indexOf(rows[target]) + (over.edge === 'bottom' ? 1 : 0)));
-        rest.splice(at, 0, rows[from]);
-        if (rest.every((r, i) => r === rows[i])) return;
-        st.reorderTracks(rest);
+        if (!moved) {
+          clickTrack(rows, { kind, idx }, mode);
+          return st.setActiveTrack({ kind, idx });
+        }
+        if (!over) return;
+        const target = rows.find((r) => r.kind === over!.kind && r.idx === over!.idx);
+        const next = target && moveRows(rows, moving, target, over.edge);
+        if (!next) return;
+        // 移動後編號會變：用新順序的位置找回移動的軌道，保持選取
+        const pos = next.map((r, i) => (moving.includes(rowKey(r)) ? i : -1)).filter((i) => i >= 0);
+        st.reorderTracks(next);
+        const after = displayRows(useStore.getState().tracks, useStore.getState().upperAt);
+        const keys = pos.map((i) => rowKey(after[i]));
+        useTrackSel.setState({ keys: moving.length > 1 || sel0.includes(me) ? keys : [keys[0]], anchor: keys[0] });
+        const a = after[next.findIndex((r) => rowKey(r) === me)];
+        if (a) st.setActiveTrack(a);
       },
     );
   };
@@ -1561,6 +1602,21 @@ export function Timeline() {
   const stableScrub = useCallback((e: React.PointerEvent) => scrubRef.current(e), []);
 
   const openAddTrack = (x: number, y: number, kind: TrackKind, above: number | null) => setAddTrack({ x, y, kind, above });
+  /** 右鍵軌道：新增軌道 → 影片 / 效果 / 音訊（加在這條軌道下方）；最後一項開完整的新增軌道面板 */
+  const addTrackMenu = (e: React.MouseEvent, kind: TrackKind, idx: number): MenuItem => ({
+    label: $t('新增軌道'),
+    submenu: [
+      ...KINDS.map((k) => ({
+        label: NAMES[k],
+        action: () => {
+          insertTracksBelow(kind, idx, { video: 0, fx: 0, audio: 0, [k]: 1 } as Record<TrackKind, number>);
+          toast($t('已新增{0}軌', NAMES[k]));
+        },
+      })),
+      { separator: true },
+      { label: $t('新增軌道…'), action: () => openAddTrack(e.clientX, e.clientY, kind, idx) },
+    ],
+  });
 
   const laneMenu = (e: React.MouseEvent, kind: TrackKind, idx: number) => {
     e.preventDefault();
@@ -1573,7 +1629,7 @@ export function Timeline() {
       ...(useStore.getState().loop ? [{ label: $t('停止循環'), action: () => useStore.getState().setLoop(null) }] : []),
       ...(kind === 'video' ? [{ label: $t('在這裡加入文字'), action: () => S.addText('title', t, idx) }] : []),
       { separator: true },
-      { label: $t('新增軌道…'), action: () => openAddTrack(e.clientX, e.clientY, kind, idx) },
+      addTrackMenu(e, kind, idx),
     ]);
   };
 
@@ -1583,7 +1639,7 @@ export function Timeline() {
     const items: MenuItem[] = [
       { label: $t('選取軌道上所有片段'), action: !st.locked && trackItemKeys(kind, idx).length ? () => selectTrackItems(kind, idx) : undefined },
       { separator: true },
-      { label: $t('新增軌道…'), action: () => openAddTrack(e.clientX, e.clientY, kind, idx) },
+      addTrackMenu(e, kind, idx),
       { separator: true },
       { label: st.hidden ? $t('顯示軌道') : $t('隱藏軌道'), action: kind !== 'audio' ? () => S.toggleTrack(kind, idx, 'hidden') : undefined },
       { label: st.muted ? $t('取消靜音') : $t('靜音'), action: kind !== 'fx' ? () => S.toggleTrack(kind, idx, 'muted') : undefined },
@@ -1593,10 +1649,24 @@ export function Timeline() {
     {
       const rows = displayRows(tracks, useStore.getState().upperAt);
       const i = rows.findIndex((r) => r.kind === kind && r.idx === idx);
+      items.push({ separator: true });
+      // 右鍵的軌道在多選裡：整組一起移
+      const sel = useTrackSel.getState().keys;
+      const group = sel.length > 1 && sel.includes(rowKey({ kind, idx })) ? sel : null;
+      const toEnd = (to: 'top' | 'bottom') => {
+        if (!group) return (to === 'top' ? i > 0 : i < rows.length - 1) ? () => moveRow(kind, idx, to) : undefined;
+        const next = moveRowsToEnd(rows, group, to);
+        if (!next) return undefined;
+        return () => {
+          const pos = next.map((r, j) => (group.includes(rowKey(r)) ? j : -1)).filter((j) => j >= 0);
+          useStore.getState().reorderTracks(next);
+          const after = displayRows(useStore.getState().tracks, useStore.getState().upperAt);
+          useTrackSel.setState({ keys: pos.map((j) => rowKey(after[j])) });
+        };
+      };
       items.push(
-        { separator: true },
-        { label: $t('移到最上方'), action: i > 0 ? () => moveRow(kind, idx, 'top') : undefined },
-        { label: $t('移到最下方'), action: i < rows.length - 1 ? () => moveRow(kind, idx, 'bottom') : undefined },
+        { label: $t('移到最上方'), action: toEnd('top') },
+        { label: $t('移到最下方'), action: toEnd('bottom') },
       );
     }
     items.push(
@@ -1738,7 +1808,7 @@ export function Timeline() {
     >
       <TimelineToolbar />
       <div className="tl-scroll" ref={scrollRef}>
-        <div className="tl-inner" ref={innerRef} style={{ width: labelW + end * pps }}>
+        <div className={`tl-inner ${trackDrag ? 'track-dragging' : ''}`} ref={innerRef} style={{ width: labelW + end * pps }}>
           <div className="tl-row ruler-row">
             <div className="tl-label corner" />
             <Ruler end={end} pps={pps} onPointerDown={stableScrub} />
@@ -1747,13 +1817,13 @@ export function Timeline() {
           {rows.map(({ kind, idx }, i) => {
             const st = tracks[kind][idx];
             const h = rowH(tracks, kind, idx);
-            const dragging = trackDrag?.kind === kind && trackDrag.from === idx;
+            const dragging = !!trackDrag?.moving.includes(rowKey({ kind, idx }));
             const ov = trackDrag?.over && trackDrag.over.kind === kind && trackDrag.over.idx === idx && !dragging ? trackDrag.over.edge : null;
             const compact = h < 34;
             return (
               <div
                 key={kind + idx}
-                className={`tl-row ${kind} ${st.locked ? 'locked' : ''} ${activeTrack?.kind === kind && activeTrack.idx === idx ? 'active' : ''} ${dragging ? 'row-dragging' : ''} ${ov ? `row-drop drop-${ov}` : ''} ${fxBoundary(i) ? 'fx-boundary' : ''} ${compact ? 'compact' : ''}`}
+                className={`tl-row ${kind} ${st.locked ? 'locked' : ''} ${(activeTrack?.kind === kind && activeTrack.idx === idx) || trackSel.includes(rowKey({ kind, idx })) ? 'active' : ''} ${dragging ? 'row-dragging' : ''} ${ov ? `row-drop drop-${ov}` : ''} ${fxBoundary(i) ? 'fx-boundary' : ''} ${compact ? 'compact' : ''}`}
                 style={{ height: h }}
                 data-row-kind={kind}
                 data-row-idx={idx}

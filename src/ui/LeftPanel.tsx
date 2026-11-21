@@ -1,5 +1,5 @@
 import { $t, displayName } from '../i18n';
-import { AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2 } from 'lucide-react';
+import { AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2, Zap } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { cutTracks, type FxTrigger } from '../engine/trigger';
 import { attachedAudioIds, keyOf, uid, type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
@@ -17,7 +17,7 @@ import { CLIP_MASK_ID } from '../modules/extra';
 import { mediaBeats } from '../engine/beats';
 import { shapeName } from '../engine/maskShapes';
 import type { AnimProp, Bez, Keyframe } from '../engine/keyframes';
-import { isNumeric, paramAt, parseDuration, parseParams, parsePointCh, resolveParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
+import { isNumeric, isHitFx, paramAt, parseDuration, parseParams, parsePointCh, resolveParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
 import { CurveEdit } from './CurveEdit';
 import { updateText } from '../engine/textAnchor';
 import { computeFrame, transitionWindow, sortClips, makeCtx } from '../engine/renderer';
@@ -363,7 +363,12 @@ function captionApplyMenu(e: React.MouseEvent, clipId: string) {
 
 function ModuleThumb({ m }: { m: Module }) {
   const url = useModuleThumb(m);
-  return <div className="lib-thumb mod" style={url ? { backgroundImage: `url(${url})` } : undefined}>{!url && <span className="loading" />}</div>;
+  return (
+    <div className="lib-thumb mod" style={url ? { backgroundImage: `url(${url})` } : undefined}>
+      {!url && <span className="loading" />}
+      {isHitFx(m) && <span className="fx-short" title={$t('衝擊特效')}><Zap size={10} fill="currentColor" /></span>}
+    </div>
+  );
 }
 
 export function ModulePanel({ kind }: { kind: ModuleKind }) {
@@ -384,7 +389,8 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
 
   const favSet = new Set(favorites);
   const ofKind = all.filter((m) => m.kind === kind);
-  const inCat = (m: Module, c: string) => c === 'all' || (c === 'fav' ? favSet.has(m.id) : categoryOf(m) === c);
+  const inCat = (m: Module, c: string) =>
+    c === 'all' || (c === 'fav' ? favSet.has(m.id) : c === 'hit' ? isHitFx(m) : c === 'hold' ? !isHitFx(m) : categoryOf(m) === c);
   const filtered = ofKind.filter((m) => match(m.name, q) && inCat(m, cat));
   const modules = cat === 'fav' ? byFavOrder(filtered, (m) => m.id, favorites) : filtered;
   // 我的組合（只有特效分頁；挑選視窗不顯示）
@@ -401,6 +407,7 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
     { id: 'all', label: $t('全部') },
     { id: 'fav', label: $t('我的最愛') },
     ...(combos.length ? [{ id: 'combo', label: $t('我的組合') }] : []),
+    ...(kind === 'effect' ? [{ id: 'hit', label: $t('衝擊'), icon: <Zap size={11} fill="currentColor" /> }, { id: 'hold', label: $t('持續') }] : []),
     ...CATEGORIES[kind],
     { id: 'custom', label: $t('自訂') },
   ].filter((c) => c.id === 'all' || c.id === 'fav' || c.id === 'combo' || ofKind.some((m) => inCat(m, c.id)));
@@ -1227,6 +1234,8 @@ function effectSections(
       id: `${o.idBase}.audio`,
       title: o.compact ? `${name} · ${$t('音訊反應')}` : $t('音訊反應'),
       dim: o.dim,
+      // 片段特效：沒在用音訊反應就先收起來
+      defaultCollapsed: o.compact && !f.audio,
       rows: numeric.map((d) => {
         const dr = f.audio?.[d.name];
         const st = d.type === 'int' ? 1 : (d.max - d.min) / 200 || 0.01;

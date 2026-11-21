@@ -131,3 +131,11 @@ export function parseDuration(code: string, fallback: number): number {
   const m = /\/\/\s*@duration\s+([\d.]+)/.exec(code);
   return m ? parseFloat(m[1]) || fallback : fallback;
 }
+
+/**
+ * 衝擊特效（// @hit）：打一下就結束，畫面隨 u_progress 衰減 / 播完（衝擊變焦、閃白…），拉長會失去衝擊感。
+ * 沒標的是持續特效：畫面不看進度，放多長都一樣（描邊、調色、手持晃動…）。
+ */
+export function isHitFx(m: { kind: string; code: string }): boolean {
+  return m.kind === 'effect' && /\/\/\s*@hit\b/.test(m.code);
+}

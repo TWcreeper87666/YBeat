@@ -299,8 +299,6 @@ kbd { font: 11px ui-monospace, Consolas, monospace; color: var(--muted); }
 .tp-more-box { padding: 4px 0; gap: 2px; }
 .tp-more-box .tp { width: 28px; height: 28px; }
 /* 「⋯」裡有開著的功能（循環播放、網格）：右上角一個小點 */
-.tp-more > .tp.has-on { position: relative; }
-.tp-more > .tp.has-on::after { content: ""; position: absolute; top: 4px; right: 4px; width: 5px; height: 5px; border-radius: 50%; background: var(--accent2); }
 .tp-time { font: 12px ui-monospace, Consolas, monospace; margin-left: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .transport-row > .tp { flex: none; }
 /* 預覽變窄時依序收起：總長度 → 上一格 / 下一格 → 回到開頭 / 到結尾 */
@@ -652,6 +650,9 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .lib-item.mod.mk-effect .lib-thumb { border-bottom: 2px solid var(--fx); }
 .lib-item .combo-count { position: absolute; left: 4px; top: 4px; z-index: 2; background: #000b; color: #fff; font-size: 10px; padding: 0 5px; border-radius: 3px; pointer-events: none; }
 .lib-item.mod.mk-remap .lib-thumb { border-bottom: 2px solid var(--accent2); }
+.lib-thumb .fx-short { position: absolute; right: 3px; bottom: 3px; z-index: 2; display: flex; padding: 2px; border-radius: 3px; background: #000b; color: #ffd27a; pointer-events: none; }
+.lib-list .lib-thumb .fx-short { right: 1px; bottom: 1px; padding: 1px; }
+.lib-list .lib-thumb .fx-short svg { width: 8px; height: 8px; }
 
 /* ───────────── 效果控制（屬性） ───────────── */
 .inspector-panel { min-height: 100%; }
@@ -797,9 +798,12 @@ body.dock-dragging .panel-host { pointer-events: none; }
 .tl-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tl-resize { position: absolute; left: 0; right: 0; bottom: -2px; height: 6px; cursor: row-resize; z-index: 2; }
 .tl-resize:hover { background: var(--accent2); opacity: .6; }
+/* 只有選取中的軌道可以拖下緣調整高度 */
+.tl-row:not(.active) .tl-resize { pointer-events: none; }
+.track-dragging .tl-resize { pointer-events: none; }
 .tl-row.compact .clip, .tl-row.compact .fxitem, .tl-row.compact .audioitem { top: 2px; bottom: 2px; padding-bottom: 0; align-items: center; }
-.tl-row.row-drop.drop-top { box-shadow: inset 0 3px 0 var(--fx); }
-.tl-row.row-drop.drop-bottom { box-shadow: inset 0 -3px 0 var(--fx); }
+.tl-row.row-drop.drop-top, .tl-row.row-drop.drop-top .tl-label { box-shadow: inset 0 3px 0 var(--fx); }
+.tl-row.row-drop.drop-bottom, .tl-row.row-drop.drop-bottom .tl-label { box-shadow: inset 0 -3px 0 var(--fx); }
 .tl-row.fx-boundary { border-top: 1px dashed #6c4fbf88; }
 .tl-row.fx .tl-label { color: #b9a2ff; }
 .tl-row.add-row { height: 38px; }

@@ -1,6 +1,8 @@
 import { codeBlocks, detectKind, guessName } from '../src/ai/text';
 import { hunks, lineDiff } from '../src/ai/diff';
-import { RateLimitError, ApiKeyError, BlockedError, listModels, pickDefaultModel, streamChat } from '../src/ai/gemini';
+import { RateLimitError, ApiKeyError, BlockedError, listModels, pickDefaultModel, streamChat, streamTurn } from '../src/ai/gemini';
+import { TOOL_DECLS, builtinCatalog, runTool, toolRefs } from '../src/ai/tools';
+import { BUILTIN_MODULES } from '../src/modules/builtin';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -79,6 +81,32 @@ let next: () => Response = () => new Response('{}');
   const list = await listModels('K');
   ok(list.map((m) => m.id).join(',') === 'gemini-3.5-flash-lite-preview,gemini-2.5-flash-lite,gemini-2.0-flash', '模型清單：只留文字模型，新的在前');
   ok(pickDefaultModel(list) === 'gemini-2.5-flash-lite', '預設挑穩定版的 flash-lite');
+
+  // ── 工具呼叫 ──
+  next = () => sse([
+    { candidates: [{ content: { parts: [{ text: 'Let me ' }] } }] },
+    { candidates: [{ content: { parts: [{ text: 'look.' }] } }] },
+    { candidates: [{ content: { parts: [{ functionCall: { name: 'get_modules', args: { ids: ['tr-iris'] }, id: 'c1' }, thoughtSignature: 'SIG' }] }, finishReason: 'STOP' }] },
+  ]);
+  const tr = await streamTurn({ key: 'K', model: 'm', system: 'S', turns: [{ role: 'user', text: 'hi' }, { role: 'model', text: 'x', parts: [{ text: 'raw' }] }], tools: TOOL_DECLS });
+  ok(tr.text === 'Let me look.' && tr.calls.length === 1 && tr.calls[0].name === 'get_modules' && tr.calls[0].id === 'c1', '解析工具呼叫');
+  ok(tr.parts.length === 2 && tr.parts[0].text === 'Let me look.' && tr.parts[1].thoughtSignature === 'SIG', '原始 parts：文字併成一塊、保留簽章');
+  const tb = JSON.parse(String(calls[calls.length - 1].init!.body));
+  ok(tb.tools[0].functionDeclarations.length === TOOL_DECLS.length && tb.toolConfig.functionCallingConfig.mode === 'AUTO', '送出工具宣告');
+  ok(tb.contents[1].parts[0].text === 'raw', '有 parts 的回合照原樣送');
+
+  // ── 模組工具 ──
+  const custom = { id: 'my-1', kind: 'effect' as const, name: 'Mine', code: 'vec4 effect(vec2 uv){return tex(uv);}' };
+  const iris = BUILTIN_MODULES.find((m) => m.id === 'tr-iris')!;
+  const edited = { ...BUILTIN_MODULES.find((m) => m.id === 'fx-rgb')!, code: '// changed' };
+  const mods = [...BUILTIN_MODULES.filter((m) => m.id !== 'fx-rgb'), edited, custom];
+  const got = runTool('get_modules', { ids: ['tr-iris', 'my-1', 'nope'] }, mods) as any;
+  ok(got.modules.length === 2 && got.modules[0].code === iris.code && got.modules[1].code === custom.code && got.missing[0] === 'nope', 'get_modules 讀內建 / 自訂，找不到的列出來');
+  ok((runTool('get_modules', { ids: ['fx-rgb'] }, mods) as any).modules[0].code === '// changed', '讀到使用者改過的版本');
+  const um = (runTool('list_user_modules', {}, mods) as any).modules.map((m: any) => m.id).sort().join(',');
+  ok(um === 'fx-rgb,my-1', 'list_user_modules：自訂 + 改過的內建');
+  ok(toolRefs('get_modules', { ids: ['tr-iris', 'nope'] }, mods).join() === iris.name, '讀過的模組名稱');
+  ok(builtinCatalog().split('\n').length === BUILTIN_MODULES.length && builtinCatalog().includes('tr-iris | transition |'), '內建目錄一行一個');
 
   console.log(fails ? `\n${fails} 項失敗` : '\n全部通過');
   if (fails) process.exit(1);

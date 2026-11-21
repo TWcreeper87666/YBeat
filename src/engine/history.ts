@@ -1,7 +1,8 @@
 import { create } from 'zustand';
+import { afterRelease, pointerHeld } from './pointerHold';
 import { useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
 
-/** 復原 / 重做：自動記錄時間軸變更，連續的拖曳 / 滑桿操作（400ms 內）合併成一步 */
+/** 復原 / 重做：自動記錄時間軸變更；拖曳中的變更等放開才算一步，其他連續操作（400ms 內）合併成一步 */
 interface Doc { clips: Clip[]; effects: FxItem[]; audios: AudioClip[]; media: Media[]; tracks: Tracks }
 
 const past: Doc[] = [];
@@ -33,10 +34,13 @@ useStore.subscribe((s, prev) => {
   if (!burstStart) burstStart = docOf(prev);
   future = [];
   clearTimeout(timer);
-  timer = window.setTimeout(() => {
+  const settle = () => {
     flush();
     sync();
-  }, 400);
+  };
+  // 拖曳中：中途停頓也不切成兩步，放開才結算
+  if (pointerHeld()) afterRelease(settle);
+  else timer = window.setTimeout(settle, 400);
   sync();
 });
 

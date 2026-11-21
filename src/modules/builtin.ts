@@ -1,4 +1,5 @@
 import { EXTRA_MODULES } from './extra';
+import { RHYTHM_MODULES } from './rhythm';
 export type ModuleKind = 'effect' | 'transition' | 'remap';
 export interface Module {
   id: string;
@@ -13,9 +14,11 @@ export interface Module {
 // ───────────────────────── 特效（GLSL）─────────────────────────
 // 寫一個 vec4 effect(vec2 uv)；可用：tex(uv)、u_progress(0→1)、u_local(秒)、
 // u_duration、u_time、ASPECT、PI、rand()、noise1()、rotateUV()、zoomUV()、mirrorUV()、easeXxx()、curve(曲線參數, x)
+// // @hit：衝擊特效（隨 u_progress 播完就結束，拉長會失去衝擊感）；沒標 = 持續特效（放多長都一樣）
 
 const crashZoom = `// 衝擊變焦：一開始猛衝進去再快速回穩
 // @duration 0.4
+// @hit
 // @param amount: float = 0.6 (0..2) "變焦量"
 // @param blur: float = 0.6 (0..1) "放射模糊"
 // @param zoomOut: bool = false "反向（拉遠）"
@@ -38,6 +41,7 @@ vec4 effect(vec2 uv) {
 
 const shake = `// 相機震動：鼓點上放一小段就很有感
 // @duration 0.35
+// @hit
 // @param strength: float = 0.04 (0..0.2) "位移幅度"
 // @param rotation: float = 0.05 (0..0.4) "旋轉幅度"
 // @param freq: float = 30 (1..80) "頻率"
@@ -55,6 +59,7 @@ vec4 effect(vec2 uv) {
 
 const flash = `// 曝光閃白
 // @duration 0.25
+// @hit
 // @param intensity: float = 1 (0..3) "強度"
 // @param decay: float = 3 (0.5..8) "衰減"
 // @param tint: color = #ffffff "顏色"
@@ -68,6 +73,7 @@ vec4 effect(vec2 uv) {
 
 const rgbSplit = `// RGB 色差分離
 // @duration 0.4
+// @hit
 // @param amount: float = 0.02 (0..0.1) "分離量"
 // @param decay: float = 1.5 (0..6) "衰減"
 // @param radial: bool = true "放射狀"
@@ -84,6 +90,7 @@ vec4 effect(vec2 uv) {
 
 const lens = `// 魚眼 / 鏡頭扭曲
 // @duration 0.4
+// @hit
 // @param amount: float = 0.6 (-1..2) "扭曲量"
 // @param decay: float = 2 (0..6) "衰減"
 // @param center: point = 0.5,0.5 "中心"
@@ -126,6 +133,7 @@ vec4 effect(vec2 uv) {
 
 const entrance = `// 進場變換：位置 / 縮放 / 旋轉 + 過衝回彈
 // @duration 0.6
+// @hit
 // @param fromScale: float = 1.8 (0.1..4) "起始縮放"
 // @param fromX: float = 0 (-1..1) "起始 X"
 // @param fromY: float = -0.3 (-1..1) "起始 Y"
@@ -336,13 +344,13 @@ const curve_remap_freeze = curvePreset('中段定格', '[[0,0,[0,0,1,1]],[0.4,0.
 const mk = (id: string, kind: ModuleKind, name: string, code: string, rev?: number): Module => ({ id, kind, name, code, builtin: true, ...(rev ? { rev } : {}) });
 
 const BASE_MODULES: Module[] = [
-  mk('fx-crashzoom', 'effect', '衝擊變焦 Crash Zoom', crashZoom, 2),
-  mk('fx-shake', 'effect', '相機震動 Shake', shake),
-  mk('fx-flash', 'effect', '閃白 Flash', flash),
-  mk('fx-rgb', 'effect', 'RGB 色差', rgbSplit),
-  mk('fx-lens', 'effect', '魚眼扭曲 Lens', lens, 2),
+  mk('fx-crashzoom', 'effect', '衝擊變焦 Crash Zoom', crashZoom, 3),
+  mk('fx-shake', 'effect', '相機震動 Shake', shake, 2),
+  mk('fx-flash', 'effect', '閃白 Flash', flash, 2),
+  mk('fx-rgb', 'effect', 'RGB 色差', rgbSplit, 2),
+  mk('fx-lens', 'effect', '魚眼扭曲 Lens', lens, 3),
   mk('fx-speedlines', 'effect', '速度線 Speed Lines', speedLines, 2),
-  mk('fx-entrance', 'effect', '進場變換 Entrance', entrance, 2),
+  mk('fx-entrance', 'effect', '進場變換 Entrance', entrance, 3),
   mk('fx-grade', 'effect', '調色 Grade', grade),
   mk('tr-crossfade', 'transition', '溶接 Crossfade', crossfade, 2),
   mk('tr-crashzoom', 'transition', '衝擊變焦 Crash Zoom', crashZoomTr, 2),
@@ -365,7 +373,7 @@ const BASE_MODULES: Module[] = [
 
 const ORDER: Record<ModuleKind, number> = { effect: 0, transition: 1, remap: 2 };
 /** 內建模組：依種類排序（同種類內保持原順序） */
-export const BUILTIN_MODULES: Module[] = [...BASE_MODULES, ...EXTRA_MODULES]
+export const BUILTIN_MODULES: Module[] = [...BASE_MODULES, ...EXTRA_MODULES, ...RHYTHM_MODULES]
   .map((m, i) => ({ m, i }))
   .sort((a, b) => ORDER[a.m.kind] - ORDER[b.m.kind] || a.i - b.i)
   .map((x) => x.m);
@@ -375,6 +383,7 @@ export const NEW_MODULE_TEMPLATES: Record<ModuleKind, string> = {
 // 可用：tex(uv)、u_progress(0→1)、u_local(秒)、u_time、ASPECT、easeOutExpo()、curve(曲線參數, x) ...
 // 參數型別：float、int、bool、color、point（中心點，可在預覽上拖）、curve（緩動曲線）
 // @duration 0.5
+// @hit：隨 u_progress 播完就結束（持續型的特效不要加）
 // @param amount: float = 0.8 (0..1) "強度"
 vec4 effect(vec2 uv) {
   vec4 c = tex(uv);

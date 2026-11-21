@@ -3,6 +3,7 @@ import type { Module, ModuleKind } from './builtin';
 
 const shakeBlur = `// 模糊晃動：相機震動 + 依晃動方向的動態模糊（edit 最常用）
 // @duration 0.4
+// @hit
 // @param strength: float = 0.05 (0..0.2) "晃動幅度"
 // @param freq: float = 24 (1..80) "頻率"
 // @param blur: float = 1 (0..3) "模糊量"
@@ -53,6 +54,7 @@ vec4 effect(vec2 uv) {
 
 const motionBlur = `// 方向動態模糊
 // @duration 0.4
+// @hit
 // @param amount: float = 0.06 (0..0.3) "模糊長度"
 // @param angle: float = 0 (0..360) "角度（度）"
 // @param decay: float = 1.5 (0..6) "衰減（0 = 固定）"
@@ -68,6 +70,7 @@ vec4 effect(vec2 uv) {
 
 const zoomPulse = `// 縮放脈衝（Zoom Bounce）：鼓點上彈一下
 // @duration 0.35
+// @hit
 // @param amount: float = 0.15 (0..1) "放大量"
 // @param blur: float = 0.4 (0..1) "放射模糊"
 // @param bounce: bool = true "回彈"
@@ -87,6 +90,7 @@ vec4 effect(vec2 uv) {
 
 const glitch = `// 故障 Glitch：橫向切片位移 + RGB 分離 + 方塊雜訊
 // @duration 0.4
+// @hit
 // @param amount: float = 0.7 (0..1) "強度"
 // @param slices: float = 24 (4..80) "切片數"
 // @param speed: float = 30 (1..60) "跳動速度"
@@ -123,6 +127,7 @@ vec4 effect(vec2 uv) {
 
 const invert = `// 反相閃
 // @duration 0.2
+// @hit
 // @param amount: float = 1 (0..1) "強度"
 // @param decay: float = 2 (0..8) "衰減"
 vec4 effect(vec2 uv) {
@@ -193,6 +198,7 @@ vec4 effect(vec2 uv) {
 
 const twirl = `// 漩渦 Twirl
 // @duration 0.5
+// @hit
 // @param angle: float = 3 (-10..10) "旋轉量"
 // @param radius: float = 0.6 (0.1..1.5) "範圍"
 // @param decay: float = 2 (0..6) "衰減"
@@ -262,6 +268,7 @@ vec4 effect(vec2 uv) {
 
 const pixelate = `// 像素化 / 馬賽克
 // @duration 0.4
+// @hit
 // @param size: float = 40 (2..200) "格子大小（px）"
 // @param decay: float = 2 (0..6) "衰減（0 = 固定）"
 vec4 effect(vec2 uv) {
@@ -315,6 +322,7 @@ vec4 effect(vec2 uv) {
 
 const lightLeak = `// 漏光 Light Leak
 // @duration 1.5
+// @hit
 // @param intensity: float = 0.8 (0..2) "強度"
 // @param warm: color = #ff7a2e "主色"
 // @param second: color = #ff2e8a "副色"
@@ -565,25 +573,25 @@ vec4 effect(vec2 uv) { return vec4(0.0); }
 const mk = (id: string, kind: ModuleKind, name: string, code: string, rev?: number): Module => ({ id, kind, name, code, builtin: true, ...(rev ? { rev } : {}) });
 
 export const EXTRA_MODULES: Module[] = [
-  mk('fx-shakeblur', 'effect', '模糊晃動 Shake Blur', shakeBlur),
+  mk('fx-shakeblur', 'effect', '模糊晃動 Shake Blur', shakeBlur, 2),
   mk('fx-handheld', 'effect', '手持晃動 Handheld', handheld, 2),
-  mk('fx-motionblur', 'effect', '動態模糊 Motion Blur', motionBlur),
-  mk('fx-zoompulse', 'effect', '縮放脈衝 Zoom Bounce', zoomPulse, 2),
-  mk('fx-glitch', 'effect', '故障 Glitch', glitch),
+  mk('fx-motionblur', 'effect', '動態模糊 Motion Blur', motionBlur, 2),
+  mk('fx-zoompulse', 'effect', '縮放脈衝 Zoom Bounce', zoomPulse, 3),
+  mk('fx-glitch', 'effect', '故障 Glitch', glitch, 2),
   mk('fx-strobe', 'effect', '頻閃 Strobe', strobe),
-  mk('fx-invert', 'effect', '反相閃 Invert', invert),
+  mk('fx-invert', 'effect', '反相閃 Invert', invert, 2),
   mk('fx-hue', 'effect', '色相偏移 Hue Shift', hueShift),
   mk('fx-glow', 'effect', '光暈 Glow', glow),
   mk('fx-wave', 'effect', '波浪扭曲 Wave Warp', wave),
-  mk('fx-twirl', 'effect', '漩渦 Twirl', twirl, 2),
+  mk('fx-twirl', 'effect', '漩渦 Twirl', twirl, 3),
   mk('fx-mirror', 'effect', '鏡像 Mirror', mirror),
   mk('fx-split', 'effect', '分割畫面 Split Screen', split),
   mk('fx-kaleido', 'effect', '萬花筒 Kaleidoscope', kaleido, 2),
-  mk('fx-pixelate', 'effect', '像素化 Pixelate', pixelate),
+  mk('fx-pixelate', 'effect', '像素化 Pixelate', pixelate, 2),
   mk('fx-bw', 'effect', '黑白高反差 B&W', bw),
   mk('fx-vhs', 'effect', 'VHS 掃描線', vhs),
   mk('fx-letterbox', 'effect', '電影黑邊 Letterbox', letterbox),
-  mk('fx-lightleak', 'effect', '漏光 Light Leak', lightLeak),
+  mk('fx-lightleak', 'effect', '漏光 Light Leak', lightLeak, 2),
   mk('fx-grain', 'effect', '底片顆粒 Grain', grainFx),
   mk('fx-outline', 'effect', '描邊 Outline', outline),
   mk('fx-chromakey', 'effect', '去背 Chroma Key', chromaKey),

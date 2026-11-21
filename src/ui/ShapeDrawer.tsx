@@ -10,7 +10,7 @@ import { useStore } from '../store';
 import { drawTarget, timeInside, type DrawTarget } from './MaskEditor';
 import { GridButton, GridOverlay } from './GridOverlay';
 import { closePicker } from './Library';
-import { toast, useLayout } from './uiStore';
+import { confirmDialog, toast, useConfirm, useLayout } from './uiStore';
 
 /**
  * 鋼筆工具：在目前的畫面上畫遮罩形狀（存進遮罩形狀庫的「自訂」，有對象時順便套用到那個遮罩）。
@@ -148,6 +148,8 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
   const viewRef = useRef<HTMLCanvasElement>(null);
   const cur = useRef(snap);
   cur.current = snap;
+  // 最後一次存檔 / 套用時的路徑：取消時跟它比，有變更先確認
+  const savedPts = useRef(snap.pts);
   const selRef = useRef(sel);
   selRef.current = sel;
   const past = useRef<Snap[]>([]);
@@ -450,6 +452,15 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
     close();
   };
 
+  /** 取消（Esc / 點外面 / 取消鈕）：畫了還沒存先確認 */
+  const cancel = async () => {
+    if (cur.current.pts !== savedPts.current && cur.current.pts.length) {
+      const ok = await confirmDialog({ title: $t('捨棄變更？'), message: $t('形狀的變更還沒儲存。'), ok: $t('捨棄'), danger: true });
+      if (!ok) return;
+    }
+    close();
+  };
+
   /** 存進形狀庫（編輯形狀庫的形狀 = 更新它）；有對象時不關閉，還可以接著套用 */
   const saveToLib = () => {
     const shape = penToShape(cur.current.pts);
@@ -461,6 +472,7 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
     else sid = lib.add({ name: nm, path: shape.path, aspect: shape.aspect, pen });
     const L = useLayout.getState();
     L.set({ modCat: { ...L.modCat, mask: 'custom' }, libFilterOpen: { ...L.libFilterOpen, mask: true } });
+    savedPts.current = cur.current.pts;
     toast(editing ? $t('已更新形狀') : $t('已加入自訂形狀'));
     if (sid) onSaved?.(sid);
     if (!targetKey) close();
@@ -469,6 +481,7 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
   // ── 鍵盤（輸入框裡只處理 Esc） ──
   const keyRef = useRef<(e: KeyboardEvent) => void>();
   keyRef.current = (e: KeyboardEvent) => {
+    if (useConfirm.getState().req) return; // 確認視窗開著：交給它
     // 網格設定的小視窗開著：Esc 交給它關
     if (e.key === 'Escape' && document.querySelector('.popover')) return;
     const inInput = (e.target as HTMLElement)?.tagName === 'INPUT';
@@ -478,10 +491,13 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
     let handled = true;
     if (e.code === 'Space' && !inInput) space.current = true;
     else if (mod && e.key === '0') resetView();
-    else if (e.key === 'Escape') {
+    else if (mod && e.key === 'Enter') {
+      // Ctrl+Enter = 套用 / 存檔（輸入框裡也可以）
+      if (closed && cur.current.pts.length >= 3) targetKey ? apply() : saveToLib();
+    } else if (e.key === 'Escape') {
       if (inInput) (e.target as HTMLElement).blur();
       else if (s.length) setSel([]);
-      else close();
+      else void cancel();
     } else if (inInput) handled = false;
     else if (mod && e.key.toLowerCase() === 'z') (e.shiftKey ? redo : undo)();
     else if (mod && e.key.toLowerCase() === 'y') redo();
@@ -518,7 +534,7 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
   const showHandles = new Set<number>([...sel, ...(!closed && last ? [pts.length - 1] : [])]);
 
   return (
-    <div className="overlay" onPointerDown={(e) => e.target === e.currentTarget && close()}>
+    <div className="overlay" onPointerDown={(e) => e.target === e.currentTarget && void cancel()}>
       <div className="dialog shape-drawer">
         <div className="sd-head">
           <h3>{editing ? $t('編輯形狀') : $t('畫遮罩形狀')}</h3>
@@ -610,7 +626,7 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
             </button>
           )}
           <span className="spacer" />
-          <button className="btn" onClick={close}>{$t('取消')}</button>
+          <button className="btn" onClick={() => void cancel()}>{$t('取消')}</button>
           {targetKey ? (
             <button className="btn primary" disabled={!ready} onClick={apply}>{$t('套用')}</button>
           ) : (

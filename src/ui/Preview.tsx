@@ -165,10 +165,10 @@ export function Preview() {
     };
   }, []);
 
-  // ── 編輯視窗：滾輪縮放整個輸出畫面、拖空白處 / 中鍵平移 ──
+  // ── 滾輪縮放整個輸出畫面、拖空白處 / 中鍵平移 ──
   const boxRef = useRef<HTMLDivElement>(null);
-  const editor = useEditorWindow((s) => s.open);
   const view = usePreviewView();
+  const bg = useLayout((s) => s.previewBg);
   const fmt = useStore((s) => s.format);
   const [box, setBox] = useState({ w: 0, h: 0 });
   useLayoutEffect(() => {
@@ -185,7 +185,7 @@ export function Preview() {
   const aspect = fmt.w / fmt.h;
   const availW = Math.max(1, box.w - PAD * 2), availH = Math.max(1, box.h - PAD * 2);
   const fitW = Math.min(availW, availH * aspect), fitH = fitW / aspect;
-  const zoomed = editor && (view.z !== 1 || view.px !== 0 || view.py !== 0);
+  const zoomed = (view.z !== 1 || view.px !== 0 || view.py !== 0);
   useEffect(() => {
     if (!pickingColor) return;
     const onKey = (e: KeyboardEvent) => {
@@ -215,7 +215,7 @@ export function Preview() {
 
   useEffect(() => {
     const el = boxRef.current;
-    if (!el || !editor) return;
+    if (!el) return;
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const v = usePreviewView.getState();
@@ -228,18 +228,23 @@ export function Preview() {
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [editor]);
+  }, []);
 
   /** 平移：中鍵任何地方、或左鍵拖畫面外的空白處 */
   const startPan = (e: React.PointerEvent) => {
-    if (!editor) return;
     const onBlank = e.target === e.currentTarget;
     if (!(e.button === 1 || (e.button === 0 && onBlank))) return;
     e.preventDefault();
     const x0 = e.clientX, y0 = e.clientY, v0 = usePreviewView.getState();
+    let moved = false;
     document.body.classList.add('panning');
-    const mv = (ev: PointerEvent) => usePreviewView.setState({ px: v0.px + ev.clientX - x0, py: v0.py + ev.clientY - y0 });
+    const mv = (ev: PointerEvent) => {
+      if (Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) > 3) moved = true;
+      usePreviewView.setState({ px: v0.px + ev.clientX - x0, py: v0.py + ev.clientY - y0 });
+    };
     const up = () => {
+      // 左鍵點空白處（沒拖）= 取消選取
+      if (!moved && e.button === 0) useStore.getState().select(null);
       document.body.classList.remove('panning');
       window.removeEventListener('pointermove', mv);
       window.removeEventListener('pointerup', up);
@@ -251,17 +256,18 @@ export function Preview() {
   return (
     <div
       ref={boxRef}
-      className={`preview ${editor ? 'pannable' : ''} ${pickingColor ? 'color-picking' : ''}`}
+      className={`preview pannable ${pickingColor ? 'color-picking' : ''}`}
+      style={bg ? { background: bg } : undefined}
       onPointerDownCapture={(e) => { if (!sampleColor(e) && e.button === 1) startPan(e); }}
       onPointerDown={(e) => e.button === 0 && startPan(e)}
-      onDoubleClick={(e) => editor && e.target === e.currentTarget && resetView()}
+      onDoubleClick={(e) => e.target === e.currentTarget && resetView()}
     >
       {err ? <div className="fatal">{err}</div> : <canvas ref={ref} style={canvasStyle} />}
       <Gizmo canvasRef={ref} />
       <FxPreviewLabel />
-      {editor && (
+      {zoomed && (
         <button className="view-zoom" title={$t('檢視縮放（滾輪縮放、拖曳空白處或中鍵平移；點一下回到符合視窗）')} onClick={resetView}>
-          {Math.round(view.z * 100)}%{zoomed ? ` · ${$t('符合')}` : ''}
+          {Math.round(view.z * 100)}% · {$t('符合')}
         </button>
       )}
     </div>
@@ -522,16 +528,8 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
     s.select(null);
   };
 
-  const onWheel = (e: React.WheelEvent) => {
-    if (useEditorWindow.getState().open) return; // 編輯視窗：滾輪是縮放整個畫面（由外層處理）
-    if (!clip || !visible) return;
-    const base = clipTransformAt(clip, local);
-    const k = e.deltaY < 0 ? 1.05 : 1 / 1.05;
-    applyAt(clip.id, { scaleX: base.scaleX * k, scaleY: base.scaleY * k }, local);
-  };
-
   return (
-    <div ref={layerRef} className="gizmo-layer" style={{ left: rect.left, top: rect.top, width: W, height: H }} onPointerDown={onLayerDown} onWheel={onWheel}>
+    <div ref={layerRef} className="gizmo-layer" style={{ left: rect.left, top: rect.top, width: W, height: H }} onPointerDown={onLayerDown}>
       <GridOverlay W={W} H={H} />
       {(guides.x !== null || guides.y !== null) && (
         <svg className="snap-guides" width={W} height={H}>

@@ -19,7 +19,7 @@ import { ConfirmHost, DragGhost, MenuBar, MenuHost, Toasts } from './ui/Menu';
 import { copyKeys, deleteSelectedKey, keysFocused, nudgeKeys, pasteKeys, selectAllKeys } from './ui/EffectControls';
 import { ShapeDrawerHost } from './ui/ShapeDrawer';
 import { SHORTCUTS, TUTORIAL } from './ui/helpText';
-import { useLayout, toast, stopPreviewFx, confirmDialog, openMenu, type MenuItem } from './ui/uiStore';
+import { useLayout, toast, stopPreviewFx, confirmDialog, openMenu, useConfirm, type MenuItem } from './ui/uiStore';
 import { DragNumber } from './ui/DragNumber';
 import { usePrefs } from './prefs';
 import { Globe, Settings } from 'lucide-react';
@@ -39,6 +39,12 @@ const FPS = 60;
 
 type Dialog = 'export' | 'shortcuts' | 'tutorial' | 'about' | 'new' | 'demo' | 'saveLayout' | 'settings' | null;
 let setDialogGlobal: (d: Dialog) => void = () => {};
+/**
+ * 目前視窗的鍵盤行為（視窗在 render 時設定）：
+ * Ctrl+Enter = save（沒有就是關閉）；Esc / 點外面 = 取消，dirty() 為真時先確認，確認後 revert()
+ */
+type DialogGuard = { save?: () => void; dirty?: () => boolean; revert?: () => void };
+let guard: DialogGuard = {};
 const openDialog = (d: Dialog) => setDialogGlobal(d);
 
 function ExportDialog({ close }: { close: () => void }) {
@@ -60,6 +66,7 @@ function ExportDialog({ close }: { close: () => void }) {
       toast($t('匯出失敗：{0}', e instanceof Error ? e.message : e), 'error');
     }
   };
+  guard = { save: () => void go() };
   return (
     <div className="dialog settings export-window" role="dialog" aria-modal="true" aria-label={$t('匯出影片')}>
       <h3>{$t('匯出影片')}</h3>
@@ -128,14 +135,31 @@ function ShortcutsDialog({ close }: { close: () => void }) {
   );
 }
 
+function DemoDialog({ close }: { close: () => void }) {
+  const ok = () => { close(); loadDemo(); };
+  guard = { save: ok };
+  return (
+    <div className="dialog">
+      <h3>{$t('載入示範專案？')}</h3>
+      <p className="muted">{$t('示範會取代目前的時間軸（素材庫保留）。之後可以用 Ctrl+Z 復原。')}</p>
+      <div className="dialog-actions">
+        <button className="btn" onClick={close}>{$t('取消')}</button>
+        <button className="btn primary" onClick={ok}>{$t('載入示範')}</button>
+      </div>
+    </div>
+  );
+}
+
 function NewDialog({ close }: { close: () => void }) {
+  const ok = () => { close(); newProject(); };
+  guard = { save: ok };
   return (
     <div className="dialog">
       <h3>{$t('建立新專案？')}</h3>
       <p className="muted">{$t('目前的時間軸與素材會被清空（模組程式碼會保留）。此動作無法復原。')}</p>
       <div className="dialog-actions">
         <button className="btn" onClick={close}>{$t('取消')}</button>
-        <button className="btn danger-fill" onClick={() => { close(); newProject(); }}>{$t('清空並建立')}</button>
+        <button className="btn danger-fill" onClick={ok}>{$t('清空並建立')}</button>
       </div>
     </div>
   );
@@ -149,6 +173,7 @@ function SaveLayoutDialog({ close }: { close: () => void }) {
     toast($t('版面已儲存，可以在「版面」選單切換'));
     close();
   };
+  guard = { save };
   return (
     <div className="dialog">
       <h3>{$t('另存目前版面')}</h3>
@@ -182,6 +207,27 @@ function SettingsDialog({ close }: { close: () => void }) {
   const L = useLayout();
   const P = usePrefs();
   const fmt = useStore((s) => s.format);
+  // 設定是即時套用的：打開時記下來，取消時還原
+  const [orig] = useState(() => {
+    const l = useLayout.getState(), p = usePrefs.getState();
+    return {
+      layout: { previewScale: l.previewScale, upperLayerAt: l.upperLayerAt, wheelScroll: l.wheelScroll, trackSize: l.trackSize, beatLead: l.beatLead },
+      prefs: { stillDur: p.stillDur, transDur: p.transDur },
+      format: useStore.getState().format,
+    };
+  });
+  guard = {
+    save: close,
+    dirty: () => {
+      const l = useLayout.getState() as unknown as Record<string, unknown>, p = usePrefs.getState() as unknown as Record<string, unknown>;
+      return Object.entries(orig.layout).some(([k, v]) => l[k] !== v) || Object.entries(orig.prefs).some(([k, v]) => p[k] !== v) || useStore.getState().format !== orig.format;
+    },
+    revert: () => {
+      useLayout.getState().set(orig.layout);
+      usePrefs.getState().set(orig.prefs);
+      if (useStore.getState().format !== orig.format) useStore.getState().setFormat(orig.format);
+    },
+  };
   return (
     <div className="dialog sheet settings">
       <h3>{$t('設定')}</h3>
@@ -214,6 +260,13 @@ function SettingsDialog({ close }: { close: () => void }) {
             <button className={L.upperLayerAt === 'top' ? 'on' : ''} onClick={() => L.set({ upperLayerAt: 'top' })}>{$t('上方')}</button>
           </div>
         </SetRow>
+        <SetRow label={$t('軌道高度')} desc={$t('預設與新增的軌道')}>
+          <div className="seg">
+            {(['s', 'm', 'l'] as const).map((k) => (
+              <button key={k} className={L.trackSize === k ? 'on' : ''} onClick={() => L.set({ trackSize: k })}>{{ s: $t('小'), m: $t('中'), l: $t('大') }[k]}</button>
+            ))}
+          </div>
+        </SetRow>
         <SetRow label={$t('滾輪捲動方向')} desc={$t('在時間軸上直接滾動滾輪時')}>
           <div className="seg">
             <button className={L.wheelScroll !== 'vertical' ? 'on' : ''} onClick={() => L.set({ wheelScroll: 'horizontal' })}>{$t('水平')}</button>
@@ -239,39 +292,54 @@ function SettingsDialog({ close }: { close: () => void }) {
           </div>
         </SetRow>
       </div>
-      <div className="dialog-actions"><button className="btn primary" onClick={close}>{$t('完成')}</button></div>
+      <div className="dialog-actions">
+        <button className="btn" onClick={() => void cancelDialog()}>{$t('取消')}</button>
+        <button className="btn primary" title={$t('完成 (Ctrl+Enter)')} onClick={close}>{$t('完成')}</button>
+      </div>
     </div>
   );
 }
 
+let cancelDialog: () => Promise<void> = async () => {};
+
 function Dialogs() {
   const [d, setD] = useState<Dialog>(null);
   setDialogGlobal = setD;
+  const close = () => setD(null);
+  /** Esc / 點外面 / 取消：有未套用的變更先確認 */
+  cancelDialog = async () => {
+    const g = guard;
+    if (g.dirty?.()) {
+      const ok = await confirmDialog({ title: $t('捨棄變更？'), message: $t('設定的變更還沒儲存。'), ok: $t('捨棄'), danger: true });
+      if (!ok) return;
+      g.revert?.();
+    }
+    close();
+  };
   useEffect(() => {
     if (!d) return;
-    const k = (e: KeyboardEvent) => e.key === 'Escape' && setD(null);
+    const k = (e: KeyboardEvent) => {
+      if (useConfirm.getState().req) return;
+      if (e.key === 'Escape') void cancelDialog();
+      else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        e.preventDefault();
+        (document.activeElement as HTMLElement | null)?.blur?.(); // 正在輸入的數值先套用
+        (guard.save ?? close)();
+      }
+    };
     window.addEventListener('keydown', k);
     return () => window.removeEventListener('keydown', k);
   }, [d]);
   if (!d) return null;
-  const close = () => setD(null);
+  guard = {};
   return (
-    <div className="overlay" onPointerDown={(e) => e.target === e.currentTarget && close()}>
+    <div className="overlay" onPointerDown={(e) => e.target === e.currentTarget && void cancelDialog()}>
       {d === 'export' && <ExportDialog close={close} />}
       {d === 'shortcuts' && <ShortcutsDialog close={close} />}
       {d === 'tutorial' && <TutorialDialog close={close} />}
       {d === 'new' && <NewDialog close={close} />}
       {d === 'saveLayout' && <SaveLayoutDialog close={close} />}
-      {d === 'demo' && (
-        <div className="dialog">
-          <h3>{$t('載入示範專案？')}</h3>
-          <p className="muted">{$t('示範會取代目前的時間軸（素材庫保留）。之後可以用 Ctrl+Z 復原。')}</p>
-          <div className="dialog-actions">
-            <button className="btn" onClick={close}>{$t('取消')}</button>
-            <button className="btn primary" onClick={() => { close(); loadDemo(); }}>{$t('載入示範')}</button>
-          </div>
-        </div>
-      )}
+      {d === 'demo' && <DemoDialog close={close} />}
       {d === 'settings' && <SettingsDialog close={close} />}
       {d === 'about' && (
         <div className="dialog">

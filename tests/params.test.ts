@@ -56,3 +56,11 @@ assert.equal(bezierY([-1, 0, 0, 0], 0.7), 0);
 const si = parseParams(BUILTIN_MODULES.find((m) => m.id === 'tr-scalein')!.code);
 assert.equal(si.find((d) => d.name === 'fadeIn')?.none, 1, '縮放推入的淡入可以選「無」');
 console.log('PASS curve 的「無」');
+
+// 衝擊特效（// @hit）：打一下就結束的才標，持續型的不標
+import { isHitFx } from '../src/engine/params';
+const byId = (id: string) => BUILTIN_MODULES.find((m) => m.id === id)!;
+for (const id of ['fx-crashzoom', 'fx-flash', 'fx-shake', 'fx-shockwave']) assert.ok(isHitFx(byId(id)), `${id} 應該是衝擊特效`);
+for (const id of ['fx-outline', 'fx-grade', 'fx-handheld', 'fx-duotone', 'fx-chromakey', 'fx-clipmask']) assert.ok(!isHitFx(byId(id)), `${id} 應該是持續特效`);
+assert.ok(!isHitFx({ kind: 'transition', code: '// @hit' }), '只有特效會標');
+console.log('PASS 衝擊 / 持續特效');

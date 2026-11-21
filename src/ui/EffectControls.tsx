@@ -511,6 +511,8 @@ export interface Section {
   dim?: boolean;
   /** 標題列右鍵選單（打開時才建立，剪貼簿狀態才會是最新的） */
   menu?: () => MenuItem[];
+  /** 使用者還沒展開 / 收合過時的預設狀態 */
+  defaultCollapsed?: boolean;
 }
 
 /** 屬性表格左欄寬度範圍（px） */
@@ -582,7 +584,8 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
       return useEcFocus.setState({ id: null });
     }
     // 收合的區塊先展開，下一次畫完再捲
-    if (collapsed[focus]) return useLayout.getState().set({ ecCollapsed: { ...collapsed, [focus]: false } });
+    const fsec = sections.find((x) => x.id === focus);
+    if (collapsed[focus] ?? fsec?.defaultCollapsed) return useLayout.getState().set({ ecCollapsed: { ...collapsed, [focus]: false } });
     const el = root.querySelector(`[data-sec="${CSS.escape(focus)}"]`);
     if (!el) return; // 區塊還沒畫出來：等下一次
     el.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -837,7 +840,8 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
     listen((ev) => useLayout.getState().set({ ecLeftPx: Math.round(Math.min(LEFT_MAX, Math.max(LEFT_MIN, ev.clientX - r.left))) }));
   };
 
-  const toggleSection = (id: string) => useLayout.getState().set({ ecCollapsed: { ...collapsed, [id]: !collapsed[id] } });
+  const isCollapsed = (sec: Section) => collapsed[sec.id] ?? !!sec.defaultCollapsed;
+  const toggleSection = (sec: Section) => useLayout.getState().set({ ecCollapsed: { ...collapsed, [sec.id]: !isCollapsed(sec) } });
   // 刻度文字是 mm:ss:ff（比較寬）：依尺規寬度決定最多幾個，每個至少 64px
   const { ticks, step: tickStep } = frameTicks(view.a, view.b, Math.floor(rulerW / 64));
   const frac = (t: number) => (t - view.a) / span;
@@ -901,11 +905,11 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
       </div>
 
       {sections.map((sec) => {
-        const isCol = collapsed[sec.id];
+        const isCol = isCollapsed(sec);
         return (
           <React.Fragment key={sec.id}>
             <div className="ec-row ec-section" data-sec={sec.id}>
-              <div className="ec-left" onClick={() => toggleSection(sec.id)} onContextMenu={(e) => sectionResetMenu(e, sec)}>
+              <div className="ec-left" onClick={() => toggleSection(sec)} onContextMenu={(e) => sectionResetMenu(e, sec)}>
                 <span className="twirl">{isCol ? <ChevronRight size={14} /> : <ChevronDown size={14} />}</span>
                 {sec.badge}
                 <span className={`ec-sec-title ${sec.dim ? 'dim' : ''}`}>{sec.title}</span>

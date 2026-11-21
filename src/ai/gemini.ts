@@ -5,7 +5,12 @@
 
 const BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
-export interface Turn { role: 'user' | 'model'; text: string }
+/** API 的原始 part（文字 / functionCall / functionResponse，可能帶 thoughtSignature） */
+export type Part = Record<string, any>;
+/** parts 有值時照原樣送出（工具呼叫的回合）；沒有就用 text */
+export interface Turn { role: 'user' | 'model'; text: string; parts?: Part[] }
+export interface ToolDecl { name: string; description: string; parameters: Record<string, unknown> }
+export interface FnCall { name: string; args: Record<string, unknown>; id?: string }
 
 /** 被限流（免費額度用完 / 每分鐘次數到了）；retryAfter = 建議等幾秒 */
 export class RateLimitError extends Error {
@@ -71,20 +76,33 @@ export function pickDefaultModel(list: ModelInfo[]): string {
 /**
  * 串流產生回覆：每收到一段文字就呼叫 onText（累積後的全文），結束回傳全文。
  */
-export async function streamChat(o: {
+export async function streamChat(o: Parameters<typeof streamTurn>[0]): Promise<string> {
+  return (await streamTurn(o)).text;
+}
+
+/**
+ * 串流一輪：回傳文字、原始 parts（要原樣送回去，思考型模型的 thoughtSignature 在裡面）、工具呼叫。
+ * toolMode = 'NONE'：對話裡有工具回合但這輪不准再呼叫。
+ */
+export async function streamTurn(o: {
   key: string;
   model: string;
   system: string;
   turns: Turn[];
+  tools?: ToolDecl[];
+  toolMode?: 'AUTO' | 'NONE';
   signal?: AbortSignal;
   onText?: (full: string) => void;
-}): Promise<string> {
+}): Promise<{ text: string; parts: Part[]; calls: FnCall[] }> {
   const res = await fetch(`${BASE}/models/${encodeURIComponent(o.model)}:streamGenerateContent?alt=sse`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-goog-api-key': o.key },
     body: JSON.stringify({
       systemInstruction: { parts: [{ text: o.system }] },
-      contents: o.turns.map((t) => ({ role: t.role, parts: [{ text: t.text }] })),
+      contents: o.turns.map((t) => ({ role: t.role, parts: t.parts ?? [{ text: t.text }] })),
+      ...(o.tools?.length
+        ? { tools: [{ functionDeclarations: o.tools }], toolConfig: { functionCallingConfig: { mode: o.toolMode ?? 'AUTO' } } }
+        : {}),
     }),
     signal: o.signal,
   });
@@ -95,6 +113,9 @@ export async function streamChat(o: {
   let full = '';
   let finish = '';
   let blocked = '';
+  const parts: Part[] = [];
+  const calls: FnCall[] = [];
+  const plain = (p: Part | undefined) => !!p && typeof p.text === 'string' && !p.thought && !p.thoughtSignature && Object.keys(p).length === 1;
   const handle = (line: string) => {
     if (!line.startsWith('data:')) return;
     const data = line.slice(5).trim();
@@ -105,11 +126,17 @@ export async function streamChat(o: {
     if (j.promptFeedback?.blockReason) blocked = j.promptFeedback.blockReason;
     const c = j.candidates?.[0];
     if (c?.finishReason) finish = c.finishReason;
-    // 思考型模型的「想法」部分（thought: true）不顯示
-    const text = (c?.content?.parts ?? []).filter((p: any) => !p.thought).map((p: any) => p.text ?? '').join('');
-    if (text) {
-      full += text;
-      o.onText?.(full);
+    for (const p of (c?.content?.parts ?? []) as Part[]) {
+      if (p.functionCall) calls.push({ name: String(p.functionCall.name ?? ''), args: p.functionCall.args ?? {}, ...(p.functionCall.id ? { id: p.functionCall.id } : {}) });
+      // 思考型模型的「想法」部分（thought: true）不顯示；沒帶簽章的想法也不用送回去
+      if (p.thought && !p.thoughtSignature) continue;
+      // 串流切碎的純文字併成一個 part
+      if (plain(p) && plain(parts[parts.length - 1])) parts[parts.length - 1] = { text: parts[parts.length - 1].text + p.text };
+      else parts.push(p);
+      if (!p.thought && typeof p.text === 'string' && p.text) {
+        full += p.text;
+        o.onText?.(full);
+      }
     }
   };
   for (;;) {
@@ -123,6 +150,6 @@ export async function streamChat(o: {
     }
   }
   if (buf) handle(buf);
-  if (!full && (blocked || /SAFETY|PROHIBITED|BLOCKLIST|RECITATION/.test(finish))) throw new BlockedError(blocked || finish);
-  return full;
+  if (!full && !calls.length && (blocked || /SAFETY|PROHIBITED|BLOCKLIST|RECITATION/.test(finish))) throw new BlockedError(blocked || finish);
+  return { text: full, parts, calls };
 }

@@ -5,14 +5,18 @@ import { $t } from '../i18n';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { ModuleKind } from '../store';
-import { ApiKeyError, BlockedError, RateLimitError, listModels, pickDefaultModel, streamChat, type ModelInfo, type Turn } from './gemini';
+import { ApiKeyError, BlockedError, RateLimitError, listModels, pickDefaultModel, streamTurn, type ModelInfo, type Turn } from './gemini';
 import { chatSystem, moduleSystem } from './prompt';
 import { codeBlocks, detectKind, validateModule } from './validate';
+import { TOOL_DECLS, runTool, toolRefs } from './tools';
+import { useStore } from '../store';
 
 /** 自動修正最多幾次（免費額度有限，不要一直重試） */
 export const MAX_FIXES = 2;
 /** 聊天送出時最多帶幾則舊訊息 */
 const HISTORY = 12;
+/** 一次回覆裡最多幾輪工具呼叫 */
+const MAX_TOOL_ROUNDS = 4;
 
 // ───────────── 設定 ─────────────
 
@@ -84,8 +88,9 @@ const fixPrompt = (err: string) =>
   `The app could not compile that module:\n\`\`\`\n${err.slice(0, 1500)}\n\`\`\`\nReply with the full corrected module in one code block.`;
 
 /**
- * 送一輪對話；回覆裡有模組就在本機驗證，編譯失敗會把錯誤丟回去讓 AI 修（最多 MAX_FIXES 次）。
- * 回傳新增的對話（含中間修正的回合）與最後的回覆。
+ * 送一輪對話；AI 可以先呼叫工具（讀模組程式碼），回覆裡有模組就在本機驗證，
+ * 編譯失敗會把錯誤丟回去讓 AI 修（最多 MAX_FIXES 次）。
+ * 回傳新增的對話（含工具、中間修正的回合）、最後的回覆、讀過的模組名稱。
  */
 async function runWithFixes(o: {
   system: string;
@@ -94,16 +99,41 @@ async function runWithFixes(o: {
   signal?: AbortSignal;
   onText?: (t: string) => void;
   onFix?: (attempt: number) => void;
-}): Promise<{ added: Turn[]; text: string; check: CheckResult | null; fixes: number }> {
+  onRefs?: (names: string[]) => void;
+}): Promise<{ added: Turn[]; text: string; check: CheckResult | null; fixes: number; refs: string[] }> {
   const { key, model } = useAiSettings.getState();
   if (!key) throw new ApiKeyError('no key');
   const added: Turn[] = [];
+  const refs: string[] = [];
   let fixes = 0;
+  let rounds = 0;
+  // 工具呼叫前已經說的話（這次回覆裡要接著顯示）
+  let before = '';
+  const join = (a: string, b: string) => (a && b ? `${a}\n\n${b}` : a || b);
   for (;;) {
-    const text = await streamChat({ key, model, system: o.system, turns: [...o.turns, ...added], signal: o.signal, onText: o.onText });
+    const r = await streamTurn({
+      key, model, system: o.system, turns: [...o.turns, ...added], signal: o.signal,
+      tools: TOOL_DECLS, toolMode: rounds < MAX_TOOL_ROUNDS ? 'AUTO' : 'NONE',
+      onText: o.onText && ((t) => o.onText!(join(before, t))),
+    });
+    if (r.calls.length && rounds < MAX_TOOL_ROUNDS) {
+      rounds++;
+      const modules = useStore.getState().modules;
+      added.push({ role: 'model', text: r.text, parts: r.parts });
+      added.push({
+        role: 'user', text: '',
+        parts: r.calls.map((c) => ({ functionResponse: { name: c.name, ...(c.id ? { id: c.id } : {}), response: runTool(c.name, c.args, modules) } })),
+      });
+      for (const c of r.calls) for (const n of toolRefs(c.name, c.args, modules)) if (!refs.includes(n)) refs.push(n);
+      if (refs.length) o.onRefs?.([...refs]);
+      before = join(before, r.text);
+      continue;
+    }
+    const text = join(before, r.text);
+    before = '';
     added.push({ role: 'model', text });
     const check = checkReply(text, o.hint);
-    if (!check?.error || fixes >= MAX_FIXES) return { added, text, check, fixes };
+    if (!check?.error || fixes >= MAX_FIXES) return { added, text, check, fixes, refs };
     fixes++;
     o.onFix?.(fixes);
     added.push({ role: 'user', text: fixPrompt(check.error) });
@@ -125,6 +155,8 @@ export interface ChatMsg {
   fixing?: number;
   fixes?: number;
   check?: CheckResult | null;
+  /** AI 讀過的模組（名稱） */
+  refs?: string[];
   error?: AiError;
 }
 
@@ -151,8 +183,8 @@ export function sendChat(text: string, attach?: Attach) {
   const user: ChatMsg = { id: uid(), role: 'user', text, attach, turns: [{ role: 'user', text: apiText }] };
   const reply: ChatMsg = { id: uid(), role: 'model', text: '', turns: [], streaming: true };
   const abort = new AbortController();
-  // 舊訊息只帶最近幾則；失敗的回覆不帶
-  const history = S.msgs.filter((m) => !m.error).flatMap((m) => m.turns).slice(-HISTORY);
+  // 舊訊息只帶最近幾則；失敗的回覆、工具回合（讀到的程式碼很長）不帶
+  const history = S.msgs.filter((m) => !m.error).flatMap((m) => m.turns).filter((t) => !t.parts).slice(-HISTORY);
   useAiChat.setState({ msgs: [...S.msgs, user, reply], busy: true, abort });
   void (async () => {
     try {
@@ -163,8 +195,9 @@ export function sendChat(text: string, attach?: Attach) {
         signal: abort.signal,
         onText: (t) => patch(reply.id, { text: t }),
         onFix: (n) => patch(reply.id, { fixing: n }),
+        onRefs: (refs) => patch(reply.id, { refs }),
       });
-      patch(reply.id, { text: r.text, turns: r.added, streaming: false, fixing: undefined, fixes: r.fixes, check: r.check });
+      patch(reply.id, { text: r.text, turns: r.added, streaming: false, fixing: undefined, fixes: r.fixes, check: r.check, refs: r.refs });
     } catch (e) {
       if (abort.signal.aborted) patch(reply.id, { streaming: false, fixing: undefined, turns: [] });
       else patch(reply.id, { streaming: false, fixing: undefined, turns: [], error: toAiError(e) });

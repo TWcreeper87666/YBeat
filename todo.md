@@ -54,3 +54,8 @@
 - [x] multiselect items across track types, resize matching edges together
 - [x] preview tab, volume slider
 - [ ] add track top vs down
+- [x] icon
+- [ ] .ybeat optimize
+- [x] more effect/transition
+- [ ] clip-fx-timing-plan.md
+- [ ] ai-roadmap.md

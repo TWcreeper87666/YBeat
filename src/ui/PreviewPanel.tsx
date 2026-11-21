@@ -1,5 +1,5 @@
 import { $t } from '../i18n';
-import { Camera, Ellipsis, Minimize2, Pause, PictureInPicture2, Play, Repeat, Repeat1, SkipBack, SkipForward, StepBack, StepForward, Volume1, Volume2, VolumeX } from 'lucide-react';
+import { Camera, Ellipsis, PaintBucket, Minimize2, Pause, PictureInPicture2, Play, Repeat, Repeat1, SkipBack, SkipForward, StepBack, StepForward, Volume1, Volume2, VolumeX } from 'lucide-react';
 import { useMonitor } from '../engine/audio';
 import { resnap } from './pixelSnap';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -36,7 +36,6 @@ function Transport() {
   const clips = useStore((s) => s.clips);
   const floating = useLayout((s) => s.floating);
   const repeat = useLayout((s) => s.repeat);
-  const grid = useLayout((s) => s.grid);
   const ex = useStore((s) => s.exporting);
   const S = useStore.getState();
   const barRef = useRef<HTMLDivElement>(null);
@@ -111,13 +110,14 @@ function Transport() {
         <span className="spacer" />
         {loop && !scope && <button className="tp on" title={$t('停止循環 (Esc)')} onClick={() => S.setLoop(null)}><Repeat1 size={15} /></button>}
         <MonitorVolume />
+        <GridButton />
         {/* 不常用的按鈕收進「⋯」，滑過往上展開（跟音量一樣） */}
         <div className="tp-vol tp-more">
-          <button className={`tp ${repeat || grid ? 'has-on' : ''}`} title={$t('更多')}><Ellipsis size={15} /></button>
+          <button className="tp" title={$t('更多')}><Ellipsis size={15} /></button>
           <div className="tp-vol-pop">
             <div className="tp-vol-box tp-more-box">
               <button className={`tp ${repeat ? 'on' : ''}`} title={$t('循環播放')} onClick={() => useLayout.getState().set({ repeat: !repeat })}><Repeat size={15} /></button>
-              <GridButton />
+              <PreviewBgButton />
               <button className="tp" title={$t('截圖')} onClick={() => void captureFrame()}><Camera size={15} /></button>
               {!scope && (
                 <button
@@ -133,6 +133,33 @@ function Transport() {
         </div>
       </div>
     </div>
+  );
+}
+
+/** 預覽周圍的底色：點一下選顏色，右鍵還原預設 */
+function PreviewBgButton() {
+  const bg = useLayout((s) => s.previewBg);
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <button
+      className="tp"
+      title={$t('預覽底色（右鍵還原）')}
+      onClick={() => input.current?.showPicker()}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        useLayout.getState().set({ previewBg: '' });
+      }}
+    >
+      <PaintBucket size={15} />
+      <input
+        ref={input}
+        type="color"
+        tabIndex={-1}
+        value={bg || '#181b24'}
+        onChange={(e) => useLayout.getState().set({ previewBg: e.target.value })}
+        style={{ position: 'absolute', width: 0, height: 0, opacity: 0, pointerEvents: 'none' }}
+      />
+    </button>
   );
 }
 

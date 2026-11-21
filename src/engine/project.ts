@@ -1,4 +1,5 @@
 import { $t } from '../i18n';
+import { afterRelease, pointerHeld } from './pointerHold';
 import { create } from 'zustand';
 import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, mergeModules, makeClip, useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
 import type { Module } from '../modules/builtin';
@@ -81,6 +82,11 @@ export function saveNow() {
   return save();
 }
 
+const saveSoon = () => {
+  clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(save, 600);
+};
+
 function startAutosave() {
   if (started) return;
   started = true;
@@ -88,7 +94,9 @@ function startAutosave() {
     if (s.media === p.media && s.clips === p.clips && s.effects === p.effects && s.audios === p.audios && s.tracks === p.tracks && s.format === p.format) return;
     useSaveState.setState({ state: 'dirty' });
     clearTimeout(saveTimer);
-    saveTimer = window.setTimeout(save, 600);
+    // 拖曳中不存，放開才存
+    if (pointerHeld()) afterRelease(saveSoon);
+    else saveTimer = window.setTimeout(save, 600);
   });
 }
 

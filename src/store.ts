@@ -1775,7 +1775,8 @@ export function mergeModules(saved: Module[]): Module[] {
     const m = byId.get(b.id);
     return m && (m.rev ?? 1) === (b.rev ?? 1) ? { ...b, code: m.code } : b;
   });
-  for (const m of saved) if (!BUILTIN_MODULES.some((b) => b.id === m.id)) modules.push(m);
+  // 已經拿掉的內建模組（存檔裡還標著 builtin）不再帶回來
+  for (const m of saved) if (!m.builtin && !BUILTIN_MODULES.some((b) => b.id === m.id)) modules.push(m);
   return modules;
 }
 

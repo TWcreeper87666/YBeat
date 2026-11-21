@@ -1,6 +1,6 @@
-import { $t } from '../i18n';
+import { $t, displayName } from '../i18n';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Check, CircleAlert, Copy, ExternalLink, Eye, EyeOff, Info, LoaderCircle, Paperclip, Plus, RefreshCw, Send, Settings, Sparkles, Square, Trash2, Wand2 } from 'lucide-react';
+import { BookOpen, Check, CircleAlert, Copy, ExternalLink, Eye, EyeOff, Info, LoaderCircle, Paperclip, Plus, RefreshCw, Send, Settings, Sparkles, Square, Trash2, Wand2 } from 'lucide-react';
 import {
   MAX_FIXES, aiErrorText, clearChat, refreshModels, sendChat, stopChat, useAiChat, useAiModels, useAiSettings,
   type ChatMsg,
@@ -193,6 +193,7 @@ function Message({ msg }: { msg: ChatMsg }) {
   }
   return (
     <div className="ai-msg model">
+      {!!msg.refs?.length && <span className="ai-status muted"><BookOpen size={11} /> {$t('參考：{0}', msg.refs.map(displayName).join('、'))}</span>}
       {msg.text && <MsgBody msg={msg} />}
       {msg.streaming && !msg.text && <span className="muted small"><LoaderCircle size={12} className="spin" /> {$t('思考中')}</span>}
       {msg.fixing ? <span className="ai-status"><LoaderCircle size={12} className="spin" /> {$t('修正中 {0}/{1}', msg.fixing, MAX_FIXES)}</span> : null}

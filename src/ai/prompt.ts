@@ -1,11 +1,12 @@
 /**
- * 給 AI 的系統提示：模組格式說明（跟渲染器實際的包裝一致）、內建範例、使用教學。
+ * 給 AI 的系統提示：模組格式說明（跟渲染器實際的包裝一致）、內建範例、內建模組目錄（程式碼用工具讀）、使用教學。
  * 內容固定不變（方便模型端快取）；目前的模組程式碼放在使用者訊息裡。
  */
 import { lang } from '../i18n';
 import { GLSL_LIB } from '../engine/renderer';
 import { BUILTIN_MODULES } from '../modules/builtin';
 import { SHORTCUTS, TUTORIAL } from '../ui/helpText';
+import { builtinCatalog } from './tools';
 
 const LANG_NAME: Record<string, string> = { zh: 'Traditional Chinese (Taiwan)', en: 'English', ja: 'Japanese' };
 
@@ -26,6 +27,7 @@ TYPE is float | int | bool | color | point | curve. Range and label are optional
 - curve: vec4 cubic-bezier in GLSL; evaluate with curve(NAME, x) (x 0..1 → eased value). Default is a preset (linear, inOut, inOut3, in, out, expoOut, expoIn, back) or "x1,y1,x2,y2". The user edits it in a curve editor. Use it instead of hard-coded easeXxx() for the main motion, e.g. float p = curve(ease, progress);
 - A float can add @box(POINT) after the label, e.g. // @param to: float = 0.2 (0..1) "End size" @box(center). The preview then draws the whole frame scaled by that value around that point (zoomUV(uv, value, point)) and the user drags its corners. Use it for scale / size amounts that scale about the point.
 Effects may also set a default clip length:  // @duration 0.5
+One-shot effects whose look plays out over u_progress (decay, hit, burst) add a line  // @hit  ; sustained effects that look the same at any length (filters, outlines, looping motion) leave it out.
 
 ### Effect (GLSL ES 3.00, fragment only)
 Write exactly:  vec4 effect(vec2 uv) { ... }
@@ -69,6 +71,15 @@ const OUTPUT_RULES = `
 - The app compiles your code. If it reports an error, reply with the full corrected module in one block.
 `;
 
+function catalog(): string {
+  return `
+## Built-in modules (id | kind | category | name)
+${builtinCatalog()}
+
+Call get_modules with ids to read their full code. When the user refers to an existing module, wants something "like" one, or wants to combine them, read the code first instead of guessing. Call list_user_modules to see the user's own modules. Don't read modules you don't need.
+`;
+}
+
 function langLine() {
   return `Reply in ${LANG_NAME[lang] ?? 'the user\'s language'} unless the user writes in another language. Code comments may stay in that language too.`;
 }
@@ -94,7 +105,7 @@ ${SPEC}
 ${OUTPUT_RULES}
 ## Examples (built-in modules)
 ${examples()}
-`;
+${catalog()}`;
   chatCache = { lang, text };
   return text;
 }
@@ -108,5 +119,5 @@ ${SPEC}
 ${OUTPUT_RULES}
 ## Examples (built-in modules)
 ${examples()}
-`;
+${catalog()}`;
 }
