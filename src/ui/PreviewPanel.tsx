@@ -1,12 +1,14 @@
 import { $t } from '../i18n';
-import { Minimize2, Pause, PictureInPicture2, Play, Repeat, Repeat1, SkipBack, SkipForward, StepBack, StepForward, Volume1, Volume2, VolumeX } from 'lucide-react';
+import { Camera, Ellipsis, Minimize2, Pause, PictureInPicture2, Play, Repeat, Repeat1, SkipBack, SkipForward, StepBack, StepForward, Volume1, Volume2, VolumeX } from 'lucide-react';
 import { useMonitor } from '../engine/audio';
 import { resnap } from './pixelSnap';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { projectDuration, useStore } from '../store';
 import { useEditorScope } from './EditorWindow';
 import { Preview } from './Preview';
-import { useLayout } from './uiStore';
+import { toast, useLayout } from './uiStore';
+import { getRenderer, makeCtx } from '../engine/renderer';
+import { addMediaBlob } from '../engine/media';
 import { GridButton } from './GridOverlay';
 import { setScrubbing } from '../engine/audio';
 import { snapFrame, tc } from '../engine/rulerTicks';
@@ -34,6 +36,8 @@ function Transport() {
   const clips = useStore((s) => s.clips);
   const floating = useLayout((s) => s.floating);
   const repeat = useLayout((s) => s.repeat);
+  const grid = useLayout((s) => s.grid);
+  const ex = useStore((s) => s.exporting);
   const S = useStore.getState();
   const barRef = useRef<HTMLDivElement>(null);
   const [hover, setHover] = useState<number | null>(null);
@@ -41,7 +45,8 @@ function Transport() {
   const scope = useEditorScope();
   const t0 = scope?.a ?? 0;
   const total = Math.max(scope ? scope.b - scope.a : dur, 0.001);
-  const local = Math.min(total, Math.max(0, time - t0));
+  // 匯出中：播放列跟著正在輸出的那一格跑
+  const local = Math.min(total, Math.max(0, (ex ? ex.t : time) - t0));
 
   const cuts = useMemo(() => {
     const set = new Set<number>();
@@ -80,7 +85,7 @@ function Transport() {
   const step = (d: number) => () => S.setTime(scope ? Math.min(scope.b - 1 / 60, Math.max(scope.a, S.time + d)) : Math.max(0, S.time + d));
 
   return (
-    <div className="transport">
+    <div className={`transport ${ex ? 'exporting' : ''}`}>
       <div
         className="scrub"
         ref={barRef}
@@ -102,24 +107,48 @@ function Transport() {
         <button className="tp play" title={$t('播放 / 暫停 (Space)')} onClick={S.togglePlay}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
         <button className="tp step" title={$t('下一格 (→)')} onClick={step(1 / 60)}><StepForward size={15} /></button>
         <button className="tp skip" title={$t('到結尾 (End)')} onClick={() => S.setTime(scope ? scope.b - 1 / 60 : dur)}><SkipForward size={15} /></button>
-        <span className="tp-time">{fmt(scope ? local : time)} <span className="muted tp-total">/ {fmt(total)}</span></span>
+        <span className="tp-time">{fmt(scope ? local : ex ? ex.t : time)} <span className="muted tp-total">/ {fmt(total)}</span></span>
         <span className="spacer" />
-        <MonitorVolume />
         {loop && !scope && <button className="tp on" title={$t('停止循環 (Esc)')} onClick={() => S.setLoop(null)}><Repeat1 size={15} /></button>}
-        <button className={`tp ${repeat ? 'on' : ''}`} title={$t('循環播放')} onClick={() => useLayout.getState().set({ repeat: !repeat })}><Repeat size={15} /></button>
-        <GridButton />
-        {!scope && (
-        <button
-          className="tp"
-          title={floating ? $t('停駐回主視窗') : $t('分離成浮動視窗')}
-          onClick={() => useLayout.getState().set({ floating: !floating })}
-        >
-          {floating ? <Minimize2 size={15} /> : <PictureInPicture2 size={15} />}
-        </button>
-        )}
+        <MonitorVolume />
+        {/* 不常用的按鈕收進「⋯」，滑過往上展開（跟音量一樣） */}
+        <div className="tp-vol tp-more">
+          <button className={`tp ${repeat || grid ? 'has-on' : ''}`} title={$t('更多')}><Ellipsis size={15} /></button>
+          <div className="tp-vol-pop">
+            <div className="tp-vol-box tp-more-box">
+              <button className={`tp ${repeat ? 'on' : ''}`} title={$t('循環播放')} onClick={() => useLayout.getState().set({ repeat: !repeat })}><Repeat size={15} /></button>
+              <GridButton />
+              <button className="tp" title={$t('截圖')} onClick={() => void captureFrame()}><Camera size={15} /></button>
+              {!scope && (
+                <button
+                  className="tp"
+                  title={floating ? $t('停駐回主視窗') : $t('分離成浮動視窗')}
+                  onClick={() => useLayout.getState().set({ floating: !floating })}
+                >
+                  {floating ? <Minimize2 size={15} /> : <PictureInPicture2 size={15} />}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
+}
+
+/** 截圖：用輸出解析度重畫目前這一格（不含素材庫的試看），存成 PNG 加到素材庫 */
+async function captureFrame() {
+  const r = getRenderer();
+  if (!r) return;
+  const st = useStore.getState();
+  if (st.playing) st.setPlaying(false);
+  // 預覽每一格都會重設大小，這裡改成輸出解析度只影響這一次
+  r.setSize(st.format.w, st.format.h, st.format.h);
+  r.render(makeCtx(st), st.time, 'preview', false);
+  const blob = await new Promise<Blob | null>((res) => r.canvas.toBlob(res, 'image/png'));
+  if (!blob) return toast($t('截圖失敗'), 'error');
+  const m = await addMediaBlob(blob, `${$t('截圖')} ${tc(st.time).replace(/:/g, '-')}.png`);
+  toast(m ? $t('已加到素材') : $t('截圖失敗'), m ? undefined : 'error');
 }
 
 /** 預覽音量（只影響預覽時聽到的聲音，不影響匯出）：滑過喇叭往上浮出垂直音量條 */

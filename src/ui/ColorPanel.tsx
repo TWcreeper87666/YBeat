@@ -9,6 +9,7 @@ import { startLibraryDrag } from './dnd';
 import { useFavList, useFavorites } from './favorites';
 import { FavButton, LibFilter, LibToolbar, favSortOpts, onBlank } from './Library';
 import { openMenu, revealSelection, toast, useLayout } from './uiStore';
+import { openColor, useSource } from './SourcePanel';
 
 const SWATCHES = [
   '#000000', '#ffffff', '#1d1f27', '#3a3f4d', '#8a90a2', '#ff3d6e',
@@ -117,10 +118,16 @@ export function ColorPanel() {
   const [draft, setDraft] = useState<string | null>(null);
   const gridRef = useRef<HTMLDivElement>(null);
   const current = hsvToHex(hsv);
+  // 點選的色塊（'picker' = 調色盤卡片）：只用來試看，不會改調色盤的顏色
+  const [sel, setSel] = useState<string | null>(null);
   const setHsv = (n: Hsv) => {
     setHsvState(n);
     useColorLib.getState().setCurrent(hsvToHex(n));
+    // 正在試看調色盤的顏色：跟著更新
+    const src = useSource.getState();
+    if (sel === 'picker' && src.open && src.color) useSource.setState({ color: hsvToHex(n) });
   };
+  const trial = (key: string, c: string) => { setSel(key); openColor(c); };
   const pick = (c: string) => { const n = hexToHsv(c, hsv.h); if (n) setHsv(n); };
 
   // 時間軸上用到的顏色
@@ -189,8 +196,8 @@ export function ColorPanel() {
               <div
                 key={c}
                 data-sort-key={sortable ? c : undefined}
-                className={`lib-item swatch-item ${c === current ? 'current' : ''}`}
-                onPointerDown={(e) => { if (e.button === 0) pick(c); startLibraryDrag(e, { kind: 'color', color: c }, c, undefined, sortOpts(c)); }}
+                className={`lib-item swatch-item ${c === sel ? 'current' : ''}`}
+                onPointerDown={(e) => { if (e.button === 0) trial(c, c); startLibraryDrag(e, { kind: 'color', color: c }, c, undefined, sortOpts(c)); }}
                 onDoubleClick={() => insertColor(c)}
                 onContextMenu={(e) => itemMenu(e, c)}
                 title={c.toUpperCase()}
@@ -204,9 +211,9 @@ export function ColorPanel() {
             ))}
             {/* 調色盤目前的顏色：固定在最後一個，用調色盤圖示區分 */}
             <div
-              className={`lib-item swatch-item picker-item ${lib.pickerOpen ? 'current' : ''}`}
+              className={`lib-item swatch-item picker-item ${sel === 'picker' ? 'current' : ''}`}
               onPointerDown={(e) => startLibraryDrag(e, { kind: 'color', color: current }, current)}
-              onClick={() => lib.setPickerOpen(true)}
+              onClick={() => { lib.setPickerOpen(true); trial('picker', current); }}
               onDoubleClick={() => insertColor(current)}
               onContextMenu={pickerMenu}
               title={current.toUpperCase()}

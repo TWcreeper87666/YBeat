@@ -58,7 +58,7 @@ export async function exportMp4(fps: number, range?: { a: number; b: number }, b
   const vConfig = await pickVideoConfig(FW, FH, fps, bitrate);
   if (!vConfig) throw new Error($t('找不到可用的 H.264 編碼設定'));
 
-  useStore.setState({ playing: false, exporting: { progress: 0, cancel: false } });
+  useStore.setState({ playing: false, exporting: { progress: 0, cancel: false, t: start, a: start, b: start + dur } });
   // 匯出一律用全解析度（預覽可能是縮小的）；匯出中預覽迴圈不會改大小
   r.setSize(FW, FH);
   r.pauseAll();
@@ -110,7 +110,7 @@ export async function exportMp4(fps: number, range?: { a: number; b: number }, b
       encoder.encode(frame, { keyFrame: i % (fps * 2) === 0 });
       frame.close();
       while (encoder.encodeQueueSize > 6) await new Promise((res) => setTimeout(res, 1));
-      if (i % 5 === 0) useStore.setState({ exporting: { progress: i / total, cancel: false } });
+      if (i % 5 === 0) useStore.setState({ exporting: { progress: i / total, cancel: false, t, a: start, b: start + dur } });
     }
     await encoder.flush();
     if (encodeError) throw encodeError;

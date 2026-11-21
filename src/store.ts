@@ -7,10 +7,11 @@ import { clipSource, plainSpeed } from './engine/remap';
 import { DEFAULT_TRANSFORM, EASES, normalizeScale, type EaseName, type Fit, type Transform } from './engine/transform';
 import { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualRows, type TrackKind, type TrackState, type Tracks } from './engine/tracks';
 export { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualRows, type TrackKind, type TrackState, type Tracks };
+import type { FxTrigger } from './engine/trigger';
 import { ANIM_PROPS, newKey, scaleKeyList, scaleKeyMap, splitKeys, type Ease, type Keyframe, type Keys } from './engine/keyframes';
 import { CURVE_ID, curveToKeys, parseCurve } from './engine/remapCurve';
 import { fitStart, groupFits, resolveShift, overwriteParts, insertParts, type Span } from './engine/overlap';
-import { stillDur, transDur, userTextStyle } from './prefs';
+import { fxCombo, stillDur, transDur, userTextStyle, type FxCombo } from './prefs';
 import { PPS_MAX, PPS_MIN } from './engine/rulerTicks';
 import { DEFAULT_TEXT, TEXT_PRESETS, type TextStyle } from './engine/text';
 import type { Mask } from './engine/mask';
@@ -130,6 +131,12 @@ export interface FxItem extends ItemBase {
   keys?: Record<string, Keyframe[]>;
   /** 遮罩：只在這個區域套用特效 */
   mask?: Mask;
+  /** 疊加的特效：主特效之後依序套用（各自有參數 / 遮罩 / 關鍵影格），一個方塊就是一組特效 */
+  stack?: ClipFx[];
+  /** 觸發：沒有 = 整個方塊播一次；有 = 每個節拍 / 剪接點從頭再播一次 */
+  trigger?: FxTrigger;
+  /** 轉場方塊（moduleId 是轉場模組）：每個剪接點的轉場長度（秒） */
+  trDur?: number;
   start: number;
   duration: number;
   track: number;
@@ -208,7 +215,8 @@ interface State {
   pps: number;
   snap: boolean;
   leftTab: LeftTab;
-  exporting: { progress: number; cancel: boolean } | null;
+  /** 匯出中：t = 正在輸出的那一格（播放列跟著跑），a ~ b = 匯出範圍 */
+  exporting: { progress: number; cancel: boolean; t: number; a: number; b: number } | null;
   /** 輸出畫面大小 */
   format: Format;
   setFormat(f: Format): void;
@@ -321,6 +329,44 @@ const LEGACY_EASE: Record<EaseName, Ease> = {
 };
 void EASES;
 
+/** 文字分頁的樣式（預設 / 我的樣式）→ 文字片段；我的樣式會一起套上存下來的轉場與片段特效（模組已刪除的略過） */
+export function makeTextClip(presetId: string, modules: Module[], p: Partial<Clip>): Clip {
+  const user = userTextStyle(presetId);
+  const pre = TEXT_PRESETS.find((x) => x.id === presetId) ?? TEXT_PRESETS[0];
+  const clip = makeClip({
+    mediaId: '',
+    fit: 'contain',
+    text: user ? { ...DEFAULT_TEXT, ...user.style } : { ...DEFAULT_TEXT, ...pre.style },
+    transform: user ? { ...DEFAULT_TRANSFORM, ...user.transform } : { ...DEFAULT_TRANSFORM, y: pre.y },
+    ...p,
+  });
+  if (user) {
+    const has = (id?: string) => !!id && modules.some((m) => m.id === id);
+    clip.transitionIn = has(user.transitionIn?.moduleId) ? structuredClone(user.transitionIn) : null;
+    clip.transitionOut = has(user.transitionOut?.moduleId) ? structuredClone(user.transitionOut) : null;
+    const fx = user.effects.filter((f) => has(f.moduleId)).map((f) => ({ ...structuredClone(f), id: uid() }));
+    if (fx.length) clip.effects = fx;
+  }
+  return clip;
+}
+
+/** 轉場方塊放上時間軸的預設長度（秒） */
+export const TR_BLOCK_DUR = 4;
+
+/** 我的組合 → 特效方塊的內容（疊加的特效換新 id） */
+function comboItem(combo: FxCombo) {
+  const c = structuredClone(combo.fx);
+  return { ...c, stack: c.stack?.map((x) => ({ ...x, id: uid() })) };
+}
+/** 加片段特效：一般模組 = 一個；我的組合 = 主特效 + 疊加的特效 */
+function comboClipFx(moduleId: string): ClipFx[] {
+  const combo = fxCombo(moduleId);
+  if (!combo) return [{ id: uid(), moduleId, params: {} }];
+  const c = comboItem(combo);
+  const keys = Object.fromEntries(Object.entries(c.keys ?? {}).filter(([k]) => !k.startsWith('mask.')));
+  return [{ id: uid(), moduleId: c.moduleId, params: c.params, keys, audio: c.audio }, ...(c.stack ?? [])];
+}
+
 export function makeClip(p: Partial<Clip> & { mediaId: string }): Clip {
   const c: Clip = {
     id: uid(),
@@ -396,7 +442,13 @@ export function stretchPatch(type: ItemType, it: AnyItem, anchor: number, s: num
   }
   if (type === 'audio') return { ...base, rate: ((it as AudioClip).rate ?? 1) / s } as Partial<AudioClip>;
   const f = it as FxItem;
-  return { ...base, keys: scaleKeyMap(f.keys, s) } as Partial<FxItem>;
+  // 有觸發的方塊：關鍵影格是「每次觸發」的時間，不跟著方塊長度縮放
+  if (f.trigger) return base as Partial<FxItem>;
+  return {
+    ...base,
+    keys: scaleKeyMap(f.keys, s),
+    ...(f.stack ? { stack: f.stack.map((x) => (x.keys ? { ...x, keys: scaleKeyMap(x.keys, s) as Record<string, Keyframe[]> } : x)) } : {}),
+  } as Partial<FxItem>;
 }
 
 /**
@@ -531,16 +583,23 @@ export const useStore = create<State>()(
           return [{ ...a, duration: local, fadeOut: 0 }, { ...a, id: uid(), start: t, duration: a.duration - local, in: a.in + local * (a.rate ?? 1), fadeIn: 0 }];
         }
         const f = it as FxItem;
-        if (f.keys) {
+        // 有觸發的方塊：關鍵影格是「每次觸發」的時間，兩半都照原樣保留
+        if (f.trigger) return [{ ...f, duration: local }, { ...f, id: uid(), start: t, duration: f.duration - local, stack: f.stack?.map((x) => ({ ...x, id: uid() })) }];
+        const splitMap = (keys: Record<string, Keyframe[]> | undefined) => {
           const ka: Record<string, Keyframe[]> = {}, kb: Record<string, Keyframe[]> = {};
-          for (const [p, list] of Object.entries(f.keys)) {
+          for (const [p, list] of Object.entries(keys ?? {})) {
             const [a, b] = splitKeys({ x: list }, local);
             if (a.x) ka[p] = a.x;
             if (b.x) kb[p] = b.x;
           }
-          return [{ ...f, duration: local, keys: ka }, { ...f, id: uid(), start: t, duration: f.duration - local, keys: kb }];
-        }
-        return [{ ...it, duration: local }, { ...it, id: uid(), start: t, duration: it.duration - local }];
+          return [ka, kb] as const;
+        };
+        const [ka, kb] = splitMap(f.keys);
+        const stacks = f.stack?.map((x) => ({ x, k: splitMap(x.keys) }));
+        return [
+          { ...f, duration: local, keys: ka, ...(stacks ? { stack: stacks.map(({ x, k }) => ({ ...x, keys: k[0] })) } : {}) },
+          { ...f, id: uid(), start: t, duration: f.duration - local, keys: kb, ...(stacks ? { stack: stacks.map(({ x, k }) => ({ ...x, id: uid(), keys: k[1] })) } : {}) },
+        ];
       };
 
       const inside = (it: AnyItem, t: number) => t > it.start + 0.01 && t < it.start + it.duration - 0.01;
@@ -949,41 +1008,32 @@ export const useStore = create<State>()(
           if (!get().tracks.fx.length) get().addTrack('fx');
           const s = get();
           let track = trackArg ?? (s.activeTrack?.kind === 'fx' ? s.activeTrack.idx : 0);
-          const m = s.modules.find((x) => x.id === moduleId);
+          // 我的組合（combo:）：主特效 + 疊加 + 觸發整組放上去
+          const combo = fxCombo(moduleId);
+          const m = s.modules.find((x) => x.id === (combo ? combo.fx.moduleId : moduleId));
           if (!m) return;
           track = Math.max(0, Math.min(track, s.tracks.fx.length - 1));
           if (s.tracks.fx[track]?.locked) return;
-          const duration = parseDuration(m.code, 0.5);
-          const fx: FxItem = { id: uid(), moduleId, params: {}, start: fitStart(spansOf(s), laneOf('effect', track), Math.max(0, start), duration), duration, track };
+          // 轉場模組放到特效軌 = 轉場方塊：範圍內每個剪接點自動套用
+          const isTr = m.kind === 'transition';
+          const duration = combo ? combo.fx.duration : isTr ? TR_BLOCK_DUR : parseDuration(m.code, 0.5);
+          const at = fitStart(spansOf(s), laneOf('effect', track), Math.max(0, start), duration);
+          const fx: FxItem = combo
+            ? { ...comboItem(combo), id: uid(), start: at, track }
+            : isTr
+              ? { id: uid(), moduleId, params: {}, start: at, duration, track, trigger: { kind: 'cut' }, trDur: transDur() }
+              : { id: uid(), moduleId, params: {}, start: at, duration, track };
           set({ effects: [...s.effects, fx], selection: { type: 'effect', id: fx.id }, selected: [keyOf('effect', fx.id)], leftTab: 'editor' });
         },
 
         addText: (presetId, start, track, duration) => {
           const s = get();
-          const user = userTextStyle(presetId);
-          const p = TEXT_PRESETS.find((x) => x.id === presetId) ?? TEXT_PRESETS[0];
           const dur = duration ?? stillDur();
           // 預設放在最上面的影片軌
           const tk = Math.max(0, Math.min(track ?? s.tracks.video.length - 1, s.tracks.video.length - 1));
           if (s.tracks.video[tk]?.locked) return;
           const t0 = Math.max(0, start ?? s.time);
-          const clip = makeClip({
-            mediaId: '',
-            track: tk,
-            start: fitStart(spansOf(s), laneOf('clip', tk), t0, dur),
-            duration: dur,
-            fit: 'contain',
-            text: user ? { ...DEFAULT_TEXT, ...user.style } : { ...DEFAULT_TEXT, ...p.style },
-            transform: user ? { ...DEFAULT_TRANSFORM, ...user.transform } : { ...DEFAULT_TRANSFORM, y: p.y },
-          });
-          // 我的樣式：一起套上存下來的轉場與片段特效（模組已刪除的略過）
-          if (user) {
-            const has = (id?: string) => !!id && s.modules.some((m) => m.id === id);
-            clip.transitionIn = has(user.transitionIn?.moduleId) ? structuredClone(user.transitionIn) : null;
-            clip.transitionOut = has(user.transitionOut?.moduleId) ? structuredClone(user.transitionOut) : null;
-            const fx = user.effects.filter((f) => has(f.moduleId)).map((f) => ({ ...structuredClone(f), id: uid() }));
-            if (fx.length) clip.effects = fx;
-          }
+          const clip = makeTextClip(presetId, s.modules, { track: tk, start: fitStart(spansOf(s), laneOf('clip', tk), t0, dur), duration: dur });
           set({ clips: [...s.clips, clip], selection: { type: 'clip', id: clip.id }, selected: [keyOf('clip', clip.id)], leftTab: 'editor' });
         },
 
@@ -995,6 +1045,12 @@ export const useStore = create<State>()(
               if (e.id !== id) return e;
               const keys: Record<string, Keyframe[]> = {};
               for (const [k, v] of Object.entries(e.keys ?? {})) if (k.startsWith('mask.')) keys[k] = v;
+              // 我的組合：換成整組（遮罩、位置、長度保留）
+              const combo = fxCombo(moduleId);
+              if (combo) {
+                const c = comboItem(combo);
+                return { ...e, moduleId: c.moduleId, params: c.params, keys: { ...(c.keys ?? {}), ...keys }, audio: c.audio, stack: c.stack, trigger: c.trigger };
+              }
               return { ...e, moduleId, params: {}, keys };
             }),
             selection: { type: 'effect', id },
@@ -1461,7 +1517,8 @@ export const useStore = create<State>()(
 
         addClipFx: (clipId, moduleId) =>
           set((s) => ({
-            clips: s.clips.map((c) => (c.id === clipId ? { ...c, effects: [...(c.effects ?? []), { id: uid(), moduleId, params: {} }] } : c)),
+            // 我的組合：主特效與疊加的特效依序變成片段特效（觸發不適用）
+            clips: s.clips.map((c) => (c.id === clipId ? { ...c, effects: [...(c.effects ?? []), ...comboClipFx(moduleId)] } : c)),
             selection: { type: 'clip', id: clipId },
             leftTab: 'editor',
           })),

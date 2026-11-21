@@ -7,8 +7,8 @@ import { remapLib } from './remap';
 
 /** 特效 / 轉場 / 變速的預覽縮圖：閒置時一張一張算，依程式碼快取 */
 
-export const THUMB_W = 144;
-export const THUMB_H = 256;
+export const THUMB_W = 160;
+export const THUMB_H = 160;
 
 export const useThumbs = create<{ map: Record<string, string> }>(() => ({ map: {} }));
 

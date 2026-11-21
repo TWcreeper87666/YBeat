@@ -10,6 +10,7 @@ export function itemName(type: ItemType, it: AnyItem, media: Media[], modules: M
     return media.find((m) => m.id === c.mediaId)?.name ?? $t('未知素材');
   }
   if (type === 'audio') return media.find((m) => m.id === (it as AudioClip).mediaId)?.name ?? $t('未知素材');
-  const m = modules.find((x) => x.id === (it as FxItem).moduleId);
-  return m ? displayName(m.name) : $t('（遺失模組）');
+  const f = it as FxItem;
+  const m = modules.find((x) => x.id === f.moduleId);
+  return (m ? displayName(m.name) : $t('（遺失模組）')) + (f.stack?.length ? ` +${f.stack.length}` : '');
 }

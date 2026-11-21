@@ -4,7 +4,8 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { create } from 'zustand';
 import { flushSync } from 'react-dom';
 import { axisAligned, gridSnapLines, rotatedHalf, snapMoveAxis, snapScaleAxis } from '../engine/snap';
-import { projectDuration, remapFor, srcAvail, useStore, type Clip, type Media } from '../store';
+import { makeTextClip, projectDuration, remapFor, srcAvail, useStore, type Clip, type FxItem, type Media } from '../store';
+import { fxCombo, stillDur, usePrefs } from '../prefs';
 import { getRenderer, Renderer, computeFrame, makeCtx, setRenderer } from '../engine/renderer';
 import { setRemapErrorReporter } from '../engine/remap';
 import { syncAudioPreview, stopAudioPreview } from '../engine/audio';
@@ -55,6 +56,8 @@ export function Preview() {
     // 渲染慢、掉幀時時間軸也不會落後，影片 / 聲音（照真實時間在播）就不用一直被拉回來對時。
     let clock: { t: number; perf: number } | null = null;
     let lastSet = NaN;
+    let trialText: { key: object; clip: Clip } | null = null;
+    let trialCombo: { key: object; item: FxItem } | null = null;
     let trialLoop = -1; // 剪接點試看轉場：第幾圈（換圈時影片要重新對時）
     const loop = (now: number) => {
       const st = useStore.getState();
@@ -94,6 +97,27 @@ export function Preview() {
         const sc = useLayout.getState().previewScale || 1;
         r.setSize(st.format.w * sc, st.format.h * sc, st.format.h);
         let ctx = makeCtx(st);
+        // 文字分頁點選的樣式：疊在目前畫面最上層（多一條暫時的軌道），整段循環播放
+        const tx = usePreviewFx.getState().text;
+        if (tx && !st.playing) {
+          if (trialText?.key !== tx) {
+            const dur = stillDur();
+            trialText = { key: tx, clip: makeTextClip(tx.preset, st.modules, { id: 'trial-text', duration: dur }) };
+          }
+          const c = trialText.clip;
+          const el = ((now - tx.t0) / 1000) % (c.duration + 0.6);
+          const clip = { ...c, track: ctx.videoTracks.length, start: t - Math.min(el, c.duration - 1e-3) };
+          ctx = { ...ctx, clips: [...ctx.clips, clip], videoTracks: [...ctx.videoTracks, [clip]] };
+        } else trialText = null;
+        // 特效分頁點選的「我的組合」：放在最上層（多一條暫時的特效軌），整段循環播放
+        const fxSel = usePreviewFx.getState().fx;
+        const combo = fxSel && !st.playing ? fxCombo(fxSel.moduleId) : undefined;
+        if (combo && fxSel) {
+          if (trialCombo?.key !== combo) trialCombo = { key: combo, item: { ...structuredClone(combo.fx), id: 'trial-combo', start: 0, track: 0 } };
+          const it = trialCombo.item;
+          const el = ((now - fxSel.t0) / 1000) % (it.duration + 0.6);
+          ctx = { ...ctx, effects: [...ctx.effects, { ...it, track: ctx.tracks.fx.length, start: t - Math.min(el, it.duration - 1e-3) }] };
+        } else trialCombo = null;
         // 素材庫點選的特效 / 轉場：循環預覽
         let extra;
         let rt = t, rPlaying = st.playing;
@@ -260,9 +284,11 @@ function trialRemap(st: ReturnType<typeof useStore.getState>, ctx: ReturnType<ty
 
 function FxPreviewLabel() {
   const fx = usePreviewFx((s) => s.fx);
+  const text = usePreviewFx((s) => s.text?.name);
   const name = useStore((s) => (fx ? s.modules.find((m) => m.id === fx.moduleId)?.name : null));
-  if (!fx || !name) return null;
-  const label = displayName(name);
+  const combo = usePrefs((s) => (fx ? s.fxCombos.find((c) => c.id === fx.moduleId)?.name : undefined));
+  const label = name ? displayName(name) : combo ?? text;
+  if (!label) return null;
   return (
     <div className="fx-preview-label">
       {$t('預覽：')}{label}
@@ -375,6 +401,8 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
     const s = useStore.getState();
     const l = s.time - c.start;
     const base = clipTransformAt(c, Math.min(c.duration, Math.max(0, l)));
+    // 畫面寬度用輸出比例算（canvas 量到的寬高是整數 px，比例會差一點，吸附到邊緣時縮放就變成 99.9%）
+    const W = H * frameAspect();
     const b = boxOf(c, m, l, W, H);
     const p0 = pt(e);
     const d0 = Math.hypot(p0.x - b.cx, p0.y - b.cy) || 1;

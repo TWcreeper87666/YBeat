@@ -1,7 +1,8 @@
 import { matteCoverage, requestMatte, useMatte } from '../engine/matte';
 import { openEditorWindow } from './EditorWindow';
+import { clickTransition, copyTransition, hasTransitionClipboard, pasteTransition, removeTransitions, useTrSel } from './trSelect';
 import { $t, displayName } from '../i18n';
-import { ArrowLeftRight, ArrowRightLeft, CircleDashed, Eye, EyeOff, FastForward, Film, Gauge, Magnet, Minus, MoveHorizontal, Music, Plus, Redo2, Replace, Scissors, Sparkles, TriangleAlert, Undo2, Volume2, VolumeX, Group, Link2, ArrowRightFromLine, ArrowRightToLine, Drum, ChevronDown, Lock, Unlock } from 'lucide-react';
+import { Repeat, ArrowLeftRight, ArrowRightLeft, CircleDashed, Eye, EyeOff, FastForward, Film, Gauge, Magnet, Minus, MoveHorizontal, Music, Plus, Redo2, Replace, Scissors, Sparkles, TriangleAlert, Undo2, Volume2, VolumeX, Group, Link2, ArrowRightFromLine, ArrowRightToLine, Drum, ChevronDown, Lock, Unlock } from 'lucide-react';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { create } from 'zustand';
 import {
@@ -11,11 +12,12 @@ import {
   type AnyItem, type AudioClip, type Clip, type DropFit, type FxItem, type ItemType, type Media, type PasteResult, type PlacementGhost, type TrackKind, type Tracks, type TimelineDropMode,
 } from '../store';
 import { sortClips, transitionWindow, makeCtx, type TrWindow } from '../engine/renderer';
+import { cutPoints, cutTracks, triggerBeats, triggerMarks } from '../engine/trigger';
 import { nextStart, prevEnd, selectedItemsAtTime, spansOverlap, type Span } from '../engine/overlap';
 import { snapTargetIfApplied } from '../engine/snap';
 import { plainSpeed } from '../engine/remap';
 import { audioBufferPeak, getAudioBuffer, setScrubbing, waveformLevels } from '../engine/audio';
-import { PPS_MAX, PPS_MIN, rulerLabel, rulerSteps, snapFrame } from '../engine/rulerTicks';
+import { FPS, PPS_MAX, PPS_MIN, rulerLabel, rulerSteps, snapFrame } from '../engine/rulerTicks';
 import { undo, redo, useHistory, beginHistoryTransaction, endHistoryTransaction } from '../engine/history';
 import { relinkWithPicker } from '../engine/media';
 import { confirmDialog, openMenu, promptDialog, stopPreviewFx, toast, useDrag, useLayout, useReveal, useSnapLine, useMenu, type MenuItem } from './uiStore';
@@ -26,7 +28,8 @@ import { beatSnapPoints, fitToBeats, getBeats, splitAtBeats, useBeats } from './
 const SNAP_PX = 8;
 /** 時間軸預設長度（秒）；專案比這個長才依專案長度延伸 */
 const MIN_LEN = 60;
-const NAMES: Record<TrackKind, string> = { fx: $t('特效'), video: $t('影片'), audio: $t('音訊') };
+// 特效軌也放轉場方塊，所以軌道叫「效果」（跟 Premiere 的效果面板一樣，包含特效與轉場）
+const NAMES: Record<TrackKind, string> = { fx: $t('效果'), video: $t('影片'), audio: $t('音訊') };
 const ICONS: Record<TrackKind, React.ReactNode> = { fx: <Sparkles size={13} />, video: <Film size={13} />, audio: <Music size={13} /> };
 
 const showSnap = (t: number | null) => useSnapLine.getState().t !== t && useSnapLine.setState({ t });
@@ -106,9 +109,9 @@ function selectTrackItems(kind: TrackKind, idx: number, from?: number) {
   useStore.setState({ selection: parseKey(keys[0]) });
 }
 
-function nearest(v: number, pts: number[], pps: number) {
+function nearest(v: number, pts: number[], _pps?: number) {
   if (!useStore.getState().snap) return { v, d: Infinity };
-  let best = v, bd = SNAP_PX / pps;
+  let best = v, bd = SNAP_PX / livePps();
   for (const p of pts) {
     const d = Math.abs(p - v);
     if (d < bd) { bd = d; best = p; }
@@ -122,8 +125,31 @@ function snapPoints(exclude: Set<string>) {
   (['clip', 'effect', 'audio'] as ItemType[]).forEach((type) => {
     for (const c of s[LIST[type]] as AnyItem[]) if (!exclude.has(keyOf(type, c.id))) pts.push(c.start, c.start + c.duration);
   });
+  // 轉場的頭尾（跟著片段一起移動的、正在拖的那個轉場不算）
+  const byTrack = new Map<number, Clip[]>();
+  for (const c of s.clips) byTrack.set(c.track, [...(byTrack.get(c.track) ?? []), c]);
+  for (const list of byTrack.values()) {
+    const sorted = sortClips(list);
+    sorted.forEach((c, i) => {
+      if (exclude.has(keyOf('clip', c.id))) return;
+      for (const side of ['in', 'out'] as const) {
+        if (exclude.has(trSelId(c.id, side))) continue;
+        const w = transitionWindow(sorted[i - 1], c, side, sorted[i + 1]);
+        if (w && !(w.mode === 'cut' && exclude.has(keyOf('clip', sorted[i - 1].id)))) pts.push(w.t0, w.t0 + w.d);
+      }
+    });
+  }
   return pts;
 }
+
+/** 滑鼠 x → 時間軸時間：用當下的縮放與捲動算（拖曳中縮放也對得上） */
+function timeAtX(clientX: number): number {
+  const lane = document.querySelector<HTMLElement>('.tl-scroll [data-lane-kind]');
+  return lane ? (clientX - lane.getBoundingClientRect().left) / useStore.getState().pps : 0;
+}
+/** 時間軸最小單位是一格（1/60 秒）：拖曳時取最近的一格 */
+const qf = (t: number) => Math.round(t * FPS) / FPS;
+const livePps = () => useStore.getState().pps;
 
 function laneAt(ev: PointerEvent, kind: TrackKind): number | null {
   for (const el of document.elementsFromPoint(ev.clientX, ev.clientY)) {
@@ -134,12 +160,22 @@ function laneAt(ev: PointerEvent, kind: TrackKind): number | null {
 }
 
 function listen(onMove: (ev: PointerEvent) => void, onUp?: (ev: PointerEvent) => void) {
+  // 拖曳中縮放 / 捲動時間軸：用最後一次的滑鼠位置重算（等縮放後的捲動位置套用完）
+  let last: PointerEvent | null = null;
+  const move = (ev: PointerEvent) => { last = ev; onMove(ev); };
+  const rerun = () => { const ev = last; if (ev) requestAnimationFrame(() => last === ev && onMove(ev)); };
+  const unsub = useStore.subscribe((st, prev) => { if (st.pps !== prev.pps) rerun(); });
+  // 拖曳中捲動時間軸（滾輪 / 捲軸）：滑鼠沒動也要更新位置
+  const onScroll = (e: Event) => { if ((e.target as Element)?.classList?.contains('tl-scroll')) rerun(); };
+  window.addEventListener('scroll', onScroll, true);
   const up = (ev: PointerEvent) => {
-    window.removeEventListener('pointermove', onMove);
+    unsub();
+    window.removeEventListener('scroll', onScroll, true);
+    window.removeEventListener('pointermove', move);
     window.removeEventListener('pointerup', up);
     onUp?.(ev);
   };
-  window.addEventListener('pointermove', onMove);
+  window.addEventListener('pointermove', move);
   window.addEventListener('pointerup', up);
 }
 
@@ -153,16 +189,17 @@ function movePreview(key: string) {
   return { moving, affected };
 }
 
-/** 按住 Ctrl / Alt 時讓把手和游標有不同樣子 */
+/** 按住 Ctrl / Alt / Shift 時讓把手和游標有不同樣子 */
 function trackModifiers() {
   const upd = (e: KeyboardEvent | MouseEvent) => {
     document.body.classList.toggle('key-ctrl', e.ctrlKey || e.metaKey);
     document.body.classList.toggle('key-alt', e.altKey);
+    document.body.classList.toggle('key-shift', e.shiftKey);
   };
   window.addEventListener('keydown', upd);
   window.addEventListener('keyup', upd);
   window.addEventListener('pointermove', upd as (e: MouseEvent) => void);
-  window.addEventListener('blur', () => document.body.classList.remove('key-ctrl', 'key-alt'));
+  window.addEventListener('blur', () => document.body.classList.remove('key-ctrl', 'key-alt', 'key-shift'));
 }
 trackModifiers();
 
@@ -179,13 +216,13 @@ function slipItem(e: React.PointerEvent, type: 'clip' | 'audio', it: AnyItem) {
   const speed = itemSpeed(type, it) ?? 1;
   const span = it.duration * speed; // 用掉的素材長度
   const maxIn = Math.max(0, m.duration - span);
-  const x0 = e.clientX;
+  const g0 = timeAtX(e.clientX);
   const key = keyOf(type, it.id);
   document.body.classList.add('slipping');
   listen(
     (ev) => {
-      // 往右拖 = 畫面往右移 = 看到更早的內容
-      const v = Math.min(maxIn, Math.max(0, in0 - ((ev.clientX - x0) / pps) * speed));
+      // 往右拖 = 畫面往右移 = 看到更早的內容（以一格為單位）
+      const v = Math.min(maxIn, Math.max(0, in0 - qf(timeAtX(ev.clientX) - g0) * speed));
       useStore.getState().patchItems({ [key]: { in: v } });
       useOp.setState({ op: { key, kind: 'slip', text: $t('素材起點 {0}s / {1}s', v.toFixed(2), m.duration.toFixed(1)) } });
     },
@@ -216,6 +253,7 @@ function stretchItems(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 
   const pts = snapPoints(new Set(st.selected));
   const sp0 = itemSpeed(type, it) ?? 1;
   const x0 = e.clientX;
+  const g0 = timeAtX(e.clientX);
   const keys = group.map((g) => keyOf(g.type, g.it.id));
   const movingKeys = new Set(keys);
   let moved = false;
@@ -225,7 +263,7 @@ function stretchItems(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 
       if (!moved && Math.abs(ev.clientX - x0) < 3) return;
       if (!moved) beginHistoryTransaction();
       moved = true;
-      const sn = nearest(edge0 + (ev.clientX - x0) / pps, pts, pps);
+      const sn = nearest(qf(edge0 + timeAtX(ev.clientX) - g0), pts);
       showSnap(sn.d !== Infinity ? sn.v : null);
       const edge = sn.v;
       // 速度限制 0.1× ~ 10×
@@ -248,7 +286,7 @@ function stretchItems(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 
           if (!spansOverlap(span, target)) continue;
           const left = Math.max(span.start, other.start);
           const right = Math.min(span.start + span.duration, other.start + other.duration);
-          affected[otherKey] = { left: (left - other.start) * pps, width: (right - left) * pps };
+          affected[otherKey] = { left: (left - other.start) * livePps(), width: (right - left) * livePps() };
         }
       }
       useMovePreview.setState({ moving: movingKeys, affected });
@@ -342,15 +380,16 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
   const minStart = Math.min(...group.map((g) => g.it.start));
   const kind = KIND_OF[type];
   const x0 = e.clientX, y0 = e.clientY;
+  const g0 = timeAtX(e.clientX);
   let moved = false;
 
   listen(
     (ev) => {
       if (!moved && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 3) return;
       moved = true;
-      let dt = (ev.clientX - x0) / pps;
-      const a = nearest(it.start + dt, pts, pps);
-      const b = nearest(it.start + it.duration + dt, pts, pps);
+      let dt = qf(it.start + timeAtX(ev.clientX) - g0) - it.start;
+      const a = nearest(it.start + dt, pts);
+      const b = nearest(it.start + it.duration + dt, pts);
       if (a.d <= b.d && a.d !== Infinity) { dt = a.v - it.start; showSnap(a.v); }
       else if (b.d !== Infinity) { dt = b.v - it.start - it.duration; showSnap(b.v); }
       else showSnap(null);
@@ -433,7 +472,10 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
   e.preventDefault();
   const before = useStore.getState();
   const key = keyOf(type, it.id);
-  if ((e.ctrlKey || e.metaKey) && (type !== 'clip' || (before.selected.includes(key) && before.selected.length > 1))) return stretchItems(e, type, it, side);
+  // Ctrl / Shift 多選中不小心點到邊緣：當作點片段本身（加選 / 範圍選取），不要打斷選取
+  if ((e.ctrlKey || e.metaKey) && !before.selected.includes(key)) return before.select({ type, id: it.id }, 'toggle');
+  if (e.shiftKey && !e.ctrlKey && !e.metaKey) return before.select({ type, id: it.id }, 'range');
+  if ((e.ctrlKey || e.metaKey) && (type !== 'clip' || before.selected.length > 1)) return stretchItems(e, type, it, side);
   if (!before.selected.includes(key)) before.select({ type, id: it.id });
   else useStore.setState({ selection: { type, id: it.id }, activeTrack: { kind: KIND_OF[type], idx: it.track }, leftTab: 'editor' });
   const S = useStore.getState();
@@ -462,6 +504,7 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
   const end = it.start + it.duration;
   const inT = (it as Clip).in ?? 0;
   const x0 = e.clientX;
+  const g0 = timeAtX(e.clientX);
   const timeBeforeDrag = S.time;
   const others = spansOf(S, movingKeys);
   const lane = laneOf(type, it.track);
@@ -510,7 +553,8 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
     if (!moved && Math.abs(ev.clientX - x0) < 3) return;
     if (!moved) beginHistoryTransaction();
     moved = true;
-    const d = (ev.clientX - x0) / pps;
+    const edgeBase = side === 'r' ? end : it.start;
+    const d = qf(edgeBase + timeAtX(ev.clientX) - g0) - edgeBase;
     let patch: Partial<Clip> = {};
     const patches: Record<string, Partial<AnyItem>> = {};
     const resizedSpans: Span[] = [];
@@ -609,7 +653,7 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
           if (!spansOverlap(span, { lane: laneOf(itemType, other.track), start: other.start, duration: other.duration })) continue;
           const left = Math.max(span.start, other.start);
           const right = Math.min(span.start + span.duration, other.start + other.duration);
-          affected[otherKey] = { left: (left - other.start) * pps, width: (right - left) * pps };
+          affected[otherKey] = { left: (left - other.start) * livePps(), width: (right - left) * livePps() };
         }
       }
     }
@@ -705,17 +749,23 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
 function resizeTransition(e: React.PointerEvent, c: Clip, side: TrSide, handle: 'l' | 'r', w: TrWindow) {
   e.stopPropagation();
   e.preventDefault();
+  // Ctrl / Shift 多選中不小心點到邊緣：當作點轉場本身（加選 / 範圍選取）
+  if (e.ctrlKey || e.metaKey || e.shiftKey) {
+    stopPreviewFx();
+    return clickTransition(trSelId(c.id, side), e);
+  }
   const S = useStore.getState();
   S.select({ type: 'transition', id: trSelId(c.id, side) });
   const pps = S.pps;
-  const pts = snapPoints(new Set());
+  const pts = snapPoints(new Set([trSelId(c.id, side)]));
   // 轉場的固定點：剪接點的中心 / 開頭轉場的片段開頭 / 結尾轉場的片段結尾
   const anchor = w.mode === 'cut' ? w.t0 + w.d / 2 : w.mode === 'head' ? c.start : c.start + c.duration;
   const edge0 = handle === 'r' ? w.t0 + w.d : w.t0;
   const x0 = e.clientX;
+  const g0 = timeAtX(e.clientX);
   listen(
     (ev) => {
-      const sn = nearest(edge0 + (ev.clientX - x0) / pps, pts.filter((p) => Math.abs(p - anchor) > 1e-4), pps);
+      const sn = nearest(qf(edge0 + timeAtX(ev.clientX) - g0), pts.filter((p) => Math.abs(p - anchor) > 1e-4));
       showSnap(sn.d !== Infinity ? sn.v : null);
       const half = Math.abs(sn.v - anchor);
       const d = w.mode === 'cut' ? half * 2 : half;
@@ -734,9 +784,11 @@ function openTransitionEditor(c: Clip, side: TrSide) {
 
 /** 轉場的右鍵選單：編輯 / 移除（批次套用在轉場卡片的右鍵選單、屬性面板） */
 export function transitionMenu(x: number, y: number, c: Clip, side: TrSide) {
-  const S = useStore.getState();
   const tr = side === 'out' ? c.transitionOut : c.transitionIn;
   if (!tr) return;
+  const id = trSelId(c.id, side);
+  if (!useTrSel.getState().ids.includes(id)) clickTransition(id, { ctrlKey: false, metaKey: false, shiftKey: false });
+  const n = useTrSel.getState().ids.length;
   openMenu(x, y, [
     {
       label: $t('編輯轉場'),
@@ -744,7 +796,10 @@ export function transitionMenu(x: number, y: number, c: Clip, side: TrSide) {
       action: () => openTransitionEditor(c, side),
     },
     { separator: true },
-    { label: $t('移除轉場'), action: () => S.setTransition(c.id, null, side), danger: true },
+    { label: $t('複製'), shortcut: 'Ctrl+C', action: () => copyTransition(id) },
+    { label: n > 1 ? $t('貼上到 {0} 個轉場', n) : $t('貼上'), shortcut: 'Ctrl+V', action: hasTransitionClipboard() ? () => pasteTransition() : undefined },
+    { separator: true },
+    { label: n > 1 ? $t('移除 {0} 個轉場', n) : $t('移除轉場'), shortcut: 'Delete', action: () => removeTransitions(), danger: true },
   ]);
 }
 
@@ -971,7 +1026,8 @@ function AddTrackPanel({ state, close }: { state: AddTrackState; close: () => vo
 /** 拖曳中：顯示倍率 / 素材起點 */
 function OpBadge({ k }: { k: string }) {
   const op = useOp((s) => (s.op?.key === k ? s.op : null));
-  if (!op) return null;
+  // 變速拖回原速（1.00×）時不顯示
+  if (!op || (op.kind === 'stretch' && Math.abs(parseFloat(op.text) - 1) < 5e-3)) return null;
   return <span className={`op-badge ${op.kind}`}>{op.kind === 'stretch' ? <FastForward size={11} /> : <MoveHorizontal size={11} />} {op.text}</span>;
 }
 
@@ -1069,7 +1125,7 @@ const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel,
       {drop === 'replace' && <span className="badge replace-tag"><Replace size={10} /> {$t('取代')}</span>}
       {drop === 'effect' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段特效')}</span>}
       {drop === 'mask' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段遮罩')}</span>}
-      {Math.abs(sp - 1) > 1e-3 && <span className="badge">{+sp.toFixed(2)}×</span>}
+      {+sp.toFixed(2) !== 1 && <span className="badge">{+sp.toFixed(2)}×</span>}
       <OpBadge k={key} />
       {ok && !isText && m!.hasAudio && m!.kind === 'video' && (la ? la.volume === 0 : c.volume === 0 && !c.audioSplit) && <span className="badge"><VolumeX size={10} /></span>}
       {la && (
@@ -1092,11 +1148,12 @@ const TransitionView = React.memo(function TransitionView({ c, prev, next, side,
   return (
     <div
       className={`transition ${w.mode} ${sel ? 'sel' : ''}`}
+      data-tr={`${c.id}:${side}`}
       title={$t('{0}（拖兩側調整長度）', name) + (hint ? ` · ${hint}` : '')}
       style={{ left: w.t0 * pps, width: Math.max(14, w.d * pps) }}
       onPointerDown={(e) => {
         e.stopPropagation();
-        if (e.button === 0) { stopPreviewFx(); S.select({ type: 'transition', id: trSelId(c.id, side) }); S.setTime(w.t0); }
+        if (e.button === 0) { stopPreviewFx(); clickTransition(trSelId(c.id, side), e); }
       }}
       onDoubleClick={(e) => { e.stopPropagation(); openTransitionEditor(c, side); }}
       onContextMenu={(e) => {
@@ -1112,20 +1169,37 @@ const TransitionView = React.memo(function TransitionView({ c, prev, next, side,
   );
 });
 
-const FxView = React.memo(function FxView({ f, pps, sel, name, drop, masked }: { f: FxItem; pps: number; sel: boolean; name: string; drop: boolean; masked: boolean }) {
+/** 特效方塊裡的觸發點（相對方塊開頭的秒數，逗號分隔：字串才不會讓 memo 每次都重畫） */
+function fxTriggerMarks(f: FxItem, trBlock: boolean): string {
+  if (!f.trigger) return '';
+  const s = useStore.getState();
+  let marks: number[];
+  if (trBlock) {
+    // 轉場方塊：範圍內（含兩端）會套上轉場的剪接點
+    marks = cutPoints(s.clips, cutTracks(f, s.tracks), true).filter((p) => p >= f.start - 0.01 && p <= f.start + f.duration + 0.01);
+  } else {
+    const pts = f.trigger.kind === 'cut' ? cutPoints(s.clips, cutTracks(f, s.tracks)) : triggerBeats(f.trigger.every);
+    marks = triggerMarks(pts, f.start, f.start + f.duration);
+  }
+  return marks.slice(0, 400).map((p) => (p - f.start).toFixed(4)).join(',');
+}
+
+const FxView = React.memo(function FxView({ f, pps, sel, name, drop, masked, marks, tr }: { f: FxItem; pps: number; sel: boolean; name: string; drop: boolean; masked: boolean; marks: string; tr: boolean }) {
   const key = keyOf('effect', f.id);
   const preview = movePreview(key);
   const opCls = useOpCls(key);
   return (
     <div
       data-key={key}
-      className={`fxitem ${sel ? 'sel' : ''} ${drop ? 'drop-hint replace' : ''} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
+      className={`fxitem ${tr ? 'trblock' : ''} ${sel ? 'sel' : ''} ${drop ? 'drop-hint replace' : ''} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
       style={{ left: f.start * pps, width: Math.max(4, f.duration * pps), '--overlap-left': `${preview.affected?.left ?? 0}px`, '--overlap-width': `${preview.affected?.width ?? 0}px` } as React.CSSProperties}
       onPointerDown={(e) => itemPointerDown(e, 'effect', f)}
       onDoubleClick={() => openItemEditor('effect', f.id)}
       onContextMenu={(e) => itemMenu(e, 'effect', f)}
     >
       <div className="handle l" onPointerDown={(e) => resizeItem(e, 'effect', f, 'l', false)} />
+      {marks && marks.split(',').map((m) => <i key={m} className="fx-trig" style={{ left: Number(m) * pps }} />)}
+      {f.trigger && (tr ? <ArrowRightLeft size={10} className="link-ico" /> : <Repeat size={10} className="link-ico" />)}
       {f.group && <Group size={11} className="link-ico" />}
       <span className="clip-name" title={`${name} · ${f.duration.toFixed(2)}s`}>{name}</span>
       {masked && <span className="badge" title={$t('有遮罩')}><CircleDashed size={10} /></span>}
@@ -1153,7 +1227,7 @@ const AudioView = React.memo(function AudioView({ a, m, pps, sel }: { a: AudioCl
       onContextMenu={(e) => itemMenu(e, 'audio', a, m)}
     >
       {ok && <Waveform media={m} inT={a.in} dur={a.duration * (a.rate ?? 1)} width={w} gain={{ volume: a.volume, fadeIn: a.fadeIn, fadeOut: a.fadeOut, len: a.duration }} />}
-      {Math.abs((a.rate ?? 1) - 1) > 1e-3 && <span className="badge">{+(a.rate ?? 1).toFixed(2)}×</span>}
+      {+(a.rate ?? 1).toFixed(2) !== 1 && <span className="badge">{+(a.rate ?? 1).toFixed(2)}×</span>}
       <OpBadge k={key} />
       {a.fadeIn > 0 && <div className="fade in" style={{ width: a.fadeIn * pps }} />}
       {a.fadeOut > 0 && <div className="fade out" style={{ width: a.fadeOut * pps }} />}
@@ -1205,6 +1279,8 @@ export function Timeline() {
   const modules = useStore((s) => s.modules);
   const pps = useStore((s) => s.pps);
   const sel = useStore((s) => s.selection);
+  /** 一起選取的轉場（多選） */
+  const trIds = useTrSel((s) => s.ids);
   const selected = useStore((s) => s.selected);
   const drag = useDrag((s) => s.drag);
   const placement = usePlacementPreview((s) => s.items);
@@ -1549,6 +1625,7 @@ export function Timeline() {
   };
 
   const modName = (id: string) => { const m = modules.find((x) => x.id === id); return m ? displayName(m.name) : $t('（遺失模組）'); };
+  const isTrBlock = (f: FxItem) => modules.find((x) => x.id === f.moduleId)?.kind === 'transition';
   const isSel = (type: ItemType, id: string) => selSet.has(keyOf(type, id));
   const mediaOf = (id: string) => media.find((m) => m.id === id);
   const dropClip = drag?.target?.kind === 'clip' ? drag.target : null;
@@ -1583,10 +1660,10 @@ export function Timeline() {
               dropThumb={isDrop === 'relink' || isDrop === 'replace' ? dropThumb : undefined}
             />
             {c.transitionIn && (
-              <TransitionView c={c} prev={sorted[i - 1]} next={sorted[i + 1]} side="in" pps={pps} sel={sel?.type === 'transition' && sel.id === c.id} name={modName(c.transitionIn.moduleId)} />
+              <TransitionView c={c} prev={sorted[i - 1]} next={sorted[i + 1]} side="in" pps={pps} sel={trIds.includes(c.id)} name={modName(c.transitionIn.moduleId)} />
             )}
             {c.transitionOut && (
-              <TransitionView c={c} prev={sorted[i - 1]} next={sorted[i + 1]} side="out" pps={pps} sel={sel?.type === 'transition' && sel.id === trSelId(c.id, 'out')} name={modName(c.transitionOut.moduleId)} />
+              <TransitionView c={c} prev={sorted[i - 1]} next={sorted[i + 1]} side="out" pps={pps} sel={trIds.includes(trSelId(c.id, 'out'))} name={modName(c.transitionOut.moduleId)} />
             )}
             {isDrop === 'transition' && <div className="transition ghost" style={{ left: (c.start - 0.2) * pps, width: 0.4 * pps }}><ArrowRightLeft size={11} /></div>}
             {isDrop === 'transitionOut' && <div className="transition ghost" style={{ left: (c.start + c.duration - 0.4) * pps, width: 0.4 * pps }}><ArrowRightToLine size={11} /></div>}
@@ -1598,7 +1675,7 @@ export function Timeline() {
       return effects
         .filter((f) => f.track === idx)
         .map((f) => (
-          <FxView key={f.id} f={f} pps={pps} sel={isSel('effect', f.id)} name={f.name ?? modName(f.moduleId)} drop={dropFx === f.id} masked={!!f.mask && f.mask.shape !== 'none'} />
+          <FxView key={f.id} f={f} pps={pps} sel={isSel('effect', f.id)} name={(f.name ?? modName(f.moduleId)) + (f.stack?.length ? ` +${f.stack.length}` : '')} drop={dropFx === f.id} masked={!!f.mask && f.mask.shape !== 'none'} marks={fxTriggerMarks(f, isTrBlock(f))} tr={isTrBlock(f)} />
         ));
     }
     return audios.filter((a) => a.track === idx && !attached.has(a.id)).map((a) => <AudioView key={a.id} a={a} m={mediaOf(a.mediaId)} pps={pps} sel={isSel('audio', a.id)} />);
@@ -1962,7 +2039,17 @@ function Playhead({ pps, labelW, scrollRef }: { pps: number; labelW: number; scr
     // 暫停時（Home / End、方向鍵、跳剪接點…）：播放頭跑出畫面就捲到置中；滑鼠拖曳中不動，避免畫面亂跳
     else if (!pointerHeld) el.scrollLeft = x - viewW / 2;
   }, [x, pps, labelW, playing, scrollRef]);
-  return <div className="playhead" style={{ transform: `translateX(${x}px)` }} />;
+  // 捲到播放頭左邊時藏起來（不然會從軌道名稱欄下面的空白露出來）
+  const [sl, setSl] = useState(0);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const on = () => setSl(el.scrollLeft);
+    on();
+    el.addEventListener('scroll', on, { passive: true });
+    return () => el.removeEventListener('scroll', on);
+  }, [scrollRef]);
+  return <div className="playhead" style={{ transform: `translateX(${x}px)`, visibility: x < sl - 1 ? 'hidden' : undefined }} />;
 }
 
 /** 吸附時的垂直參考線（跨所有軌道） */

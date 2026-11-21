@@ -1,6 +1,6 @@
 import { $t } from '../i18n';
 import React, { useEffect, useRef, useState } from 'react';
-import { openMenu, toast } from './uiStore';
+import { openMenu, toast, type MenuItem } from './uiStore';
 
 /**
  * Blender 風格數值欄：
@@ -25,6 +25,7 @@ export function DragNumber({
   format,
   parse,
   disabled = false,
+  menu,
 }: {
   label?: string;
   value: number;
@@ -41,6 +42,8 @@ export function DragNumber({
   variant?: 'box' | 'text';
   /** 顯示倍率（例如縮放 1.0 顯示成 100%） */
   display?: number;
+  /** 右鍵選單最後多加的項目（例如「套用到同軌」） */
+  menu?: MenuItem[];
   /** 自訂顯示文字（例如時間碼）；輸入模式也用它當初始文字 */
   format?: (v: number) => string;
   /** 自訂輸入解析（回傳 null / NaN = 無效）；沒給就用算式 */
@@ -171,6 +174,7 @@ export function DragNumber({
               }
             },
           },
+          ...(menu?.length ? [{ separator: true } as MenuItem, ...menu] : []),
         ]);
       }}
     >

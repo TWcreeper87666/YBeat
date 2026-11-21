@@ -22,10 +22,12 @@ export interface ParamDef {
   label: string;
   /** float 參數：預覽畫面上，以這個 point 參數為中心、以這個值為縮放倍率畫出畫面框 */
   box?: string;
+  /** curve 參數：「無」選項的固定值（`@none(1)`，例如不淡入 = 一直是 1） */
+  none?: number;
 }
 
 const RE =
-  /\/\/\s*@param\s+(\w+)\s*:\s*(float|int|bool|color|point|curve)\s*=\s*(\S+?)(?:\s*\(\s*(-?[\d.]+)\s*\.\.\s*(-?[\d.]+)\s*\))?(?:\s*"([^"]*)")?(?:\s*@box\(\s*(\w+)\s*\))?[ \t\r]*$/gm;
+  /\/\/\s*@param\s+(\w+)\s*:\s*(float|int|bool|color|point|curve)\s*=\s*(\S+?)(?:\s*\(\s*(-?[\d.]+)\s*\.\.\s*(-?[\d.]+)\s*\))?(?:\s*"([^"]*)")?(?:\s*@box\(\s*(\w+)\s*\))?(?:\s*@none\(\s*(-?[\d.]+)\s*\))?[ \t\r]*$/gm;
 
 const cache = new Map<string, ParamDef[]>();
 
@@ -46,7 +48,7 @@ export function parseParams(code: string): ParamDef[] {
   RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = RE.exec(code))) {
-    const [, name, type, raw, mn, mx, label, box] = m;
+    const [, name, type, raw, mn, mx, label, box, none] = m;
     let def: ParamValue;
     if (type === 'bool') def = raw === 'true' || raw === '1';
     else if (type === 'color') def = /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toLowerCase() : '#ffffff';
@@ -64,6 +66,7 @@ export function parseParams(code: string): ParamDef[] {
       max: mx !== undefined ? parseFloat(mx) : type === 'point' ? 1 : Math.max(1, num * 2),
       label: label || name,
       ...(box && type === 'float' ? { box } : {}),
+      ...(none !== undefined && type === 'curve' ? { none: parseFloat(none) } : {}),
     });
   }
   if (cache.size > 300) cache.clear();

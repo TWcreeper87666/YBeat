@@ -8,6 +8,7 @@ import { spansOverlap, type Span } from '../engine/overlap';
 import { plainSpeed } from '../engine/remap';
 import { makeCtx } from '../engine/renderer';
 import { toast, useLayout } from './uiStore';
+import { setBeatSource, type BeatEvery } from '../engine/trigger';
 
 type S = ReturnType<typeof useStore.getState>;
 
@@ -44,6 +45,18 @@ function pick(beats: Beat[], every: number): Beat[] {
   const d0 = Math.max(0, beats.findIndex((b) => b.down));
   return beats.filter((_, i) => (((i - d0) % every) + every) % every === 0);
 }
+
+// 特效方塊的節拍觸發：每 every 拍一個觸發點（0.5 = 半拍、4 = 每小節，以重拍對齊）；節拍沒變就用上次算好的
+const trigMemo = new Map<BeatEvery, { src: Beat[]; pts: number[] }>();
+setBeatSource((every) => {
+  const s = useStore.getState();
+  const src = every < 1 ? getBeats(s, 2) : getBeats(s, 1);
+  const m = trigMemo.get(every);
+  if (m?.src === src) return m.pts;
+  const pts = (every < 1 ? src : pick(src, every)).map((b) => b.t);
+  trigMemo.set(every, { src, pts });
+  return pts;
+});
 
 function noBeats() {
   toast($t('沒有節拍：先在音訊軌放音樂'), 'error');

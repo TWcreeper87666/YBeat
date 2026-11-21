@@ -47,6 +47,8 @@ const kid = () => Math.random().toString(36).slice(2, 9);
 /** cubic-bezier(x1,y1,x2,y2) 在 x 時的 y */
 export function bezierY(b: Bez, x: number) {
   const [x1, y1, x2, y2] = b;
+  // curve 參數的「無」：x1 < 0 = 整段都是 y1（見 params.ts 的 @none）
+  if (x1 < 0) return y1;
   if (x <= 0) return 0;
   if (x >= 1) return 1;
   const bx = (t: number) => 3 * (1 - t) * (1 - t) * t * x1 + 3 * (1 - t) * t * t * x2 + t * t * t;

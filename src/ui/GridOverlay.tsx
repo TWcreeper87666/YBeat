@@ -1,5 +1,6 @@
 import { $t } from '../i18n';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useLayout } from './uiStore';
 import { DragNumber } from './DragNumber';
 
@@ -45,7 +46,7 @@ export function GridButton() {
       >
         #
       </button>
-      {pop && <GridPopover at={pop} close={() => setPop(null)} />}
+      {pop && createPortal(<GridPopover at={pop} close={() => setPop(null)} />, document.body)}
     </>
   );
 }

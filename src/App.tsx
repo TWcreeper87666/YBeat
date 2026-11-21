@@ -7,6 +7,7 @@ import { InspectorPanel, MediaPanel, ModulePanel, TextPanel } from './ui/LeftPan
 import { isTextField, modalOpen } from './ui/focus';
 import { MaskPanel } from './ui/MaskPanel';
 import { navEdge, navItem, navRow } from './ui/trackNav';
+import { copyTransition, cutTransitions, navTransition, navTransitionEdge, navTransitionRow, pasteTransition, removeTransitions, selectAllTransitions, trSelRange } from './ui/trSelect';
 import { CodePanel } from './ui/CodePanel';
 import { AiPanel } from './ui/AiPanel';
 import { PickerHost } from './ui/Library';
@@ -287,7 +288,7 @@ function ExportOverlay() {
   const ex = useStore((s) => s.exporting);
   if (!ex) return null;
   return (
-    <div className="overlay">
+    <div className="overlay export-overlay">
       <div className="dialog">
         <h3>{$t('匯出中…')}{' '}{(ex.progress * 100).toFixed(0)}%</h3>
         <div className="bar"><div style={{ width: `${ex.progress * 100}%` }} /></div>
@@ -410,6 +411,8 @@ function editPoints() {
 /** 選取項目的時間範圍（Home / End 跳到它的頭尾） */
 function selRange(): { a: number; b: number } | null {
   const s = useStore.getState();
+  // 選取的是轉場：轉場的頭尾
+  if (s.selection?.type === 'transition') return trSelRange();
   const items = s.selected
     .map((k) => {
       const i = k.indexOf(':');
@@ -455,6 +458,17 @@ function onKey(e: KeyboardEvent) {
       return void nudgeKeys((e.key === 'ArrowLeft' ? -1 : 1) * frame * (e.shiftKey ? 10 : 1));
     }
     if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); deleteSelectedKey(); return; }
+  }
+  // 選取的是轉場：切換 / 多選 / 複製貼上 / 刪除都作用在轉場上
+  if (s.selection?.type === 'transition') {
+    if (mod && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) { e.preventDefault(); return navTransition(e.key === 'ArrowLeft' ? -1 : 1, e.shiftKey); }
+    if (mod && (e.key === 'Home' || e.key === 'End')) { e.preventDefault(); return navTransitionEdge(e.key === 'Home' ? 'first' : 'last', e.shiftKey); }
+    if (mod && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) { e.preventDefault(); return navTransitionRow(e.key === 'ArrowUp' ? -1 : 1); }
+    if (mod && k === 'a') { e.preventDefault(); return selectAllTransitions(); }
+    if (mod && k === 'c') { e.preventDefault(); return void copyTransition(); }
+    if (mod && k === 'x') { e.preventDefault(); return cutTransitions(); }
+    if (mod && k === 'v') { e.preventDefault(); return void pasteTransition(); }
+    if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); return void removeTransitions(); }
   }
   if (mod) {
     // 時間軸：Ctrl+← / → 換片段、加 Shift 延伸選取；Ctrl+Home / End 頭尾；Ctrl+↑ / ↓ 換軌道

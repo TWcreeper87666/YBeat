@@ -26,6 +26,31 @@ vec4 effect(vec2 uv) {
 }
 `;
 
+const handheld = `// 手持晃動：模擬手拿相機的自然晃動（慢、連續、不衰減），整段放著用
+// 用時間軸時間算，切開或有觸發也不會跳
+// @duration 3
+// @param strength: float = 0.012 (0..0.08) "位移幅度"
+// @param rotation: float = 0.012 (0..0.1) "旋轉幅度"
+// @param speed: float = 0.8 (0.05..4) "位移速度"
+// @param rotSpeed: float = 0.6 (0.05..4) "旋轉速度"
+// @param jitter: float = 0.25 (0..1) "細碎抖動"
+// @param zoom: float = 1.05 (1..1.4) "放大補邊"
+// @param seed: float = 0 (0..100) "隨機種子"
+float sway(float t, float o) {
+  // 慢的大擺動 + 一半頻率的細碎抖動
+  return noise1(t + o) * 0.7 + noise1(t * 2.3 + o + 11.0) * 0.3 * (1.0 - jitter) + noise1(t * 7.1 + o + 29.0) * 0.35 * jitter;
+}
+vec4 effect(vec2 uv) {
+  float t = u_time * speed + seed * 17.0;
+  float tr = u_time * rotSpeed + seed * 17.0;
+  vec2 off = vec2(sway(t, 0.0), sway(t, 53.0)) * strength;
+  float a = sway(tr, 97.0) * rotation;
+  vec2 p = rotateUV(uv, a, vec2(0.5));
+  p = zoomUV(p, zoom, vec2(0.5)) + off;
+  return tex(mirrorUV(p));
+}
+`;
+
 const motionBlur = `// 方向動態模糊
 // @duration 0.4
 // @param amount: float = 0.06 (0..0.3) "模糊長度"
@@ -442,13 +467,15 @@ const scaleIn = `// 縮放推入：新畫面從小放大蓋上來
 // @param center: point = 0.5,0.5 "中心"
 // @param from: float = 0.3 (0..1) "起始大小" @box(center)
 // @param ease: curve = back "曲線"
+// @param fadeIn: curve = 0.3,1,0,1 "淡入" @none(1)
 vec4 transition(vec2 uv) {
   float p = curve(ease, progress);
   float z = mix(from, 1.0, p);
   vec2 q = zoomUV(uv, z, center);
   vec4 b = getFrom(zoomUV(uv, 1.0 + progress * 0.15, center)) * (1.0 - progress * 0.4);
   if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0) return b;
-  vec4 t = getTo(q) * smoothstep(0.0, 0.25, progress);
+  // 新畫面的不透明度 = 淡入曲線
+  vec4 t = getTo(q) * curve(fadeIn, progress);
   return t + b * (1.0 - t.a);
 }
 `;
@@ -458,13 +485,15 @@ const scaleOut = `// 縮放推出：舊畫面縮小飛走，露出新畫面
 // @param to: float = 0.2 (0..1) "結束大小" @box(center)
 // @param spin: float = 0 (-2..2) "旋轉圈數"
 // @param ease: curve = inOut3 "曲線"
+// @param fade: curve = 1,0,0.7,0 "淡出" @none(0)
 vec4 transition(vec2 uv) {
   float p = curve(ease, progress);
   vec2 c = center;
   vec2 q = rotateUV(zoomUV(uv, mix(1.0, to, p), c), -spin * 2.0 * PI * p, c);
   vec4 b = getTo(zoomUV(uv, mix(0.85, 1.0, p), c));
   if (q.x < 0.0 || q.x > 1.0 || q.y < 0.0 || q.y > 1.0) return b;
-  vec4 f = getFrom(q) * (1.0 - smoothstep(0.75, 1.0, progress));
+  // 舊畫面的不透明度 = 1 - 淡出曲線
+  vec4 f = getFrom(q) * (1.0 - curve(fade, progress));
   return f + b * (1.0 - f.a);
 }
 `;
@@ -537,6 +566,7 @@ const mk = (id: string, kind: ModuleKind, name: string, code: string, rev?: numb
 
 export const EXTRA_MODULES: Module[] = [
   mk('fx-shakeblur', 'effect', '模糊晃動 Shake Blur', shakeBlur),
+  mk('fx-handheld', 'effect', '手持晃動 Handheld', handheld, 2),
   mk('fx-motionblur', 'effect', '動態模糊 Motion Blur', motionBlur),
   mk('fx-zoompulse', 'effect', '縮放脈衝 Zoom Bounce', zoomPulse, 2),
   mk('fx-glitch', 'effect', '故障 Glitch', glitch),
@@ -563,8 +593,8 @@ export const EXTRA_MODULES: Module[] = [
   mk('tr-stretch', 'transition', '拉伸 Stretch', stretch, 2),
   mk('tr-clock', 'transition', '時鐘擦除 Radial', clockWipe),
   mk('tr-zoomblur', 'transition', '縮放模糊 Zoom Blur', zoomBlurTr, 3),
-  mk('tr-scalein', 'transition', '縮放推入 Scale In', scaleIn, 2),
-  mk('tr-scaleout', 'transition', '縮放推出 Scale Out', scaleOut, 2),
+  mk('tr-scalein', 'transition', '縮放推入 Scale In', scaleIn, 3),
+  mk('tr-scaleout', 'transition', '縮放推出 Scale Out', scaleOut, 4),
   mk('tr-push', 'transition', '推移 Push', pushTr, 2),
   mk('tr-flip', 'transition', '翻轉 Flip', flipTr, 2),
   mk('tr-rewind', 'transition', '倒帶 Rewind', rewindTr),

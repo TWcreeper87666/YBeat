@@ -29,7 +29,7 @@ export function LibToolbar({ id, query, setQuery, children, filter, views = true
   };
   const setView = (v: 'list' | 'grid') => useLayout.getState().set({ libView: { ...useLayout.getState().libView, [id]: v } });
   return (
-    <div className="lib-bar">
+    <div className="lib-bar" data-views={views ? id : undefined}>
       <div className="lib-search">
         <Search size={13} />
         <input placeholder={$t('搜尋…')} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && setQuery('')} />
@@ -49,6 +49,46 @@ export function LibToolbar({ id, query, setQuery, children, filter, views = true
     </div>
   );
 }
+
+// ───────────── 卡片大小（所有分頁共用） ─────────────
+
+export const LIB_CARD_MIN = 44;
+export const LIB_CARD_MAX = 220;
+export const LIB_ROW_MIN = 16;
+export const LIB_ROW_MAX = 44;
+const applySizes = (card: number, row: number) => {
+  document.documentElement.style.setProperty('--lib-card', `${card}px`);
+  document.documentElement.style.setProperty('--lib-row', `${row}px`);
+};
+applySizes(useLayout.getState().libCard, useLayout.getState().libRow);
+useLayout.subscribe((s, p) => (s.libCard !== p.libCard || s.libRow !== p.libRow) && applySizes(s.libCard, s.libRow));
+/**
+ * 素材庫裡 Ctrl+滾輪 = 縮放卡片（瀏覽器縮放已在 Menu.tsx 擋掉）。
+ * 一條連續的縮放軸：格狀最大 → 格狀最小 → 切成清單（最大列）→ 清單最小；放大反過來。
+ * 卡片 / 列的大小所有分頁共用，格狀 / 清單是各分頁自己的。
+ */
+window.addEventListener(
+  'wheel',
+  (e) => {
+    if (!e.ctrlKey || !(e.target as Element).closest?.('.lib-body')) return;
+    e.preventDefault();
+    const id = (e.target as Element).closest('.lib')?.querySelector<HTMLElement>('.lib-bar[data-views]')?.dataset.views;
+    const L = useLayout.getState();
+    const up = e.deltaY < 0;
+    const step = (v: number, min: number, max: number) => Math.round(Math.min(max, Math.max(min, v * (up ? 1.12 : 1 / 1.12))));
+    const view = id ? L.libView[id] ?? 'grid' : 'grid';
+    if (view === 'grid') {
+      if (!up && L.libCard <= LIB_CARD_MIN && id) return L.set({ libView: { ...L.libView, [id]: 'list' }, libRow: LIB_ROW_MAX });
+      const next = step(L.libCard, LIB_CARD_MIN, LIB_CARD_MAX);
+      if (next !== L.libCard) L.set({ libCard: next });
+    } else {
+      if (up && L.libRow >= LIB_ROW_MAX && id) return L.set({ libView: { ...L.libView, [id]: 'grid' }, libCard: LIB_CARD_MIN });
+      const next = step(L.libRow, LIB_ROW_MIN, LIB_ROW_MAX);
+      if (next !== L.libRow) L.set({ libRow: next });
+    }
+  },
+  { passive: false },
+);
 
 /** 只在素材庫空白處（不是項目 / 按鈕 / 輸入框上）觸發：單擊取消選取、雙擊新增 */
 export const onBlank = (fn?: () => void) => (e: React.MouseEvent) => {

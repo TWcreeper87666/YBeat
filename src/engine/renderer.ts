@@ -11,6 +11,7 @@ import { clipSource, plainSpeed } from './remap';
 import { MATTE_SIZE, matteAt, requestMatte } from './matte';
 import { clipTransformAt } from './transform';
 import { evalKeys, type Keyframe } from './keyframes';
+import { cutPoints, cutTracks, triggerBeats, triggerWindow } from './trigger';
 
 export interface RenderCtx {
   clips: Clip[];
@@ -118,6 +119,7 @@ float easeInOutCubic(float x) { return x < 0.5 ? 4.0 * x * x * x : 1.0 - pow(-2.
 float easeOutBack(float x) { float c1 = 1.70158, c3 = c1 + 1.0; return 1.0 + c3 * pow(x - 1.0, 3.0) + c1 * pow(x - 1.0, 2.0); }
 // curve 參數（cubic-bezier x1, y1, x2, y2）在 x 的值
 float curve(vec4 b, float x) {
+  if (b.x < 0.0) return b.y; // 「無」：整段都是 b.y
   x = clamp(x, 0.0, 1.0);
   float lo = 0.0, hi = 1.0, t = x;
   for (int i = 0; i < 20; i++) {
@@ -887,10 +889,10 @@ export class Renderer {
   }
 
   /** 套用一個特效（有遮罩時只作用在遮罩範圍），回傳新的目前畫面 */
-  private applyFx(cur: Target, fx: FxItem, g: Prog, t: number): Target {
+  private applyFx(cur: Target, fx: Parameters<Renderer['runEffect']>[3], g: Prog, t: number, local: number, duration: number): Target {
     const [TA, , P0, P1] = this.targets;
     const out = cur === P0 ? P1 : P0;
-    this.runEffect(cur, out, TA, fx, g, t, t - fx.start, fx.duration);
+    this.runEffect(cur, out, TA, fx, g, t, local, duration);
     return out;
   }
 
@@ -982,12 +984,27 @@ export class Renderer {
       if (!fxByLevel.has(lv)) fxByLevel.set(lv, []);
       fxByLevel.get(lv)!.push(e);
     }
+    // 「每個剪接點」觸發：選定影片軌的片段開頭（同一組軌道只算一次）
+    const cutCache = new Map<string, number[]>();
+    const cutsFor = (fx: FxItem) => {
+      const idx = cutTracks(fx, ctx.tracks);
+      const key = idx.join(',');
+      let pts = cutCache.get(key);
+      if (!pts) cutCache.set(key, (pts = cutPoints(ctx.clips, idx)));
+      return pts;
+    };
     const runFx = (lv: number) => {
       const list = (fxByLevel.get(lv) ?? []).sort((a, b) => a.track - b.track || a.start - b.start);
       for (const fx of list) {
-        const m = ctx.modules.get(fx.moduleId);
-        const g = m ? this.moduleProg(m) : null;
-        if (g) cur = this.applyFx(cur, fx, g, t);
+        // 觸發：特效內時間從最近一次觸發開始算
+        const pts = fx.trigger ? (fx.trigger.kind === 'cut' ? cutsFor(fx) : triggerBeats(fx.trigger.every)) : null;
+        const w = pts ? triggerWindow(pts, fx.start, fx.start + fx.duration, t) : { t0: fx.start, d: fx.duration };
+        // 主特效 + 疊加的特效，依序套用
+        for (const f of [fx, ...(fx.stack ?? []).filter((x) => x.enabled !== false)]) {
+          const m = ctx.modules.get(f.moduleId);
+          const g = m ? this.moduleProg(m) : null;
+          if (g) cur = this.applyFx(cur, f, g, t, t - w.t0, w.d);
+        }
       }
     };
 
@@ -1203,18 +1220,35 @@ export const setRenderer = (r: Renderer | null) => (instance = r);
 export const getRenderer = () => instance;
 
 const ctxCache = { key: [] as unknown[], ctx: null as RenderCtx | null };
+/**
+ * 轉場方塊：方塊範圍內、選定影片軌上的每個剪接點（前面緊貼著片段），片段自己沒有進場轉場的，套上方塊的轉場。
+ * clips 要是同一條軌道、排序過；回傳新的陣列（有改的片段是複製的，store 裡的不動）
+ */
+export function applyTransitionBlocks(clips: Clip[], track: number, blocks: FxItem[], tracks: Tracks): Clip[] {
+  const mine = blocks.filter((b) => !tracks.fx[b.track]?.hidden && cutTracks(b, tracks).includes(track));
+  if (!mine.length) return clips;
+  return clips.map((c, i) => {
+    if (i === 0 || c.transitionIn || !adjacent(clips[i - 1], c)) return c;
+    const b = mine.find((x) => c.start >= x.start - ADJ_EPS && c.start <= x.start + x.duration + ADJ_EPS);
+    return b ? { ...c, transitionIn: { moduleId: b.moduleId, params: b.params, duration: b.trDur ?? 0.4 } } : c;
+  });
+}
+
 export function makeCtx(s: { clips: Clip[]; effects: FxItem[]; modules: Module[]; media: Media[]; tracks: Tracks; audios?: AudioClip[] }): RenderCtx {
   const key = [s.clips, s.effects, s.modules, s.media, s.tracks, s.audios];
   if (ctxCache.ctx && key.every((k, i) => k === ctxCache.key[i])) return ctxCache.ctx;
   ctxCache.key = key;
-  const videoTracks = s.tracks.video.map((_, i) => sortClips(s.clips.filter((c) => c.track === i)));
+  const modules = new Map(s.modules.map((m) => [m.id, m]));
+  // 轉場方塊（特效軌上的轉場）：不當特效渲染，而是套到範圍內每個剪接點上
+  const blocks = s.effects.filter((e) => modules.get(e.moduleId)?.kind === 'transition');
+  const videoTracks = s.tracks.video.map((_, i) => applyTransitionBlocks(sortClips(s.clips.filter((c) => c.track === i)), i, blocks, s.tracks));
   ctxCache.ctx = {
     clips: s.clips,
     audios: s.audios ?? [],
     videoTracks,
-    effects: s.effects,
+    effects: blocks.length ? s.effects.filter((e) => !blocks.includes(e)) : s.effects,
     tracks: s.tracks,
-    modules: new Map(s.modules.map((m) => [m.id, m])),
+    modules,
     media: new Map(s.media.map((m) => [m.id, m])),
     linked: new Set((s.audios ?? []).map((a) => a.link).filter((x): x is string => !!x)),
   };

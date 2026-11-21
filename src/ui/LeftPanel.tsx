@@ -1,6 +1,7 @@
 import { $t, displayName } from '../i18n';
 import { AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2 } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { cutTracks, type FxTrigger } from '../engine/trigger';
 import { attachedAudioIds, keyOf, uid, type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
 import type { Module } from '../modules/builtin';
 import { CATEGORIES, categoryOf } from '../modules/categories';
@@ -9,18 +10,20 @@ import { applyMediaBatch, planMediaBatch } from '../engine/mediaBatch';
 import { nextStart } from '../engine/overlap';
 import { FONTS, TEXT_PRESETS, DEFAULT_TEXT, MAX_STROKES, defaultShadow, newStroke, renderText, shadowOf, type Shadow, type Stroke, type TextStyle } from '../engine/text';
 import { PaintEdit } from './PaintEdit';
+import { clipGroupMenu, clipPropMenu, clipTitleMenu, fxParamMenu, fxTitleMenu, trPropMenu, type FxOwner } from './applyAll';
+import { copyTransition, hasTransitionClipboard, pasteTransition } from './trSelect';
 import { DEFAULT_MASK, type Mask } from '../engine/mask';
 import { CLIP_MASK_ID } from '../modules/extra';
 import { mediaBeats } from '../engine/beats';
 import { shapeName } from '../engine/maskShapes';
-import type { Bez, Keyframe } from '../engine/keyframes';
-import { isNumeric, parseDuration, parseParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
+import type { AnimProp, Bez, Keyframe } from '../engine/keyframes';
+import { isNumeric, paramAt, parseDuration, parseParams, parsePointCh, resolveParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
 import { CurveEdit } from './CurveEdit';
 import { updateText } from '../engine/textAnchor';
 import { computeFrame, transitionWindow, sortClips, makeCtx } from '../engine/renderer';
 import { DEFAULT_TRANSFORM, FITS, type Fit } from '../engine/transform';
 import { plainSpeed } from '../engine/remap';
-import { stillDur, usePrefs, type UserTextStyle } from '../prefs';
+import { COMBO_PREFIX, fxCombo, stillDur, usePrefs, type FxCombo, type UserTextStyle } from '../prefs';
 import { useFavList, useFavorites } from './favorites';
 import { applyToAllCaptions, type CaptionPart } from '../engine/subtitles';
 import { tc } from '../engine/rulerTicks';
@@ -48,7 +51,7 @@ import { newModule, openModuleEditor } from './CodePanel';
 import { FavButton, LibFilter, LibToolbar, byFavOrder, favSortOpts, match, onBlank, openPicker } from './Library';
 import { MaskLibrary, ShapeThumb, addClipMask, ensureClipBaseMask, setMaskShape } from './MaskPanel';
 import { openShapeDrawer } from './ShapeDrawer';
-import { EffectControls, curveChannel, focusSection, cfxCh, clipChannels, clipHost, fxChannels, fxHost, maskChannels, type Channel, type Section } from './EffectControls';
+import { EffectControls, curveChannel, focusSection, cfxCh, clipChannels, clipHost, fxChannels, fxHost, maskChannels, updateStackFx, type Channel, type Section } from './EffectControls';
 
 // ───────────────────────── 素材 ─────────────────────────
 
@@ -274,6 +277,11 @@ export function TextPanel() {
     ]);
   };
   const empty = cat === 'user' && !userStyles.length ? $t('還沒有我的樣式') : $t('沒有符合的樣式');
+  const previewing = usePreviewFx((s) => s.text?.preset);
+  const togglePreview = (id: string, name: string) => {
+    useStore.getState().setPlaying(false);
+    usePreviewFx.setState({ fx: null, text: previewing === id ? null : { preset: id, name, t0: performance.now() } });
+  };
   return (
     <div className="lib" onContextMenu={(e) => e.preventDefault()}>
       <LibToolbar id="text" query={q} setQuery={setQ} filter={{ active: cat !== 'all', reset: () => setCat('all') }}>
@@ -289,20 +297,21 @@ export function TextPanel() {
         cur={cat}
         set={(v) => setCat(v as typeof cat)}
       />
-      <div className="lib-body" onDoubleClick={onBlank(() => add('title'))}>
+      <div className="lib-body" onClick={onBlank(stopPreviewFx)} onDoubleClick={onBlank(() => add('title'))}>
         {!items.length && <p className="muted small center">{empty}</p>}
         <div className={view === 'grid' ? 'lib-grid mods' : 'lib-list'}>
           {items.map((it) => (
             <div
               key={it.id}
-              className="lib-item mod mk-text"
+              className={`lib-item mod mk-text ${previewing === it.id ? 'previewing' : ''}`}
               onPointerDown={(e) => startLibraryDrag(e, { kind: 'text', preset: it.id }, it.name)}
+              onClick={() => togglePreview(it.id, it.name)}
               onContextMenu={(e) => itemMenu(e, it.user)}
               title={it.name}
             >
               <TextThumb style={it.style} />
               <div className="lib-meta">
-                <div className="lib-name">{it.name}</div>
+                <div className="lib-name">{previewing === it.id && <Play size={10} fill="currentColor" />} {it.name}</div>
                 {view === 'list' && it.user && <div className="lib-sub">{$t('我的樣式')}</div>}
               </div>
             </div>
@@ -378,6 +387,10 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
   const inCat = (m: Module, c: string) => c === 'all' || (c === 'fav' ? favSet.has(m.id) : categoryOf(m) === c);
   const filtered = ofKind.filter((m) => match(m.name, q) && inCat(m, cat));
   const modules = cat === 'fav' ? byFavOrder(filtered, (m) => m.id, favorites) : filtered;
+  // 我的組合（只有特效分頁；挑選視窗不顯示）
+  const allCombos = usePrefs((s) => s.fxCombos);
+  const combos = kind === 'effect' && !onPick ? allCombos : [];
+  const comboList = cat === 'all' || cat === 'combo' ? combos.filter((c) => match(c.name, q)) : [];
   // 我的最愛：拖曳調整順序（挑選視窗、搜尋中不行）
   const gridRef = useRef<HTMLDivElement>(null);
   const sortable = cat === 'fav' && !q.trim() && !onPick;
@@ -387,16 +400,18 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
   const cats = [
     { id: 'all', label: $t('全部') },
     { id: 'fav', label: $t('我的最愛') },
+    ...(combos.length ? [{ id: 'combo', label: $t('我的組合') }] : []),
     ...CATEGORIES[kind],
     { id: 'custom', label: $t('自訂') },
-  ].filter((c) => c.id === 'all' || c.id === 'fav' || ofKind.some((m) => inCat(m, c.id)));
+  ].filter((c) => c.id === 'all' || c.id === 'fav' || c.id === 'combo' || ofKind.some((m) => inCat(m, c.id)));
 
   const apply = (id: string) => {
     const s = useStore.getState();
     stopPreviewFx();
     if (kind === 'effect') {
       const m = s.modules.find((x) => x.id === id);
-      s.addEffect(id, s.time, s.trackForInsert('fx', s.time, m ? parseDuration(m.code, 0.5) : 0.5));
+      const dur = fxCombo(id)?.fx.duration ?? (m ? parseDuration(m.code, 0.5) : 0.5);
+      s.addEffect(id, s.time, s.trackForInsert('fx', s.time, dur));
       return revealSelection();
     }
     let clipId = s.selection?.type === 'clip' ? s.selection.id : s.selection?.type === 'transition' ? parseTrSel(s.selection.id).clipId : null;
@@ -414,7 +429,7 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
 
   const togglePreview = (id: string) => {
     useStore.getState().setPlaying(false);
-    usePreviewFx.setState({ fx: previewing === id ? null : { moduleId: id, t0: performance.now() } });
+    usePreviewFx.setState({ fx: previewing === id ? null : { moduleId: id, t0: performance.now() }, text: null });
   };
 
   const itemMenu = (e: React.MouseEvent, m: Module) => {
@@ -463,6 +478,32 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
     ]);
   };
 
+  const comboMenu = (e: React.MouseEvent, c: FxCombo) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const P = usePrefs.getState();
+    const ids = (() => {
+      const st = useStore.getState();
+      const l = st.selected.filter((k) => k.startsWith('clip:')).map((k) => k.slice(5));
+      if (!l.length && st.selection?.type === 'clip') l.push(st.selection.id);
+      return l;
+    })();
+    openMenu(e.clientX, e.clientY, [
+      { label: $t('在播放頭加入'), action: () => apply(c.id) },
+      { label: $t('選取片段的片段特效'), action: ids.length ? () => ids.forEach((cid) => useStore.getState().addClipFx(cid, c.id)) : undefined },
+      { label: $t('在預覽中試看'), action: () => togglePreview(c.id) },
+      { separator: true },
+      {
+        label: $t('重新命名…'),
+        action: async () => {
+          const n = await promptDialog({ title: $t('重新命名組合'), value: c.name });
+          if (n?.trim()) P.set({ fxCombos: usePrefs.getState().fxCombos.map((x) => (x.id === c.id ? { ...x, name: n.trim() } : x)) });
+        },
+      },
+      { label: $t('刪除組合'), danger: true, action: () => P.set({ fxCombos: usePrefs.getState().fxCombos.filter((x) => x.id !== c.id) }) },
+    ]);
+  };
+
   const bgMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     const L = useLayout.getState();
@@ -479,12 +520,32 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
       <LibToolbar id={kind} query={q} setQuery={setQ} filter={{ active: cat !== 'all', reset: () => setCat('all') }}>
         <button className="lib-add" title={$t('新增自訂模組')} onClick={() => newModule(kind)}><Plus size={15} /></button>
       </LibToolbar>
-      <LibFilter id={kind} cats={cats.map((c) => ({ ...c, count: ofKind.filter((m) => inCat(m, c.id)).length }))} cur={cat} set={setCat} />
+      <LibFilter id={kind} cats={cats.map((c) => ({ ...c, count: c.id === 'combo' ? combos.length : ofKind.filter((m) => inCat(m, c.id)).length + (c.id === 'all' ? combos.length : 0) }))} cur={cat} set={setCat} />
       <div className="lib-body" onClick={onBlank(onPick ? undefined : stopPreviewFx)} onDoubleClick={onBlank(onPick ? undefined : () => newModule(kind))}>
-        {modules.length === 0 && (
+        {modules.length === 0 && comboList.length === 0 && (
           <p className="muted small center">{cat === 'fav' ? $t('還沒有我的最愛') : cat === 'custom' ? $t('還沒有自訂模組') : $t('沒有符合的模組')}</p>
         )}
         <div ref={gridRef} className={view === 'grid' ? 'lib-grid mods' : 'lib-list'}>
+          {comboList.map((c) => {
+            const m = all.find((x) => x.id === c.fx.moduleId);
+            return (
+              <div
+                key={c.id}
+                className={`lib-item mod mk-effect combo ${previewing === c.id ? 'previewing' : ''}`}
+                onPointerDown={(e) => startLibraryDrag(e, { kind: 'module', id: c.id, moduleKind: 'effect' }, c.name)}
+                onClick={() => togglePreview(c.id)}
+                onContextMenu={(e) => comboMenu(e, c)}
+                title={c.name}
+              >
+                {m ? <ModuleThumb m={m} /> : <div className="lib-thumb mod" />}
+                {!!c.fx.stack?.length && <span className="combo-count">+{c.fx.stack.length}</span>}
+                <div className="lib-meta">
+                  <div className="lib-name">{previewing === c.id && <Play size={10} fill="currentColor" />} {c.name}</div>
+                  {view === 'list' && <div className="lib-sub">{$t('我的組合')}</div>}
+                </div>
+              </div>
+            );
+          })}
           {modules.map((m) => (
             <div
               key={m.id}
@@ -552,6 +613,8 @@ useStore.subscribe((s, p) => {
 
 export function InspectorPanel() {
   const sel = useStore((s) => s.selection);
+  const source = useSource((s) => (s.open && s.inspect ? s.mediaId : null));
+  if (source) return <div className="inspector-panel"><MediaInspector id={source} /></div>;
   return (
     <div className="inspector-panel">
       {!sel && <div className="empty">{$t('在時間軸上選取片段、轉場或特效')}</div>}
@@ -625,27 +688,31 @@ function ColorParamWidget({ value, onChange, onSample }: { value: string; onChan
 }
 
 /** point 參數（不打 key 的，例如轉場）：X / Y 兩個欄位，像素顯示 */
-function PointWidget({ v, def, onChange }: { v: number[]; def: number[]; onChange: (v: number[]) => void }) {
+function PointWidget({ v, def, onChange, menu }: { v: number[]; def: number[]; onChange: (v: number[]) => void; menu?: MenuItem[] }) {
   const fmt = useStore((s) => s.format);
   return (
     <div className="point-row">
       {[0, 1].map((a) => (
-        <DragNumber key={a} variant="text" value={v[a]} step={0.001} display={a ? fmt.h : fmt.w} suffix=" px" def={def[a]} onChange={(x) => onChange(a ? [v[0], x] : [x, v[1]])} />
+        <DragNumber key={a} variant="text" value={v[a]} step={0.001} display={a ? fmt.h : fmt.w} suffix=" px" def={def[a]} menu={menu} onChange={(x) => onChange(a ? [v[0], x] : [x, v[1]])} />
       ))}
     </div>
   );
 }
 
-function ParamWidget({ d, v, onChange, sampleColor }: { d: ParamDef; v: ParamValue; onChange: (v: ParamValue) => void; sampleColor?: boolean }) {
-  if (d.type === 'point') return <PointWidget v={(Array.isArray(v) ? v : d.def) as number[]} def={d.def as number[]} onChange={onChange} />;
-  if (d.type === 'curve') return <CurveEdit value={(Array.isArray(v) && v.length === 4 ? v : d.def) as Bez} onChange={onChange} />;
+function ParamWidget({ d, v, onChange, sampleColor, menu }: { d: ParamDef; v: ParamValue; onChange: (v: ParamValue) => void; sampleColor?: boolean; menu?: MenuItem[] }) {
+  if (d.type === 'point') return <PointWidget v={(Array.isArray(v) ? v : d.def) as number[]} def={d.def as number[]} onChange={onChange} menu={menu} />;
+  if (d.type === 'curve') return <CurveEdit value={(Array.isArray(v) && v.length === 4 ? v : d.def) as Bez} onChange={onChange} none={d.none} />;
   if (d.type === 'bool') return <label className="switch"><input type="checkbox" checked={Boolean(v)} onChange={(e) => onChange(e.target.checked)} /><span /></label>;
   if (d.type === 'color') return <ColorParamWidget value={String(v)} onChange={onChange} onSample={sampleColor ? onChange : undefined} />;
-  return <DragNumber variant="text" value={Number(v)} step={d.type === 'int' ? 1 : undefined} min={d.min} max={d.max} decimals={d.type === 'int' ? 0 : undefined} def={Number(d.def)} onChange={(x) => onChange(d.type === 'int' ? Math.round(x) : x)} />;
+  return <DragNumber variant="text" value={Number(v)} step={d.type === 'int' ? 1 : undefined} min={d.min} max={d.max} decimals={d.type === 'int' ? 0 : undefined} def={Number(d.def)} menu={menu} onChange={(x) => onChange(d.type === 'int' ? Math.round(x) : x)} />;
 }
 
-const paramRows = (defs: ParamDef[], values: ParamValues, set: (p: ParamValues) => void, sampleColor = false) =>
-  defs.map((d) => ({ label: $t(d.label), node: <ParamWidget d={d} v={values[d.name] ?? d.def} onChange={(v) => set({ ...values, [d.name]: v })} sampleColor={sampleColor && d.name === 'key'} /> }));
+/** menuOf：這個參數的右鍵選單多加的項目（例如「套用到同軌」），名稱和數值欄位都可以右鍵 */
+const paramRows = (defs: ParamDef[], values: ParamValues, set: (p: ParamValues) => void, sampleColor = false, menuOf?: (d: ParamDef) => MenuItem[]) =>
+  defs.map((d) => {
+    const menu = menuOf?.(d);
+    return { label: $t(d.label), menu, node: <ParamWidget d={d} v={values[d.name] ?? d.def} onChange={(v) => set({ ...values, [d.name]: v })} sampleColor={sampleColor && d.name === 'key'} menu={menu} /> };
+  });
 
 
 /**
@@ -835,7 +902,9 @@ function ClipInspector({ id }: { id: string }) {
   const { updateClip } = useStore.getState();
   const host = clipHost(clip.id)!;
   const local = Math.min(clip.duration, Math.max(0, time - clip.start));
-  const chs = clipChannels(clip, local);
+  const nowLocal = () => Math.min(clip.duration, Math.max(0, useStore.getState().time - clip.start));
+  // 數值欄右鍵「套用到同軌」（等比例縮放時 X / Y 一起）
+  const chs = clipChannels(clip, local).map((c) => ({ ...c, menu: clipPropMenu(clip.id, [c.id, ...(c.partner ? [c.partner.id] : [])] as AnimProp[], nowLocal) }));
   const isText = !!clip.text;
   const isVideo = !isText && media?.kind === 'video';
 
@@ -863,6 +932,7 @@ function ClipInspector({ id }: { id: string }) {
     {
       id: 'motion',
       title: $t('運動'),
+      menu: () => clipGroupMenu(clip.id, 'motion'),
       channels: chs.filter((c) => c.id !== 'opacity'),
       // 等比例縮放開關（鎖上：改縮放 X / Y 其中一個，另一個依比例跟著變；縮放可以是負數 = 翻轉）
       actions: (
@@ -883,6 +953,7 @@ function ClipInspector({ id }: { id: string }) {
     {
       id: 'opacity',
       title: $t('不透明度'),
+      menu: () => clipGroupMenu(clip.id, 'opacity'),
       channels: chs.filter((c) => c.id === 'opacity'),
       rows: [
         {
@@ -905,6 +976,7 @@ function ClipInspector({ id }: { id: string }) {
     {
       id: 'frame',
       title: $t('畫面'),
+      menu: () => clipGroupMenu(clip.id, 'frame'),
       rows: [
         {
           label: $t('填滿模式'),
@@ -1005,6 +1077,7 @@ function ClipInspector({ id }: { id: string }) {
       host={host}
       sections={sections}
       extra={<AddClipFx clipId={clip.id} />}
+      titleMenu={() => clipTitleMenu(clip.id)}
       title={
         <Title
           kind={isText ? 'k-text' : 'k-clip'}
@@ -1100,7 +1173,7 @@ function effectSections(
   mod: Module | undefined,
   local: number,
   update: (p: Partial<FxLike>) => void,
-  o: { idBase: string; /** 從 store 拿最新的（挑選視窗開著時資料會變） */ fresh: () => FxLike | undefined; maskKey?: string; drawKey?: string; ch?: (id: string) => string; compact?: boolean; title?: string; actions?: React.ReactNode; badge?: React.ReactNode; dim?: boolean; onFork?: (id: string) => void; sampleColor?: boolean },
+  o: { idBase: string; /** 從 store 拿最新的（挑選視窗開著時資料會變） */ fresh: () => FxLike | undefined; maskKey?: string; drawKey?: string; ch?: (id: string) => string; compact?: boolean; /** 這個特效是誰（右鍵「套用到相同特效」用） */ owner?: FxOwner; title?: string; actions?: React.ReactNode; badge?: React.ReactNode; dim?: boolean; onFork?: (id: string) => void; sampleColor?: boolean },
 ): Section[] {
   const ch = o.ch ?? ((x: string) => x);
   const mapCh = (l: Channel[]) => l.map((c) => ({ ...c, id: ch(c.id) }));
@@ -1108,6 +1181,17 @@ function effectSections(
   const other = defs.filter((d) => d.type === 'bool' || d.type === 'color' || d.type === 'curve');
   const name = o.title ?? (mod ? displayName(mod.name) : $t('特效'));
   const { rows: maskRows, chs: maskChs, reset: resetMask } = maskBlock(f, local, update, { fresh: o.fresh, editKey: o.maskKey, drawKey: o.drawKey, ch });
+  // 右鍵「套用到相同特效」：套用播放頭位置的值（point 參數兩軸一起）
+  const owner = o.owner;
+  const menuFor = (paramName: string) => {
+    const d = defs.find((x) => x.name === paramName);
+    if (!owner || !d) return undefined;
+    return fxParamMenu(owner, d.name, () => {
+      const cur = o.fresh() ?? f;
+      return paramAt(d, resolveParams(defs, cur.params), cur.keys, local);
+    });
+  };
+  const withMenu = (l: Channel[]) => l.map((c) => ({ ...c, menu: menuFor(parsePointCh(c.id)?.name ?? c.id) }));
 
   const sections: Section[] = [
     {
@@ -1116,10 +1200,15 @@ function effectSections(
       badge: o.badge,
       actions: o.actions,
       dim: o.dim,
-      rows: [...paramRows(other, f.params, (p) => update({ params: p }), o.sampleColor), ...(o.compact ? maskRows : [])],
-      channels: [...(mod ? mapCh(fxChannels(f as FxItem, mod.code, local)) : []), ...(o.compact ? maskChs : [])],
+      menu: owner ? () => fxTitleMenu(owner) : undefined,
+      rows: [...paramRows(other, f.params, (p) => update({ params: p }), o.sampleColor, (d) => menuFor(d.name) ?? []), ...(o.compact ? maskRows : [])],
+      channels: [...(mod ? mapCh(withMenu(fxChannels(f as FxItem, mod.code, local))) : []), ...(o.compact ? maskChs : [])],
       onReset: () => update({ params: {}, keys: {}, ...(o.compact ? { mask: undefined } : {}) }),
-      footer: mod && <ModuleCode module={mod} onFork={(nid) => (o.onFork ?? ((x: string) => update({ moduleId: x })))(nid)} />,
+      footer: (
+        <>
+          {mod && <ModuleCode module={mod} onFork={(nid) => (o.onFork ?? ((x: string) => update({ moduleId: x })))(nid)} />}
+        </>
+      ),
     },
   ];
   if (!o.compact) {
@@ -1210,6 +1299,7 @@ function clipFxSections(clip: Clip, modules: Module[], local: number): Section[]
       drawKey: cfxMaskKey(f.id),
       ch: (c) => cfxCh(f.id, c),
       compact: true,
+      owner: { kind: 'cfx', clipId: clip.id, id: f.id },
       sampleColor: mod?.id === 'fx-chromakey',
       dim: off,
       badge: <span className="kind k-fx cfx-badge">{$t('片段特效')} {i + 1}</span>,
@@ -1254,43 +1344,190 @@ function AddClipFx({ clipId }: { clipId: string }) {
   );
 }
 
+/** 把特效方塊（主特效 + 疊加 + 觸發 + 遮罩、長度）存成「我的組合」 */
+async function saveFxCombo(fxId: string) {
+  const f = useStore.getState().effects.find((e) => e.id === fxId);
+  if (!f) return;
+  const name = await promptDialog({ title: $t('存成組合'), value: itemName('effect', f, [], useStore.getState().modules) });
+  if (!name?.trim()) return;
+  const { id: _id, start: _s, track: _t, group: _g, name: _n, ...rest } = structuredClone(f);
+  const P = usePrefs.getState();
+  P.set({ fxCombos: [...P.fxCombos, { id: COMBO_PREFIX + uid(), name: name.trim(), fx: rest }] });
+  toast($t('已存成組合'));
+}
+
+/** 特效方塊裡疊加的特效（跟片段特效一樣：開關、上下移、移除） */
+function stackSections(fx: FxItem, modules: Module[], local: number): Section[] {
+  const list = fx.stack ?? [];
+  const setList = (l: ClipFx[]) => useStore.getState().updateEffect(fx.id, { stack: l.length ? l : undefined });
+  const cur = () => useStore.getState().effects.find((e) => e.id === fx.id)?.stack ?? [];
+  const move = (sid: string, dir: -1 | 1) => {
+    const l = [...cur()];
+    const i = l.findIndex((x) => x.id === sid);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= l.length) return;
+    [l[i], l[j]] = [l[j], l[i]];
+    setList(l);
+  };
+  return list.flatMap((f, i) => {
+    const mod = modules.find((m) => m.id === f.moduleId);
+    const off = f.enabled === false;
+    return effectSections(f, mod, local, (p) => updateStackFx(fx.id, f.id, p as Partial<ClipFx>), {
+      idBase: `sfx.${f.id}`,
+      fresh: () => cur().find((x) => x.id === f.id),
+      ch: (c) => cfxCh(f.id, c),
+      compact: true,
+      dim: off,
+      badge: <span className="kind k-fx cfx-badge">{$t('疊加')} {i + 1}</span>,
+      onFork: (nid) => updateStackFx(fx.id, f.id, { moduleId: nid }),
+      actions: (
+        <>
+          <button className="ec-icon" title={off ? $t('開啟這個特效') : $t('暫時關閉這個特效')} onClick={() => updateStackFx(fx.id, f.id, { enabled: off ? undefined : false })}>
+            {off ? <EyeOff size={13} /> : <Eye size={13} />}
+          </button>
+          <button className="ec-icon" title={$t('往上移（先套用）')} disabled={i === 0} onClick={() => move(f.id, -1)}><ChevronUp size={13} /></button>
+          <button className="ec-icon" title={$t('往下移（後套用）')} disabled={i === list.length - 1} onClick={() => move(f.id, 1)}><ChevronDown size={13} /></button>
+          <button className="ec-icon danger" title={$t('移除這個特效')} onClick={() => setList(cur().filter((x) => x.id !== f.id))}><Trash2 size={13} /></button>
+        </>
+      ),
+    });
+  });
+}
+
+/** 特效方塊：「加入特效…」疊加到這個方塊上 */
+function AddStackFx({ fxId }: { fxId: string }) {
+  const add = (moduleId: string) => {
+    const f = useStore.getState().effects.find((e) => e.id === fxId);
+    if (f) useStore.getState().updateEffect(fxId, { stack: [...(f.stack ?? []), { id: uid(), moduleId, params: {} }] });
+  };
+  return (
+    <div className="ec-row add-cfx-row">
+      <div className="ec-left ec-plain">
+        <div className="btn-row cfx-add-row">
+          <button
+            className="btn small-h"
+            title={$t('從特效庫挑一個特效，疊加在這個方塊上')}
+            onClick={(e) => openPicker(e.currentTarget, $t('加入特效'), (close) => <ModuleLibrary kind="effect" onPick={(id) => { add(id); close(); }} />)}
+          >
+            <Sparkles size={12} /> {$t('加入特效…')}
+          </button>
+        </div>
+      </div>
+      <div className="ec-right ec-dim" />
+    </div>
+  );
+}
+
+/** 「每個剪接點」看哪幾條影片軌：沒設定 = 這條特效軌下面的全部 */
+function CutTrackPick({ fx }: { fx: FxItem }) {
+  const tracks = useStore((s) => s.tracks);
+  const on = cutTracks(fx, tracks);
+  const toggle = (i: number) => {
+    const next = on.includes(i) ? on.filter((x) => x !== i) : [...on, i].sort((a, b) => a - b);
+    useStore.getState().updateEffect(fx.id, { trigger: { kind: 'cut', tracks: next } });
+  };
+  return (
+    <div className="seg cut-tracks">
+      {tracks.video.map((_, i) => (
+        <button key={i} className={on.includes(i) ? 'on' : ''} title={$t('影片 {0}', i + 1)} onClick={() => toggle(i)}>{i + 1}</button>
+      ))}
+    </div>
+  );
+}
+
+/** 轉場方塊：範圍內選定影片軌的每個剪接點自動套用這個轉場（片段自己有轉場的優先） */
+function TransitionBlockInspector({ fx }: { fx: FxItem }) {
+  const mod = useStore((s) => s.modules.find((m) => m.id === fx.moduleId));
+  const { updateEffect } = useStore.getState();
+  const defs = mod ? parseParams(mod.code) : [];
+  const upd = (p: Partial<FxItem>) => updateEffect(fx.id, p);
+  return (
+    <PlainControls
+      title={<Title kind="k-tr" label={$t('轉場方塊')} name={itemName('effect', fx, [], useStore.getState().modules)} onRename={(n) => useStore.getState().renameItem('effect', fx.id, n)} />}
+      rows={[
+        ...infoRows(fx, undefined, (v) => upd({ duration: Math.max(0.05, Math.min(v, maxDurFor('effect', fx))) })),
+        { label: $t('影片軌'), node: <CutTrackPick fx={fx} /> },
+        { label: $t('轉場'), node: <ModuleSelect kind="transition" value={fx.moduleId} onChange={(m) => m && upd({ moduleId: m, params: {} })} /> },
+        { label: $t('長度'), node: <DragNumber variant="text" value={fx.trDur ?? 0.4} min={0.05} max={10} step={0.01} suffix="s" def={0.4} onChange={(v) => upd({ trDur: v })} /> },
+        ...paramRows(defs, fx.params, (p) => upd({ params: p })),
+      ]}
+      titleMenu={() => fxTitleMenu({ kind: 'fx', id: fx.id })}
+      footer={mod && <ModuleCode module={mod} onFork={(nid) => upd({ moduleId: nid })} />}
+    />
+  );
+}
+
+/** 觸發方式的選項（值 = select 的 value） */
+const TRIGGERS: { v: string; label: () => string; trigger?: FxTrigger }[] = [
+  { v: 'once', label: () => $t('整段一次') },
+  { v: 'b0.5', label: () => $t('每半拍'), trigger: { kind: 'beat', every: 0.5 } },
+  { v: 'b1', label: () => $t('每拍'), trigger: { kind: 'beat', every: 1 } },
+  { v: 'b2', label: () => $t('每 2 拍'), trigger: { kind: 'beat', every: 2 } },
+  { v: 'b4', label: () => $t('每小節'), trigger: { kind: 'beat', every: 4 } },
+  { v: 'cut', label: () => $t('每個剪接點'), trigger: { kind: 'cut' } },
+];
+const triggerValue = (t?: FxTrigger) => (!t ? 'once' : t.kind === 'cut' ? 'cut' : `b${t.every}`);
+
 function EffectInspector({ id }: { id: string }) {
   const fx = useStore((s) => s.effects.find((e) => e.id === id));
   const mod = useStore((s) => s.modules.find((m) => m.id === fx?.moduleId));
+  const modules = useStore((s) => s.modules);
   const time = useStore((s) => s.time);
   if (!fx) return null;
+  if (mod?.kind === 'transition') return <TransitionBlockInspector fx={fx} />;
   const { updateEffect } = useStore.getState();
   const host = fxHost(fx.id)!;
   const local = Math.min(fx.duration, Math.max(0, time - fx.start));
-  const sections = [
+  const owner: FxOwner = { kind: 'fx', id };
+  const sections: Section[] = [
     { id: 'info', title: $t('資訊'), rows: infoRows(fx, undefined, (v) => updateEffect(id, { duration: Math.max(0.05, Math.min(v, maxDurFor('effect', fx))) })) },
-    ...effectSections(fx, mod, local, (p) => updateEffect(id, p as Partial<FxItem>), { idBase: 'fx', drawKey: `fx:${fx.id}`, fresh: () => useStore.getState().effects.find((e) => e.id === id) }),
+    {
+      id: 'trigger',
+      title: $t('觸發'),
+      rows: [
+        {
+          label: $t('重新播放'),
+          node: (
+            <select className="select" value={triggerValue(fx.trigger)} onChange={(e) => updateEffect(id, { trigger: TRIGGERS.find((x) => x.v === e.target.value)?.trigger })}>
+              {TRIGGERS.map((x) => <option key={x.v} value={x.v}>{x.label()}</option>)}
+            </select>
+          ),
+        },
+        ...(fx.trigger?.kind === 'cut' ? [{ label: $t('影片軌'), node: <CutTrackPick fx={fx} /> }] : []),
+      ],
+      onReset: () => updateEffect(id, { trigger: undefined }),
+    },
+    ...effectSections(fx, mod, local, (p) => updateEffect(id, p as Partial<FxItem>), { idBase: 'fx', drawKey: `fx:${fx.id}`, fresh: () => useStore.getState().effects.find((e) => e.id === id), owner }),
+    ...stackSections(fx, modules, local),
   ];
   return (
     <EffectControls
       host={host}
       sections={sections}
+      extra={<AddStackFx fxId={id} />}
+      titleMenu={() => [...fxTitleMenu(owner), { separator: true }, { label: $t('存成組合…'), action: () => saveFxCombo(id) }]}
       title={<Title kind="k-fx" label={$t('特效')} name={itemName('effect', fx, [], useStore.getState().modules)} onRename={(n) => useStore.getState().renameItem('effect', fx.id, n)} />}
     />
   );
 }
 
 /** 沒有時間軸的屬性列表（轉場、音訊） */
-function PlainControls({ title, rows, footer, actions }: { title: React.ReactNode; rows: { label: string; node: React.ReactNode }[]; footer?: React.ReactNode; actions?: { title: string; node: React.ReactNode } }) {
+function PlainControls({ title, rows, footer, titleMenu }: { title: React.ReactNode; rows: { label: string; node: React.ReactNode; menu?: MenuItem[] }[]; footer?: React.ReactNode; titleMenu?: () => MenuItem[] }) {
+  const ctx = (get: MenuItem[] | (() => MenuItem[]) | undefined) => (e: React.MouseEvent) => {
+    const items = typeof get === 'function' ? get() : get;
+    if (!items?.length) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openMenu(e.clientX, e.clientY, items);
+  };
   return (
     <div className="ec plain">
-      <div className="ec-row ec-header"><div className="ec-left">{title}</div></div>
+      <div className="ec-row ec-header" onContextMenu={ctx(titleMenu)}><div className="ec-left">{title}</div></div>
       {rows.map((r, i) => (
         <div key={r.label + i} className="ec-row">
-          <div className="ec-left ec-plain"><span className="ec-label">{r.label}</span><div className="ec-node">{r.node}</div></div>
+          <div className="ec-left ec-plain" onContextMenu={ctx(r.menu)}><span className="ec-label">{r.label}</span><div className="ec-node">{r.node}</div></div>
         </div>
       ))}
-      {actions && (
-        <>
-          <div className="ec-row ec-section plain-actions-head"><div className="ec-left"><span className="ec-sec-title">{actions.title}</span></div></div>
-          <div className="ec-footer">{actions.node}</div>
-        </>
-      )}
       {footer && <div className="ec-footer">{footer}</div>}
     </div>
   );
@@ -1333,20 +1570,24 @@ function TransitionInspector({ selId }: { selId: string }) {
         title={<><Title kind="k-tr" label={side === 'out' ? $t('轉出') : $t('轉場')} name={mod ? displayName(mod.name) : ''} /><button className="link danger" onClick={() => setTransition(clipId, null, side)}>{$t('移除')}</button></>}
         rows={[
           { label: $t('轉場'), node: <ModuleSelect kind="transition" value={tr.moduleId} onChange={(m) => setTransition(clipId, m, side)} /> },
-          { label: $t('長度'), node: <DragNumber variant="text" value={Math.min(tr.duration, maxD)} min={0.05} max={maxD} step={0.01} suffix="s" def={0.4} onChange={(v) => upd({ duration: v })} /> },
-          ...paramRows(defs, tr.params, (p) => upd({ params: p })),
+          { label: $t('長度'), menu: trPropMenu(clipId, side, 'duration'), node: <DragNumber variant="text" value={Math.min(tr.duration, maxD)} min={0.05} max={maxD} step={0.01} suffix="s" def={0.4} menu={trPropMenu(clipId, side, 'duration')} onChange={(v) => upd({ duration: v })} /> },
+          ...paramRows(defs, tr.params, (p) => upd({ params: p }), false, (d) => trPropMenu(clipId, side, { param: d.name })),
         ]}
-        actions={{
-          title: $t('套用到同軌'),
-          node: (
-            <div className="tr-apply">
-              <button className="btn" onClick={() => apply('cuts')} title={$t('套用到這條軌道的所有剪接點')}>{$t('剪接點')}</button>
-              <button className="btn" onClick={() => apply('heads')} title={$t('套用到這條軌道所有片段的開頭（從透明轉入）')}>{$t('開頭')}</button>
-              <button className="btn" onClick={() => apply('tails')} title={$t('套用到這條軌道所有片段的結尾（轉到透明）')}>{$t('結尾')}</button>
-              <button className="btn" onClick={syncAll} title={$t('這條軌道上已經有的轉場，全部改成跟這個一樣（種類、參數、長度）')}>{$t('同步現有')}</button>
-            </div>
-          ),
-        }}
+        titleMenu={() => [
+          { label: $t('複製轉場'), action: () => copyTransition(selId) },
+          { label: $t('貼上轉場'), action: hasTransitionClipboard() ? () => pasteTransition() : undefined },
+          { separator: true },
+          {
+            label: $t('套用到同軌'),
+            submenu: [
+              { label: $t('剪接點'), action: () => apply('cuts') },
+              { label: $t('開頭'), action: () => apply('heads') },
+              { label: $t('結尾'), action: () => apply('tails') },
+              { separator: true },
+              { label: $t('同步現有'), action: syncAll },
+            ],
+          },
+        ]}
         footer={mod && <ModuleCode module={mod} onFork={(nid) => upd({ moduleId: nid })} />}
       />
     </>
@@ -1377,6 +1618,29 @@ function AudioInspector({ id }: { id: string }) {
               { label: $t('節拍格線'), node: <Switch v={a.beats !== false} on={(v) => updateAudio(id, { beats: v ? undefined : false })} /> },
               ...(a.beats !== false && bpm ? [{ label: 'BPM', node: <span className="muted">{bpm.toFixed(1)}</span> }] : []),
             ]),
+      ]}
+    />
+  );
+}
+
+/** 素材庫點開的素材：檔案資訊 + 素材預覽的入點 / 出點 */
+function MediaInspector({ id }: { id: string }) {
+  const m = useStore((s) => s.media.find((x) => x.id === id));
+  const uses = useStore((s) => s.clips.filter((c) => c.mediaId === id).length + s.audios.filter((a) => a.mediaId === id).length);
+  if (!m) return null;
+  const val = (v: React.ReactNode) => <span className="info-val">{v}</span>;
+  const bpm = m.kind === 'audio' ? mediaBeats(m)?.bpm : undefined;
+  const timed = m.kind !== 'image';
+  return (
+    <PlainControls
+      title={<Title kind="k-media" label={$t('素材')} name={m.name} />}
+      rows={[
+        { label: $t('類型'), node: val(KIND_LABEL[m.kind]) },
+        ...(m.kind !== 'audio' && m.width && m.height ? [{ label: $t('解析度'), node: val(`${m.width}×${m.height}`) }] : []),
+        ...(timed ? [{ label: $t('長度'), node: val(`${m.duration.toFixed(2)}s`) }] : []),
+        ...(m.kind === 'video' ? [{ label: $t('聲音'), node: val(m.hasAudio ? $t('有') : $t('無')) }] : []),
+        ...(bpm ? [{ label: 'BPM', node: val(bpm.toFixed(1)) }] : []),
+        { label: $t('使用次數'), node: val(uses) },
       ]}
     />
   );

@@ -45,3 +45,14 @@ for (const m of BUILTIN_MODULES) {
 const so = parseParams(BUILTIN_MODULES.find((m) => m.id === 'tr-scaleout')!.code);
 assert.ok(so.some((d) => d.type === 'point') && so.some((d) => d.type === 'curve') && so.some((d) => d.box === 'center'));
 console.log('PASS 內建模組使用 point / curve');
+
+// curve 的「無」：@none(值) → 整段固定是這個值
+import { bezierY } from '../src/engine/keyframes';
+const none = parseParams('// @param fadeIn: curve = 0.3,1,0,1 "淡入" @none(1)\n// @param ease: curve = inOut "曲線"');
+assert.equal(none[0].none, 1);
+assert.equal(none[1].none, undefined, '沒寫 @none 就沒有');
+assert.equal(bezierY([-1, 1, 0, 0], 0), 1);
+assert.equal(bezierY([-1, 0, 0, 0], 0.7), 0);
+const si = parseParams(BUILTIN_MODULES.find((m) => m.id === 'tr-scalein')!.code);
+assert.equal(si.find((d) => d.name === 'fadeIn')?.none, 1, '縮放推入的淡入可以選「無」');
+console.log('PASS curve 的「無」');

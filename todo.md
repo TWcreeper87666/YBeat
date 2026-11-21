@@ -53,3 +53,4 @@
 - [x] round value like property
 - [x] multiselect items across track types, resize matching edges together
 - [x] preview tab, volume slider
+- [ ] add track top vs down

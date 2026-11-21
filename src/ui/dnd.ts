@@ -1,13 +1,15 @@
+import { FPS } from '../engine/rulerTicks';
+import { stopLibraryPreview } from './SourcePanel';
 import { $t, displayName } from '../i18n';
 import type React from 'react';
-import { attachedAudioIds, useStore, mediaUsable, parseKey, spansOf, type Clip, type PlacementGhost, type TimelineDropMode, type TrackKind } from '../store';
+import { TR_BLOCK_DUR, attachedAudioIds, keyOf, useStore, mediaUsable, parseKey, spansOf, type Clip, type FxItem, type PlacementGhost, type TimelineDropMode, type TrackKind } from '../store';
 import { beginHistoryTransaction, endHistoryTransaction } from '../engine/history';
 import { showPendingPlacement } from './Timeline';
 import { parseDuration } from '../engine/params';
 import { addMediaBlob, colorMedia } from '../engine/media';
 import { fitInGap, fitStart } from '../engine/overlap';
 import { laneSnapPoints } from '../engine/snap';
-import { stillDur, userTextStyle } from '../prefs';
+import { fxCombo, stillDur, userTextStyle } from '../prefs';
 import { applyMediaBatch, planMediaBatch } from '../engine/mediaBatch';
 import { TEXT_PRESETS } from '../engine/text';
 import { moveKey } from './sortKeys';
@@ -39,8 +41,15 @@ function laneDuration(payload: DragPayload): { dur: number; label: string; accep
     return { dur, label: $t('{0} 個素材', items.length), accepts: (k) => items.some((m) => (m.kind === 'audio' ? 'audio' : 'video') === k) };
   }
   if (payload.kind === 'module' && payload.moduleKind === 'effect') {
+    const combo = fxCombo(payload.id);
+    if (combo) return { dur: combo.fx.duration, label: combo.name, accepts: (k) => k === 'fx' };
     const m = s.modules.find((x) => x.id === payload.id);
     return { dur: m ? parseDuration(m.code, 0.5) : 0.5, label: m ? displayName(m.name) : '', accepts: (k) => k === 'fx' };
+  }
+  // 轉場拖到特效軌 = 轉場方塊
+  if (payload.kind === 'module' && payload.moduleKind === 'transition') {
+    const m = s.modules.find((x) => x.id === payload.id);
+    return { dur: TR_BLOCK_DUR, label: m ? displayName(m.name) : '', accepts: (k) => k === 'fx' };
   }
   if (payload.kind === 'color') return { dur: stillDur(), label: payload.color, accepts: (k) => k === 'video' };
   if (payload.kind === 'text') {
@@ -53,7 +62,7 @@ function laneDuration(payload: DragPayload): { dur: number; label: string; accep
 
 /** 這個拖曳內容可以放在哪種軌道（給時間軸顯示可放 / 不可放） */
 export function laneAccepts(payload: DragPayload, kind: TrackKind): boolean {
-  if (payload.kind === 'module' && payload.moduleKind !== 'effect') return false;
+  if (payload.kind === 'module' && payload.moduleKind === 'remap') return false;
   return laneDuration(payload)?.accepts(kind) ?? false;
 }
 
@@ -93,17 +102,38 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
     return t;
   }
 
-  // 特效拖到時間軸上的特效片段 → 取代
-  if (payload.kind === 'module' && payload.moduleKind === 'effect') {
+  // 特效拖到時間軸上的特效方塊：按住 Alt 才直接取代，否則跟素材一樣放在軌道上（重疊時再選覆蓋 / 插入…）
+  const fxUnder = (() => {
     const fxEl = els.find((e) => e.dataset.key?.startsWith('effect:'));
-    const fx = fxEl ? s.effects.find((f) => f.id === fxEl.dataset.key!.slice(7)) : undefined;
-    if (fx) return { kind: 'effect', fxId: fx.id };
+    return fxEl ? s.effects.find((f) => f.id === fxEl.dataset.key!.slice(7)) : undefined;
+  })();
+  const isTrBlock = (f: FxItem | undefined) => !!f && s.modules.find((m) => m.id === f.moduleId)?.kind === 'transition';
+  if (payload.kind === 'module' && payload.moduleKind === 'effect') {
+    const fx = fxUnder;
+    if (fx && alt && !isTrBlock(fx)) return { kind: 'effect', fxId: fx.id };
+    if (fx) return laneTarget();
     // 拖到影片 / 文字片段上：變成這個片段的片段特效
     if (clip) return { kind: 'clip', clipId: clip.id, action: 'effect', valid: true };
   }
 
+  // 轉場拖到特效軌上的轉場方塊：按住 Alt 才換掉方塊的轉場
+  if (payload.kind === 'module' && payload.moduleKind === 'transition' && fxUnder) {
+    if (alt && isTrBlock(fxUnder)) return { kind: 'effect', fxId: fxUnder.id };
+    return laneTarget();
+  }
+
+  // 轉場拖到時間軸上已經有的轉場方塊 → 換掉那個轉場（長度保留）。
+  // 要先判斷：剪接點的轉場方塊有一半蓋在前一個片段上，不先判斷會被當成放到前一個片段
+  if (payload.kind === 'module' && payload.moduleKind === 'transition') {
+    const trEl = els.find((e) => e.dataset.tr);
+    if (trEl) {
+      const [clipId, side] = trEl.dataset.tr!.split(':');
+      if (s.clips.some((c) => c.id === clipId)) return { kind: 'clip', clipId, action: side === 'out' ? 'transitionOut' : 'transition', valid: true };
+    }
+  }
+
   // 片段上的放置：轉場 / 變速 / 重新連結遺失素材
-  if (payload.kind === 'module' && payload.moduleKind !== 'effect') {
+  if (payload.kind === 'module' && payload.moduleKind !== 'effect' && (clip || payload.moduleKind === 'remap')) {
     if (!clip) return null;
     if (payload.moduleKind === 'transition') {
       // 放在片段後段、而且後面沒有緊貼的片段 → 轉出（轉到透明）；其他 → 進場（前面沒片段就從透明轉入）
@@ -132,6 +162,9 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
     if (payload.kind === 'color' || (mediaUsable(nm) && nm.kind !== 'audio')) return { kind: 'clip', clipId: clip.id, action: 'replace', valid: !s.tracks.video[clip.track]?.locked };
   }
 
+  return laneTarget();
+
+  function laneTarget(): DropTarget {
   const laneEl = els.find((e) => e.dataset.laneKind);
   if (!laneEl) {
     useSnapLine.setState({ t: null });
@@ -145,7 +178,8 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
 
   // Ghost placement snaps to visible timeline items across every track.
   const pps = s.pps;
-  let time = Math.max(0, (x - laneEl.getBoundingClientRect().left) / pps);
+  // 時間軸最小單位是一格（1/60 秒）
+  let time = Math.max(0, Math.round(((x - laneEl.getBoundingClientRect().left) / pps) * FPS) / FPS);
   if (payload.kind === 'mediaBatch') {
     const items = planMediaBatch(payload.ids, time, { kind: lane, track: idx });
     if (!items?.length) return null;
@@ -184,10 +218,24 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
     const fit = gap >= 0.05 && gap < info.dur - 1e-4 ? { duration: gap, speed: nm?.kind === 'video' && info.dur / gap <= 8 + 1e-4 } : null;
     return { kind: 'lane', lane, idx, time, duration: info.dur, label: info.label, overlap: { fit, replaceId } };
   }
+  // 特效 / 轉場方塊：放在游標位置；跟其他方塊重疊時，放開後再選覆蓋、插入…（游標下的方塊可以取代）
+  if (payload.kind === 'module' && lane === 'fx') {
+    const lk = `${lane}:${idx}`;
+    const spans = spansOf(s).filter((o) => o.lane === lk);
+    const hits = spans.filter((o) => time < o.start + o.duration - 1e-4 && o.start < time + info.dur - 1e-4);
+    if (!hits.length) return { kind: 'lane', lane, idx, time, duration: info.dur, label: info.label };
+    const tr = payload.moduleKind === 'transition';
+    const replaceId = fxUnder && fxUnder.track === idx && isTrBlock(fxUnder) === tr ? fxUnder.id : undefined;
+    let gap = Infinity;
+    for (const o of spans) if (o.start + o.duration > time + 1e-4) gap = Math.min(gap, Math.max(0, o.start - time));
+    const fit = gap >= 0.05 && gap < info.dur - 1e-4 ? { duration: gap, speed: false } : null;
+    return { kind: 'lane', lane, idx, time, duration: info.dur, label: info.label, overlap: { fit, replaceId } };
+  }
   // 同一軌不能重疊：放到最近的空位；圖片 / 色板 / 文字放進空隙時縮短到剛好填滿
   const flexible = payload.kind === 'text';
   const fit = flexible ? fitInGap(spansOf(s), `${lane}:${idx}`, time, info.dur) : { start: fitStart(spansOf(s), `${lane}:${idx}`, time, info.dur), duration: info.dur };
   return { kind: 'lane', lane, idx, time: fit.start, duration: fit.duration, label: info.label };
+  }
 }
 
 /** 執行放置 */
@@ -211,19 +259,7 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
     return;
   }
   if (target.kind === 'effect') {
-    const fx = s.effects.find((f) => f.id === target.fxId);
-    if (!fx || payload.kind !== 'module' || fx.moduleId === payload.id) return;
-    const hasKeys = Object.entries(fx.keys ?? {}).some(([k, l]) => !k.startsWith('mask.') && l.length);
-    if (hasKeys) {
-      const ok = await confirmDialog({
-        title: $t('取代特效？'),
-        message: $t('這個特效有設定關鍵影格，換成新的特效後，參數與關鍵影格都會被清除（遮罩會保留）。'),
-        ok: $t('取代'),
-        danger: true,
-      });
-      if (!ok) return;
-    }
-    useStore.getState().replaceEffect(fx.id, payload.id);
+    if (payload.kind === 'module') await replaceFx(target.fxId, payload.id);
     return;
   }
   if (target.kind === 'clip') {
@@ -298,6 +334,25 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
     showPendingPlacement({ fit: overlap.fit, preview }, p.x, p.y, (mode) => { void choose(mode); }, replace);
     return;
   }
+  if (payload.kind === 'module' && target.overlap) {
+    const overlap = target.overlap;
+    const choose = (mode: TimelineDropMode) => {
+      beginHistoryTransaction();
+      const known = new Set(useStore.getState().effects.map((x) => x.id));
+      useStore.getState().addEffect(payload.id, target.time, target.idx);
+      const added = useStore.getState().effects.filter((x) => !known.has(x.id)).map((x) => keyOf('effect', x.id));
+      if (!added.length) return endHistoryTransaction(false);
+      useStore.getState().patchItems(Object.fromEntries(added.map((k) => [k, { start: target.time }])));
+      useStore.getState().resolveTimelineDrop(added, mode);
+      endHistoryTransaction(true);
+    };
+    const replaceId = overlap.replaceId;
+    const replace = replaceId ? () => void replaceFx(replaceId, payload.id) : undefined;
+    const preview: PlacementGhost[] = [{ type: 'effect', track: target.idx, start: target.time, duration: target.duration, label: target.label }];
+    const p = point ?? { x: innerWidth / 2, y: innerHeight / 2 };
+    showPendingPlacement({ fit: overlap.fit, preview }, p.x, p.y, choose, replace);
+    return;
+  }
   if (payload.kind === 'media') place(payload.id, target.time);
   else if (payload.kind === 'module') s.addEffect(payload.id, target.time, target.idx);
   else if (payload.kind === 'text') s.addText(payload.preset, target.time, target.idx, target.duration);
@@ -312,6 +367,23 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
       if (m) t += place(m.id, t);
     }
   }
+}
+
+/** 特效方塊換成另一個模組（有關鍵影格時先確認） */
+async function replaceFx(fxId: string, moduleId: string) {
+  const fx = useStore.getState().effects.find((f) => f.id === fxId);
+  if (!fx || fx.moduleId === moduleId) return;
+  const hasKeys = Object.entries(fx.keys ?? {}).some(([k, l]) => !k.startsWith('mask.') && l.length);
+  if (hasKeys) {
+    const ok = await confirmDialog({
+      title: $t('取代特效？'),
+      message: $t('這個特效有設定關鍵影格，換成新的特效後，參數與關鍵影格都會被清除（遮罩會保留）。'),
+      ok: $t('取代'),
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  useStore.getState().replaceEffect(fx.id, moduleId);
 }
 
 async function importMany(files: File[]) {
@@ -420,6 +492,8 @@ export function startLibraryDrag(e: React.PointerEvent, payload: DragPayload, la
     }
     if (started && d) {
       suppressClick();
+      // 拖到時間軸 / 片段上 = 已經用上了，結束試看
+      if (d.target) stopLibraryPreview();
       applyDrop(payload, d.target, undefined, { x: d.x, y: d.y });
     }
   };

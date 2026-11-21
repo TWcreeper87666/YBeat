@@ -27,7 +27,8 @@ const W = 168, H = 96, PAD = 10;
 const round = (n: number) => Math.round(n * 1000) / 1000;
 
 /** curve 參數：cubic-bezier 曲線（拖兩個把手，或選預設） */
-export function CurveEdit({ value, onChange }: { value: Bez; onChange: (v: Bez) => void }) {
+/** none：有這個值就多一個「無」選項（整段固定是這個值，例如不淡入 = 1） */
+export function CurveEdit({ value, onChange, none }: { value: Bez; onChange: (v: Bez) => void; none?: number }) {
   const ref = useRef<SVGSVGElement>(null);
   // 縱軸範圍跟著把手撐開（過衝回彈會超出 0..1）
   const lo = Math.min(0, value[1], value[3]), hi = Math.max(1, value[1], value[3]);
@@ -58,21 +59,23 @@ export function CurveEdit({ value, onChange }: { value: Bez; onChange: (v: Bez) 
     el.addEventListener('pointermove', move as EventListener);
     el.addEventListener('pointerup', up);
   };
-  const id = easeId(value);
+  const off = value[0] < 0;
+  const id = off ? 'none' : easeId(value);
   return (
     <div className="curve-edit">
       <svg ref={ref} width={W} height={H} className="curve-edit-svg" onDoubleClick={() => onChange([0.42, 0, 0.58, 1])}>
         <line className="cg-grid" x1={X(0)} x2={X(1)} y1={Y(0)} y2={Y(0)} />
         <line className="cg-grid" x1={X(0)} x2={X(1)} y1={Y(1)} y2={Y(1)} />
         <polyline className="cg-curve" points={pts.join(' ')} />
-        <g className="cg-handles">
+        {!off && <g className="cg-handles">
           <line x1={X(0)} y1={Y(0)} x2={X(value[0])} y2={Y(value[1])} />
           <line x1={X(1)} y1={Y(1)} x2={X(value[2])} y2={Y(value[3])} />
           <circle r={6} cx={X(value[0])} cy={Y(value[1])} onPointerDown={(e) => drag(e, 0)} />
           <circle r={6} cx={X(value[2])} cy={Y(value[3])} onPointerDown={(e) => drag(e, 1)} />
-        </g>
+        </g>}
       </svg>
-      <select className="select" value={id} onChange={(e) => { const p = EASE_PRESETS.find((x) => x.id === e.target.value); if (p && p.ease !== 'hold') onChange([...p.ease] as Bez); }}>
+      <select className="select" value={id} onChange={(e) => { if (e.target.value === 'none' && none !== undefined) return onChange([-1, none, 0, 0]); const p = EASE_PRESETS.find((x) => x.id === e.target.value); if (p && p.ease !== 'hold') onChange([...p.ease] as Bez); }}>
+        {none !== undefined && <option value="none">{$t('無')}</option>}
         {id === 'custom' && <option value="custom">{$t('自訂曲線')}</option>}
         {EASE_PRESETS.filter((p) => p.ease !== 'hold').map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
       </select>

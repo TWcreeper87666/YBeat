@@ -50,10 +50,14 @@ interface Layout {
   editorSplit: { stacked: number; side: number };
   /** 屬性表格左欄（名稱 + 數值）的寬度（px）：固定寬度，面板變窄時只縮右邊的關鍵影格時間軸；屬性分頁與編輯視窗共用 */
   ecLeftPx: number;
+  /** 素材庫格狀檢視的卡片寬度（px）：所有分頁共用，Ctrl+滾輪縮放 */
+  libCard: number;
+  /** 素材庫清單檢視的縮圖大小（px）：所有分頁共用；格狀縮到最小再縮 = 切成清單 */
+  libRow: number;
   set(p: Partial<Omit<Layout, 'set' | 'reset'>>): void;
   reset(): void;
 }
-const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, beatDivision: 1 as const, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], previewScale: 1, repeat: false, scrubAudio: true, beatLead: 4, wheelScroll: 'horizontal' as Layout['wheelScroll'], upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300 };
+const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, beatDivision: 1 as const, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], previewScale: 1, repeat: false, scrubAudio: true, beatLead: 4, wheelScroll: 'horizontal' as Layout['wheelScroll'], upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300, libCard: 84, libRow: 30 };
 
 export const useLayout = create<Layout>()(
   persist(
@@ -142,8 +146,12 @@ export const useDrag = create<{ drag: DragState | null }>(() => ({ drag: null })
 
 // ───────────── 素材庫點擊預覽（特效 / 轉場）─────────────
 
-export const usePreviewFx = create<{ fx: { moduleId: string; t0: number } | null }>(() => ({ fx: null }));
-export const stopPreviewFx = () => usePreviewFx.getState().fx && usePreviewFx.setState({ fx: null });
+/** 素材庫試看：fx = 特效 / 轉場 / 變速模組、text = 文字樣式（疊在目前畫面最上層循環播放）；兩者只會有一個 */
+export const usePreviewFx = create<{ fx: { moduleId: string; t0: number } | null; text: { preset: string; name: string; t0: number } | null }>(() => ({ fx: null, text: null }));
+export const stopPreviewFx = () => {
+  const s = usePreviewFx.getState();
+  if (s.fx || s.text) usePreviewFx.setState({ fx: null, text: null });
+};
 
 export const useColorPick = create<{ pick: ((hex: string) => void) | null }>(() => ({ pick: null }));
 

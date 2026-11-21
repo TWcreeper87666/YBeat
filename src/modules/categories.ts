@@ -30,6 +30,7 @@ const MAP: Record<string, string> = {
   'fx-shake': 'motion',
   'fx-entrance': 'motion',
   'fx-shakeblur': 'motion',
+  'fx-handheld': 'motion',
   'fx-motionblur': 'motion',
   'fx-zoompulse': 'motion',
   'fx-lens': 'distort',

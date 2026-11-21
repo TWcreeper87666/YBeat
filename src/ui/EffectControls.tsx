@@ -13,7 +13,7 @@ import { DEFAULT_MASK, MASK_PROPS, maskKey } from '../engine/mask';
 import { DragNumber } from './DragNumber';
 import { setScrubbing } from '../engine/audio';
 import { frameTicks, tc } from '../engine/rulerTicks';
-import { openMenu, useKeySel, useLayout, type KeyRef } from './uiStore';
+import { openMenu, useKeySel, useLayout, type KeyRef, type MenuItem } from './uiStore';
 import { ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Timer } from 'lucide-react';
 
 /** 屬性名稱被截斷時，滑鼠移上去立刻浮出完整名稱（屬性面板很窄時用） */
@@ -51,6 +51,8 @@ export interface Channel {
   display?: number;
   /** 等比例連動：改這個值時，partner 依同樣的比例跟著變（各自保留正負號）；開 / 關動畫也一起 */
   partner?: { id: string; value: number; keys: Keyframe[] };
+  /** 右鍵選單最後多加的項目（名稱與數值欄位都適用，例如「套用到相同特效」） */
+  menu?: MenuItem[];
 }
 
 /** 等比例連動時，partner 的新值：大小跟著比例變、保留原本的正負號 */
@@ -143,6 +145,18 @@ export function fxHost(fxId: string): Host | null {
     setKeys(ch, list, base) {
       const cur = useStore.getState().effects.find((x) => x.id === fxId);
       if (!cur) return;
+      // 疊加的特效：channel 跟片段特效一樣是 cfx:<id>:<參數>
+      const cf = parseCfx(ch);
+      if (cf) {
+        const f = cur.stack?.find((x) => x.id === cf.fxId);
+        if (!f) return;
+        const keys = { ...(f.keys ?? {}) };
+        if (list?.length) keys[cf.ch] = sortKeys(list);
+        else delete keys[cf.ch];
+        const patch: Partial<ClipFx> = { keys };
+        if (!list?.length && base !== undefined) Object.assign(patch, fxBasePatch(f, cf.ch, base));
+        return updateStackFx(fxId, f.id, patch);
+      }
       const keys = { ...(cur.keys ?? {}) };
       if (list?.length) keys[ch] = sortKeys(list);
       else delete keys[ch];
@@ -152,7 +166,14 @@ export function fxHost(fxId: string): Host | null {
     },
     setBase(ch, v) {
       const cur = useStore.getState().effects.find((x) => x.id === fxId);
-      if (cur) useStore.getState().updateEffect(fxId, fxBasePatch(cur, ch, v));
+      if (!cur) return;
+      const cf = parseCfx(ch);
+      if (cf) {
+        const f = cur.stack?.find((x) => x.id === cf.fxId);
+        if (f) updateStackFx(fxId, f.id, fxBasePatch(f, cf.ch, v));
+        return;
+      }
+      useStore.getState().updateEffect(fxId, fxBasePatch(cur, ch, v));
     },
   };
 }
@@ -210,7 +231,16 @@ function currentKeys(owner: string, ch: string): Keyframe[] {
     if (cf) return c?.effects?.find((f) => f.id === cf.fxId)?.keys?.[cf.ch] ?? [];
     return c?.keys[ch as AnimProp] ?? [];
   }
-  return s.effects.find((f) => f.id === id)?.keys?.[ch] ?? [];
+  const fx = s.effects.find((f) => f.id === id);
+  const cf = parseCfx(ch);
+  if (cf) return fx?.stack?.find((f) => f.id === cf.fxId)?.keys?.[cf.ch] ?? [];
+  return fx?.keys?.[ch] ?? [];
+}
+
+/** 改特效方塊裡疊加的某個特效 */
+export function updateStackFx(fxId: string, sid: string, patch: Partial<ClipFx>) {
+  const cur = useStore.getState().effects.find((x) => x.id === fxId);
+  if (cur?.stack) useStore.getState().updateEffect(fxId, { stack: cur.stack.map((f) => (f.id === sid ? { ...f, ...patch } : f)) });
 }
 
 /** 片段的動畫屬性 */
@@ -429,6 +459,7 @@ export function selectAllKeys(): boolean {
   } else {
     const f = s.effects.find((x) => x.id === sel.id);
     for (const [ch, l] of Object.entries(f?.keys ?? {})) for (const k of l) keys.push({ ch, id: k.id });
+    for (const x of f?.stack ?? []) for (const [ch, l] of Object.entries(x.keys ?? {})) for (const k of l) keys.push({ ch: cfxCh(x.id, ch), id: k.id });
   }
   selectKeys(host.owner, keys);
   return true;
@@ -478,6 +509,8 @@ export interface Section {
   /** 標題前面的小標籤 */
   badge?: React.ReactNode;
   dim?: boolean;
+  /** 標題列右鍵選單（打開時才建立，剪貼簿狀態才會是最新的） */
+  menu?: () => MenuItem[];
 }
 
 /** 屬性表格左欄寬度範圍（px） */
@@ -519,7 +552,7 @@ function flashSection(head: Element) {
   }
 }
 
-export function EffectControls({ host, sections, title, extra }: { host: Host; sections: Section[]; title?: React.ReactNode; extra?: React.ReactNode }) {
+export function EffectControls({ host, sections, title, extra, titleMenu }: { host: Host; sections: Section[]; title?: React.ReactNode; extra?: React.ReactNode; /** 表頭（名稱）右鍵選單 */ titleMenu?: () => MenuItem[] }) {
   const time = useStore((s) => s.time);
   // 左欄固定寬度（px）：不管面板多寬、屬性分頁還是編輯視窗都一樣，面板變窄只縮右邊的時間軸
   const leftPx = useLayout((s) => s.ecLeftPx);
@@ -712,14 +745,16 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
       { label: $t('全選關鍵影格'), action: ch.keys.length ? () => selectKeys(host.owner, currentKeys(host.owner, ch.id).map((k) => ({ ch: ch.id, id: k.id }))) : undefined },
       { label: $t('複製關鍵影格'), action: ch.keys.length ? () => copyChannelKeys(host.owner, ch.id) : undefined },
       { label: $t('貼上到播放頭'), action: keyClipboard.length && keyClipboard.every((k) => k.ch === keyClipboard[0].ch) ? () => pasteChannelKeys(host, ch.id) : undefined },
+      ...(ch.menu?.length ? [{ separator: true } as MenuItem, ...ch.menu] : []),
     ]);
   };
 
   const sectionResetMenu = (e: React.MouseEvent, sec: Section) => {
-    if (!sec.onReset) return;
+    const extra = sec.menu?.() ?? [];
+    if (!sec.onReset && !extra.length) return;
     e.preventDefault();
     e.stopPropagation();
-    openMenu(e.clientX, e.clientY, [{ label: $t('重設這個區塊'), action: sec.onReset }]);
+    openMenu(e.clientX, e.clientY, [...extra, ...(extra.length && sec.onReset ? [{ separator: true } as MenuItem] : []), ...(sec.onReset ? [{ label: $t('重設這個區塊'), action: sec.onReset }] : [])]);
   };
 
   /** 點關鍵影格：Ctrl 切換、Shift 加選；拖曳 = 選取的整組一起移動（吸附播放頭與其他關鍵影格） */
@@ -735,6 +770,8 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
     }
     const group = e.shiftKey ? (already ? cur : [...cur, me]) : already ? cur : [me];
     selectKeys(host.owner, group, me);
+    // 點關鍵影格：播放頭跟過去（拖曳時跟著走）
+    seek(k.t);
     const { orig, min, max } = snapshot(host.owner, group);
     const r = rulerRef.current!.getBoundingClientRect();
     const pxPerSec = r.width / span;
@@ -751,6 +788,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
         for (const p of pts) if (Math.abs(p - t) * pxPerSec < 6) { t = p; break; }
         const dt = Math.max(-min, Math.min(dur - max, t - k.t));
         moveKeys(host.owner, group, orig, dt);
+        seek(k.t + dt);
       },
       () => {
         if (!moved && already && !e.shiftKey && cur.length > 1) selectKeys(host.owner, [me]);
@@ -832,7 +870,16 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
     <div className="ec" ref={tableRef} style={{ '--ec-left': `${Math.max(LEFT_MIN, leftPx)}px` } as React.CSSProperties}>
       {/* 表頭：名稱 + 片段內時間尺規（只有這裡可以拖播放頭） */}
       <div className="ec-row ec-header">
-        <div className="ec-left">
+        <div
+          className="ec-left"
+          onContextMenu={(e) => {
+            const items = titleMenu?.();
+            if (!items?.length) return;
+            e.preventDefault();
+            e.stopPropagation();
+            openMenu(e.clientX, e.clientY, items);
+          }}
+        >
           {title}
           <span className="ec-time">{inside ? tc(lc) : '—'}</span>
           <div className="ec-split" onPointerDown={dragSplit} title={$t('拖曳調整左右寬度')} />
@@ -891,7 +938,7 @@ export function EffectControls({ host, sections, title, extra }: { host: Host; s
                             <Timer size={13} />
                           </button>
                           <span className="ec-label" title={ch.label} onContextMenu={(e) => channelMenu(e, ch)}>{ch.label}</span>
-                          <DragNumber variant="text" value={ch.value} step={ch.step} min={ch.min} max={ch.max} suffix={ch.suffix} display={ch.display} def={ch.def} onChange={(v) => setValue(ch, v)} />
+                          <DragNumber variant="text" value={ch.value} step={ch.step} min={ch.min} max={ch.max} suffix={ch.suffix} display={ch.display} def={ch.def} menu={ch.menu} onChange={(v) => setValue(ch, v)} />
                           <span className="ec-nav">
                             {animated && (
                               <>
@@ -1068,12 +1115,16 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
     useKeySel.setState({ owner: host.owner, keys: [{ ch: ch.id, id: k.id }], sel: { owner: host.owner, ch: ch.id, id: k.id }, focus: true });
     frozen.current = range;
     const p0 = pt(e);
+    // 點曲線上的關鍵影格：播放頭跟過去（拖曳時跟著走）
+    const seekTo = (t: number) => useStore.getState().setTime(host.start + Math.min(host.duration, Math.max(0, t)));
+    seekTo(k.t);
     listen(
       (ev) => {
         const p = pt(ev);
         const t = ev.shiftKey ? k.t : T(X(k.t) + p.x - p0.x);
         const v = V(Y(k.v) + p.y - p0.y);
         host.setKeys(ch.id, currentKeys(host.owner, ch.id).map((x) => (x.id === k.id ? { ...x, t, v } : x)));
+        seekTo(t);
       },
       () => (frozen.current = null),
     );
