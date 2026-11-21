@@ -7,7 +7,7 @@ import { Slot } from './PreviewPanel';
 import { useMaskEdit } from './MaskEditor';
 import { useEditorMode, useEditorWindow, useLayout } from './uiStore';
 import type { PanelId } from './dockTree';
-import { isTextField } from './focus';
+import { isTextField, modalOpen } from './focus';
 import { pickerOpen } from './Library';
 
 /**
@@ -94,7 +94,7 @@ export function EditorWindow({ hosts }: { hosts: Record<PanelId, HTMLElement> })
     if (!open) return;
     // Esc 關閉（capture：比全域快捷鍵先處理，免得 Esc 清掉選取）
     const key = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || isTextField(e.target) || pickerOpen()) return;
+      if (e.key !== 'Escape' || isTextField(e.target) || pickerOpen() || modalOpen()) return;
       e.stopPropagation();
       e.preventDefault();
       closeEditorWindow();

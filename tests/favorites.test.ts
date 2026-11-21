@@ -1,0 +1,20 @@
+const mem: Record<string, string> = {};
+(globalThis as any).localStorage = { getItem: (k: string) => mem[k] ?? null, setItem: (k: string, v: string) => { mem[k] = v; }, removeItem: (k: string) => { delete mem[k]; } };
+console.warn = () => {};
+import { strict as assert } from 'node:assert';
+import { useFavorites } from '../src/ui/favorites';
+
+const f = useFavorites.getState();
+f.toggle('effect', 'fx-glow');
+f.toggle('effect', 'fx-shake');
+f.toggle('transition', 'tr-crossfade');
+f.toggle('transition', 'tr-push');
+f.set('transition', ['tr-push', 'tr-crossfade']);
+f.toggle('effect', 'fx-glow');
+const n = useFavorites.getState().lists;
+assert.deepEqual(n.effect, ['fx-shake'], '再按一次 = 取消');
+assert.deepEqual(n.transition, ['tr-push', 'tr-crossfade'], '排序後整個換掉，不影響其他分頁');
+useFavorites.getState().remove('transition', 'tr-push');
+assert.deepEqual(useFavorites.getState().lists.transition, ['tr-crossfade']);
+assert.deepEqual(useFavorites.getState().lists.effect, ['fx-shake']);
+console.log('PASS 我的最愛：各分頁分開讀寫');

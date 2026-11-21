@@ -34,9 +34,10 @@ const showSnap = (t: number | null) => useSnapLine.getState().t !== t && useSnap
 const usePlacementPreview = create<{ owner: string | null; items: PlacementGhost[] }>(() => ({ owner: null, items: [] }));
 let placementMenuId = 0;
 
-function placementChoices(fit: DropFit | null, choose: (mode: TimelineDropMode) => void, cancel: () => void): MenuItem[] {
+function placementChoices(fit: DropFit | null, choose: (mode: TimelineDropMode) => void, cancel: () => void, replace?: () => void): MenuItem[] {
   return [
     { label: $t('覆蓋'), action: () => choose('overwrite') },
+    ...(replace ? [{ label: $t('取代'), action: replace }] : []),
     { label: $t('插入'), action: () => choose('insert') },
     { label: $t('插入並移動所有軌道'), action: () => choose('insertAll') },
     { label: $t('修剪以符合長度'), action: fit ? () => choose('trimFit') : undefined },
@@ -47,7 +48,8 @@ function placementChoices(fit: DropFit | null, choose: (mode: TimelineDropMode) 
 
 const openPlacementMenu = (x: number, y: number, items: MenuItem[], owner?: string) => openMenu(x + 32, y + 24, items, owner);
 
-function showPendingPlacement(result: PasteResult, x: number, y: number, choose: (mode: TimelineDropMode) => void) {
+/** 放置會重疊時：顯示放置位置並讓使用者選擇處理方式（replace：取代游標下的片段） */
+export function showPendingPlacement(result: Pick<PasteResult, 'fit' | 'preview'>, x: number, y: number, choose: (mode: TimelineDropMode) => void, replace?: () => void) {
   const owner = `timeline-placement-${++placementMenuId}`;
   const clear = () => {
     if (usePlacementPreview.getState().owner === owner) usePlacementPreview.setState({ owner: null, items: [] });
@@ -58,7 +60,8 @@ function showPendingPlacement(result: PasteResult, x: number, y: number, choose:
       if (useMenu.getState().menu?.owner !== owner) { unsub(); clear(); }
     });
   });
-  openPlacementMenu(x, y, placementChoices(result.fit, (mode) => { unsub(); clear(); choose(mode); }, () => { unsub(); clear(); }), owner);
+  const done = () => { unsub(); clear(); };
+  openPlacementMenu(x, y, placementChoices(result.fit, (mode) => { done(); choose(mode); }, done, replace && (() => { done(); replace(); })), owner);
 }
 
 /** 貼上遇到重疊時才讓使用者決定如何處理；取消時不修改時間軸。 */
@@ -82,6 +85,26 @@ export function duplicateTimeline() {
   const x = selected?.right ?? innerWidth / 2;
   const y = selected?.top ?? innerHeight / 2;
   showPendingPlacement(result, x, y, (mode) => { useStore.getState().duplicate(mode); });
+}
+
+/** 軌道上的項目 key（依開始時間排序）；from = 只要在這個時間之後（含跨過它的）；連結在影片上的原音跟著影片，不另外算 */
+function trackItemKeys(kind: TrackKind, idx: number, from?: number): string[] {
+  const s = useStore.getState();
+  const type: ItemType = kind === 'video' ? 'clip' : kind === 'fx' ? 'effect' : 'audio';
+  const attached = type === 'audio' ? attachedAudioIds(s) : null;
+  return (s[LIST[type]] as AnyItem[])
+    .filter((x) => x.track === idx && !attached?.has(x.id) && (from === undefined || x.start + x.duration > from + 1e-6))
+    .sort((a, b) => a.start - b.start)
+    .map((x) => keyOf(type, x.id));
+}
+
+/** 選取軌道上的項目；主選取 = 第一個（之後 Ctrl+Shift+← / → 以它為起點） */
+function selectTrackItems(kind: TrackKind, idx: number, from?: number) {
+  const keys = trackItemKeys(kind, idx, from);
+  if (!keys.length) return;
+  const s = useStore.getState();
+  s.selectKeys(keys);
+  useStore.setState({ selection: parseKey(keys[0]) });
 }
 
 function nearest(v: number, pts: number[], pps: number) {
@@ -963,6 +986,7 @@ interface ClipViewProps {
   sel: boolean;
   remapName: string | null;
   drop: 'relink' | 'replace' | 'transition' | 'transitionOut' | 'remap' | 'effect' | 'mask' | null;
+  /** 拖曳中的放置預覽：CSS background-image（素材縮圖 url(...)，色板是純色漸層） */
   dropThumb?: string;
 }
 
@@ -1022,7 +1046,7 @@ const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel,
         left: c.start * pps,
         width: Math.max(4, c.duration * pps),
         '--overlap-left': `${preview.affected?.left ?? 0}px`, '--overlap-width': `${preview.affected?.width ?? 0}px`,
-        backgroundImage: relinkGhost ? `url(${dropThumb})` : !isText && ok && m!.thumb ? `url(${m!.thumb})` : undefined,
+        backgroundImage: relinkGhost ? dropThumb : !isText && ok && m!.thumb ? `url(${m!.thumb})` : undefined,
       } as React.CSSProperties}
       title={ok ? undefined : $t('素材遺失：把素材拖到這裡、或右鍵「重新連結素材…」')}
       onPointerDown={(e) => itemPointerDown(e, 'clip', c)}
@@ -1038,9 +1062,9 @@ const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel,
       <span className="clip-name" title={`${name} · ${c.duration.toFixed(2)}s`}>{name}</span>
       {remapName && <span className="badge"><Gauge size={10} /> {remapName}</span>}
       {!!c.effects?.some((f) => !f.base) && <span className="badge" title={$t('片段特效')}><Sparkles size={10} /> {c.effects!.filter((f) => !f.base).length}</span>}
+      {drop === 'replace' && <span className="badge replace-tag"><Replace size={10} /> {$t('取代')}</span>}
       {drop === 'effect' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段特效')}</span>}
       {drop === 'mask' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段遮罩')}</span>}
-      {drop === 'replace' && <span className="badge replace-tag"><Replace size={10} /> {$t('取代')}</span>}
       {Math.abs(sp - 1) > 1e-3 && <span className="badge">{+sp.toFixed(2)}×</span>}
       <OpBadge k={key} />
       {ok && !isText && m!.hasAudio && m!.kind === 'video' && (la ? la.volume === 0 : c.volume === 0 && !c.audioSplit) && <span className="badge"><VolumeX size={10} /></span>}
@@ -1217,7 +1241,7 @@ export function Timeline() {
   const reveal = useReveal((s) => s.n);
   useEffect(() => {
     if (!reveal) return;
-    const sel = useStore.getState().selection;
+    const sel = useReveal.getState().target ?? useStore.getState().selection;
     if (!sel) return;
     const el = innerRef.current?.querySelector<HTMLElement>(`[data-key="${sel.type}:${sel.id}"]`);
     if (!el) return;
@@ -1245,13 +1269,19 @@ export function Timeline() {
   useEffect(() => {
     const el = scrollRef.current!;
     const onWheel = (e: WheelEvent) => {
-      // 水平捲動（Shift + 滾輪、觸控板左右滑）：時間軸本身的水平捲軸藏起來了，自己處理
+      // 捲動：時間軸本身的水平捲軸藏起來了，水平捲動自己處理。
+      // 設定「水平」= 直接滾左右捲、Shift / Alt 上下捲；「垂直」= 直接滾上下捲、Shift / Alt 左右捲。觸控板左右滑一律水平。
+      // （Windows 的 Chrome 按住 Shift 時會把 deltaY 換成 deltaX，所以按住修飾鍵時兩個都看）
       if (!e.ctrlKey) {
-        const dx = e.shiftKey ? e.deltaY || e.deltaX : Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : 0;
-        if (dx) {
-          e.preventDefault();
-          el.scrollLeft += dx;
-        }
+        const swap = e.shiftKey || e.altKey;
+        const horizontalFirst = useLayout.getState().wheelScroll !== 'vertical';
+        const swipeX = Math.abs(e.deltaX) > Math.abs(e.deltaY) && !swap;
+        const wantX = swipeX || (horizontalFirst ? !swap : swap);
+        const d = swap ? e.deltaY || e.deltaX : swipeX ? e.deltaX : e.deltaY;
+        if (!d) return;
+        e.preventDefault();
+        if (wantX) el.scrollLeft += d;
+        else el.scrollTop += d;
         return;
       }
       e.preventDefault();
@@ -1264,6 +1294,30 @@ export function Timeline() {
       s.setPps(np);
     };
     el.addEventListener('wheel', onWheel, { passive: false });
+    // 中鍵拖曳：上下左右平移時間軸（先擋掉瀏覽器的中鍵自動捲動）
+    const noAutoScroll = (e: MouseEvent) => { if (e.button === 1) e.preventDefault(); };
+    const onPan = (e: PointerEvent) => {
+      if (e.button !== 1) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const x0 = e.clientX, y0 = e.clientY, sl = el.scrollLeft, st = el.scrollTop;
+      document.body.classList.add('panning');
+      const end = () => {
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        document.body.classList.remove('panning');
+      };
+      const move = (ev: PointerEvent) => {
+        if (!(ev.buttons & 4)) return end(); // 中鍵已經放開（放開的事件可能被其他按鍵吃掉）
+        el.scrollLeft = sl - (ev.clientX - x0);
+        el.scrollTop = st - (ev.clientY - y0);
+      };
+      const up = (ev: PointerEvent) => { if (ev.button === 1 || !(ev.buttons & 4)) end(); };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+    };
+    el.addEventListener('mousedown', noAutoScroll);
+    el.addEventListener('pointerdown', onPan, true);
     // 時間軸至少填滿看得到的寬度；自訂水平捲軸跟時間軸同步
     const updView = () => {
       const w = el.clientWidth - labelW;
@@ -1305,6 +1359,8 @@ export function Timeline() {
       ro.disconnect();
       unsub();
       el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('mousedown', noAutoScroll);
+      el.removeEventListener('pointerdown', onPan, true);
       window.removeEventListener('timeline-fit', fit);
       window.removeEventListener('timeline-reveal-playhead', reveal);
     };
@@ -1428,8 +1484,11 @@ export function Timeline() {
   const laneMenu = (e: React.MouseEvent, kind: TrackKind, idx: number) => {
     e.preventDefault();
     const t = timeAt(e.clientX);
+    const locked = !!tracks[kind][idx]?.locked;
     openMenu(e.clientX, e.clientY, [
       { label: $t('貼上到這裡'), shortcut: 'Ctrl+V', action: S.clipboard ? () => pasteTimeline({ time: t, track: idx, kind }, { x: e.clientX, y: e.clientY }) : undefined },
+      { label: $t('選取軌道上所有片段'), action: !locked && trackItemKeys(kind, idx).length ? () => selectTrackItems(kind, idx) : undefined },
+      { label: $t('選取這裡之後的片段'), action: !locked && trackItemKeys(kind, idx, t).length ? () => selectTrackItems(kind, idx, t) : undefined },
       ...(useStore.getState().loop ? [{ label: $t('停止循環'), action: () => useStore.getState().setLoop(null) }] : []),
       ...(kind === 'video' ? [{ label: $t('在這裡加入文字'), action: () => S.addText('title', t, idx) }] : []),
       { separator: true },
@@ -1441,6 +1500,8 @@ export function Timeline() {
     e.preventDefault();
     const st = tracks[kind][idx];
     const items: MenuItem[] = [
+      { label: $t('選取軌道上所有片段'), action: !st.locked && trackItemKeys(kind, idx).length ? () => selectTrackItems(kind, idx) : undefined },
+      { separator: true },
       { label: $t('新增軌道…'), action: () => openAddTrack(e.clientX, e.clientY, kind, idx) },
       { separator: true },
       { label: st.hidden ? $t('顯示軌道') : $t('隱藏軌道'), action: kind !== 'audio' ? () => S.toggleTrack(kind, idx, 'hidden') : undefined },
@@ -1487,7 +1548,11 @@ export function Timeline() {
   const mediaOf = (id: string) => media.find((m) => m.id === id);
   const dropClip = drag?.target?.kind === 'clip' ? drag.target : null;
   const dropFx = drag?.target?.kind === 'effect' ? drag.target.fxId : null;
-  const dropThumb = drag?.payload.kind === 'media' ? mediaOf(drag.payload.id)?.thumb : undefined;
+  const dropThumb = (() => {
+    if (drag?.payload.kind === 'color') return `linear-gradient(${drag.payload.color}, ${drag.payload.color})`;
+    const t = drag?.payload.kind === 'media' ? mediaOf(drag.payload.id)?.thumb : undefined;
+    return t ? `url(${t})` : undefined;
+  })();
 
   // 影片 / 特效軌的上下順序：預設上層顯示在下方（可在設定切換）
   const attached = attachedAudioIds({ clips, audios });
@@ -1552,7 +1617,7 @@ export function Timeline() {
         style={{
           left: g.time * pps,
           width: Math.max(8, g.duration * pps),
-          backgroundImage: kind === 'video' && dropThumb ? `url(${dropThumb})` : undefined,
+          backgroundImage: kind === 'video' && dropThumb ? dropThumb : undefined,
           background: color,
         }}
       >

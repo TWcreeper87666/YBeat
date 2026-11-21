@@ -4,6 +4,7 @@ import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, makeClip, useSt
 import type { Module } from '../modules/builtin';
 import { resetHistory } from './history';
 import { clearDetachedMedia } from './detachedMedia';
+import { colorBlob } from './colorBlob';
 
 /** 專案自動存檔：素材檔案（Blob）與時間軸存在 IndexedDB，重新整理不會遺失 */
 
@@ -102,11 +103,20 @@ export async function restoreProject() {
         for (const id of keys) if (typeof id === 'string' && !keep.has(id)) await deleteMediaBlob(id);
       } catch (e) { console.warn($t('素材清理失敗'), e); }
       const media: Media[] = [];
+      const referenced = new Set([...(data.clips ?? []), ...(data.audios ?? [])].map((c) => c.mediaId));
       for (const m of data.media) {
-        const blob = await loadMediaBlob(m.id).catch(() => undefined);
+        const color = m.color;
+        // 色板：時間軸沒用到就不載入；資料不見就重新產生（不會變成遺失）
+        if (color && !referenced.has(m.id)) continue;
+        let blob = await loadMediaBlob(m.id).catch(() => undefined);
+        if (!blob && color) {
+          blob = (await colorBlob(color)) ?? undefined;
+          if (blob) await saveMediaBlob(m.id, blob).catch(() => {});
+        }
         if (!blob) {
-          // 檔案不見了：保留資訊（名稱、長度），標記為遺失，讓使用者重新連結
-          media.push({ ...m, url: '', thumb: m.kind === 'image' ? '' : m.thumb, missing: true });
+          // 檔案不見了：時間軸有用到 → 保留資訊（名稱、長度），標記為遺失，讓使用者重新連結；
+          // 沒用到 → 直接不載入（跟刪掉最後一個片段時自動移除遺失素材一樣）
+          if (referenced.has(m.id)) media.push({ ...m, url: '', thumb: m.kind === 'image' ? '' : m.thumb, missing: true });
           continue;
         }
         const url = URL.createObjectURL(blob);

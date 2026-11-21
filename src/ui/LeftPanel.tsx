@@ -1,10 +1,10 @@
 import { $t, displayName } from '../i18n';
-import { AlignCenter, AlignLeft, AlignRight, Bold, CircleCheck, Italic, Music, Palette, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2 } from 'lucide-react';
+import { AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2 } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { attachedAudioIds, type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
+import { attachedAudioIds, keyOf, uid, type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
 import type { Module } from '../modules/builtin';
 import { CATEGORIES, categoryOf } from '../modules/categories';
-import { colorMedia, colorName, importFiles, pickFiles, relinkWithPicker, removeMedia, removeMediaEverywhere } from '../engine/media';
+import { importFiles, pickFiles, relinkWithPicker, removeMedia, removeMediaEverywhere } from '../engine/media';
 import { applyMediaBatch, planMediaBatch } from '../engine/mediaBatch';
 import { nextStart } from '../engine/overlap';
 import { FONTS, TEXT_PRESETS, DEFAULT_TEXT, renderText, type TextStyle } from '../engine/text';
@@ -17,7 +17,9 @@ import { parseDuration, parseParams, type ParamDef, type ParamValue, type ParamV
 import { computeFrame, transitionWindow, sortClips, makeCtx } from '../engine/renderer';
 import { DEFAULT_TRANSFORM, FITS, type Fit } from '../engine/transform';
 import { plainSpeed } from '../engine/remap';
-import { stillDur } from '../prefs';
+import { stillDur, usePrefs, type UserTextStyle } from '../prefs';
+import { useFavList, useFavorites } from './favorites';
+import { applyToAllCaptions, type CaptionPart } from '../engine/subtitles';
 import { tc } from '../engine/rulerTicks';
 import { CURVE_ID, curveCode, defaultCurveKeys, keysToCurve } from '../engine/remapCurve';
 
@@ -40,7 +42,7 @@ import { confirmDialog, openMenu, promptDialog, revealSelection, stopPreviewFx, 
 import { DragNumber } from './DragNumber';
 import { ModuleCode } from './ModuleCode';
 import { newModule, openModuleEditor } from './CodePanel';
-import { FavButton, LibFilter, LibToolbar, match, onBlank, openPicker } from './Library';
+import { FavButton, LibFilter, LibToolbar, byFavOrder, favSortOpts, match, onBlank, openPicker } from './Library';
 import { MaskLibrary, ShapeThumb, addClipMask, ensureClipBaseMask, setMaskShape } from './MaskPanel';
 import { openShapeDrawer } from './ShapeDrawer';
 import { EffectControls, curveChannel, focusSection, cfxCh, clipChannels, clipHost, fxChannels, fxHost, maskChannels, type Channel, type Section } from './EffectControls';
@@ -48,146 +50,6 @@ import { EffectControls, curveChannel, focusSection, cfxCh, clipChannels, clipHo
 // ───────────────────────── 素材 ─────────────────────────
 
 const KIND_LABEL = { video: $t('影片'), image: $t('圖片'), audio: $t('音訊') } as const;
-
-const SWATCHES = [
-  '#000000', '#ffffff', '#1d1f27', '#3a3f4d', '#8a90a2', '#ff3d6e',
-  '#ff5d5d', '#ff8a3d', '#ffb02e', '#ffe066', '#b8f35d', '#29d3c2',
-  '#2ec4f1', '#3a7bff', '#6a4cff', '#9b6bff', '#f15bb5', '#7a2048',
-];
-
-// ── 自訂顏色：HSV 內部狀態（灰色時色相不會跑掉） ──
-type Hsv = { h: number; s: number; v: number };
-function hsvToHex({ h, s, v }: Hsv) {
-  const f = (n: number) => {
-    const k = (n + h / 60) % 6;
-    const c = v - v * s * Math.max(0, Math.min(k, 4 - k, 1));
-    return Math.round(c * 255).toString(16).padStart(2, '0');
-  };
-  return `#${f(5)}${f(3)}${f(1)}`;
-}
-function hexToHsv(hex: string, prevH = 0): Hsv | null {
-  const m = /^#?([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(hex.trim());
-  if (!m) return null;
-  const x = m[1].length === 3 ? m[1].split('').map((c) => c + c).join('') : m[1];
-  const [r, g, b] = [0, 2, 4].map((i) => parseInt(x.slice(i, i + 2), 16) / 255);
-  const mx = Math.max(r, g, b), d = mx - Math.min(r, g, b);
-  let h = prevH;
-  if (d > 0) {
-    h = mx === r ? ((g - b) / d) % 6 : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
-    h = (h * 60 + 360) % 360;
-  }
-  return { h, s: mx ? d / mx : 0, v: mx };
-}
-
-const RECENT_KEY = 'ybeat.recentColors';
-function loadRecent(): string[] {
-  try { const a = JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]'); return Array.isArray(a) ? a.filter((x) => typeof x === 'string').slice(0, 12) : []; } catch { return []; }
-}
-
-/** 飽和度 / 明度方塊 */
-function SvPad({ hsv, onChange }: { hsv: Hsv; onChange: (h: Hsv) => void }) {
-  const down = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    const el = e.currentTarget;
-    const at = (ev: { clientX: number; clientY: number }) => {
-      const r = el.getBoundingClientRect();
-      onChange({ h: hsv.h, s: Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), v: Math.min(1, Math.max(0, 1 - (ev.clientY - r.top) / r.height)) });
-    };
-    at(e);
-    const mv = (ev: PointerEvent) => at(ev);
-    const up = () => { window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
-    window.addEventListener('pointermove', mv);
-    window.addEventListener('pointerup', up);
-  };
-  return (
-    <div className="cpk-pad" style={{ backgroundColor: `hsl(${hsv.h} 100% 50%)` }} onPointerDown={down}>
-      <i style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%`, background: hsvToHex(hsv) }} />
-    </div>
-  );
-}
-
-/** 色板：拖到影片軌、或雙擊插入到播放頭 */
-function ColorSwatches() {
-  const [hsv, setHsv] = useState<Hsv>(() => hexToHsv('#ff3d6e')!);
-  const [draft, setDraft] = useState<string | null>(null);
-  const [recent, setRecent] = useState<string[]>(loadRecent);
-  const custom = hsvToHex(hsv);
-  const media = useStore((s) => s.media);
-  const used = new Set(media.filter((m) => m.name.startsWith(colorName('').trim())).map((m) => m.name));
-  const remember = (c: string) => {
-    if (SWATCHES.includes(c)) return;
-    const next = [c, ...recent.filter((x) => x !== c)].slice(0, 12);
-    setRecent(next);
-    try { localStorage.setItem(RECENT_KEY, JSON.stringify(next)); } catch { /* 無痕模式等 */ }
-  };
-  const pick = (c: string) => { const n = hexToHsv(c, hsv.h); if (n) setHsv(n); };
-  const add = async (c: string) => {
-    remember(c);
-    const m = await colorMedia(c);
-    if (m) {
-      useStore.getState().insertMedia(m.id);
-      revealSelection();
-    }
-  };
-  const swatch = (c: string, cls = '') => (
-    <div
-      key={c}
-      className={`swatch ${cls} ${used.has(colorName(c)) ? 'used' : ''} ${c === custom ? 'cur' : ''}`}
-      style={{ background: c }}
-      title={$t('{0}（拖到影片軌）', c)}
-      onPointerDown={(e) => { pick(c); startLibraryDrag(e, { kind: 'color', color: c }, c); }}
-      onDoubleClick={() => add(c)}
-    />
-  );
-  const commitDraft = () => {
-    if (draft !== null) pick(draft.startsWith('#') ? draft : `#${draft}`);
-    setDraft(null);
-  };
-  return (
-    <div className="swatches-wrap">
-      <div className="swatches">{SWATCHES.map((c) => swatch(c))}</div>
-      <div className="cpk">
-        <SvPad hsv={hsv} onChange={setHsv} />
-        <input
-          type="range"
-          className="cpk-hue"
-          min={0}
-          max={359}
-          value={Math.round(hsv.h)}
-          onChange={(e) => setHsv({ ...hsv, h: +e.target.value })}
-          style={{ '--thumb': `hsl(${hsv.h} 100% 50%)` } as React.CSSProperties}
-        />
-        <div className="cpk-row">
-          <div
-            className="cpk-chip"
-            style={{ background: custom }}
-            title={$t('{0}（拖到影片軌）', custom)}
-            onPointerDown={(e) => { remember(custom); startLibraryDrag(e, { kind: 'color', color: custom }, custom); }}
-          />
-          <label className="cpk-hex">
-            <span>#</span>
-            <input
-              value={draft ?? custom.slice(1).toUpperCase()}
-              maxLength={7}
-              spellCheck={false}
-              onChange={(e) => { setDraft(e.target.value); const n = hexToHsv(e.target.value, hsv.h); if (n && /^#?[0-9a-f]{6}$/i.test(e.target.value.trim())) setHsv(n); }}
-              onBlur={commitDraft}
-              onKeyDown={(e) => { if (e.key === 'Enter') { commitDraft(); (e.target as HTMLInputElement).blur(); } if (e.key === 'Escape') { setDraft(null); (e.target as HTMLInputElement).blur(); } }}
-            />
-          </label>
-          <label className="cpk-native" title={$t('系統顏色選擇器')}>
-            <Pipette size={14} />
-            <input type="color" value={custom} onChange={(e) => pick(e.target.value)} />
-          </label>
-          <span className="spacer" />
-          <button className="btn primary small cpk-add" onClick={() => add(custom)}><Plus size={13} />{$t('插入到播放頭')}</button>
-        </div>
-        {recent.length > 0 && <div className="cpk-recent">{recent.map((c) => swatch(c, 'mini'))}</div>}
-      </div>
-    </div>
-  );
-}
 
 export function MediaPanel() {
   const panelRef = useRef<HTMLDivElement>(null);
@@ -202,13 +64,15 @@ export function MediaPanel() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [anchorId, setAnchorId] = useState<string | null>(null);
 
+  // 色板素材不顯示在這裡（在「色板」分頁）
+  const library = useMemo(() => media.filter((m) => !m.color), [media]);
   const uses = (id: string) => clips.filter((c) => c.mediaId === id).length + audios.filter((a) => a.mediaId === id).length;
   const list = useMemo(() => {
-    const l = media.filter((m) => (filter === 'all' || m.kind === filter) && match(m.name, q));
+    const l = library.filter((m) => (filter === 'all' || m.kind === filter) && match(m.name, q));
     if (sort === 'name') l.sort((a, b) => a.name.localeCompare(b.name));
     if (sort === 'type') l.sort((a, b) => a.kind.localeCompare(b.kind));
     return l;
-  }, [media, filter, q, sort]);
+  }, [library, filter, q, sort]);
   useEffect(() => {
     const visible = new Set(list.map((m) => m.id));
     setSelectedIds((ids) => ids.filter((id) => visible.has(id)));
@@ -216,14 +80,8 @@ export function MediaPanel() {
   }, [list, anchorId]);
   const selected = new Set(selectedIds);
   const picked = selectedIds.map((id) => list.find((m) => m.id === id)).filter((m): m is Media => !!m);
-  const missing = media.filter((m) => m.missing).length;
+  const missing = library.filter((m) => m.missing).length;
   const previewing = useSource((s) => (s.open ? s.mediaId : null));
-  /** 色板分頁：不用先打開分類籤也能直接切過去（素材庫是空的時候也找得到） */
-  const toggleColors = () => {
-    const L = useLayout.getState();
-    if (filter === 'color') L.set({ mediaFilter: 'all' });
-    else L.set({ mediaFilter: 'color', libFilterOpen: { ...L.libFilterOpen, media: true } });
-  };
 
   const selectMedia = (e: React.MouseEvent, m: Media) => {
     panelRef.current?.focus();
@@ -239,6 +97,23 @@ export function MediaPanel() {
     setSelectedIds([m.id]);
     if (m.missing) relinkWithPicker(m.id);
     else openSource(m.id);
+  };
+
+  /** 在時間軸上選取用到這些素材的片段，播放頭移到最前面那個、畫面捲過去 */
+  const selectUses = (items: Media[]) => {
+    const ids = new Set(items.map((m) => m.id));
+    const st = useStore.getState();
+    const attached = attachedAudioIds(st);
+    const found = [
+      ...st.clips.filter((c) => ids.has(c.mediaId)).map((c) => ({ type: 'clip' as const, it: c as { id: string; start: number; duration: number } })),
+      ...st.audios.filter((a) => ids.has(a.mediaId) && !attached.has(a.id)).map((a) => ({ type: 'audio' as const, it: a as { id: string; start: number; duration: number } })),
+    ].sort((a, b) => a.it.start - b.it.start);
+    if (!found.length) return;
+    st.selectKeys(found.map((x) => keyOf(x.type, x.it.id)));
+    const first = found[0];
+    useStore.setState({ selection: { type: first.type, id: first.it.id } });
+    if (st.time < first.it.start || st.time >= first.it.start + first.it.duration) st.setTime(first.it.start);
+    revealSelection();
   };
 
   const insertPicked = (items: Media[]) => {
@@ -271,7 +146,10 @@ export function MediaPanel() {
     if (!selected.has(m.id)) { setSelectedIds([m.id]); setAnchorId(m.id); }
     const n = uses(m.id);
     const inTimeline = items.some((item) => uses(item.id) > 0);
+    const useCount = items.reduce((k, item) => k + uses(item.id), 0);
     openMenu(e.clientX, e.clientY, [
+      { label: useCount ? $t('在時間軸上選取（{0}）', useCount) : $t('時間軸上沒有使用'), action: useCount ? () => selectUses(items) : undefined },
+      { separator: true },
       { label: items.length > 1 ? $t('插入選取的 {0} 個素材', items.length) : $t('插入到播放頭'), action: items.some(mediaUsable) ? () => insertPicked(items) : undefined },
       { label: m.missing ? $t('重新連結檔案…') : $t('替換檔案…'), action: items.length === 1 ? () => relinkWithPicker(m.id) : undefined },
       { separator: true },
@@ -283,7 +161,7 @@ export function MediaPanel() {
   const bgMenu = (e: React.MouseEvent) => {
     e.preventDefault();
     const L = useLayout.getState();
-    const unused = media.filter((m) => !uses(m.id));
+    const unused = library.filter((m) => !uses(m.id));
     const items: MenuItem[] = [
       { label: $t('匯入媒體…'), shortcut: 'Ctrl+O', action: async () => importFiles(await pickFiles()) },
       { separator: true },
@@ -307,24 +185,19 @@ export function MediaPanel() {
     }}>
       <LibToolbar id="media" query={q} setQuery={setQ} filter={{ active: filter !== 'all', reset: () => useLayout.getState().set({ mediaFilter: 'all' }) }}>
         <button className="lib-add" title={$t('匯入媒體 (Ctrl+O)')} onClick={async () => importFiles(await pickFiles())}><Plus size={15} /></button>
-        <button className={`lib-add ${filter === 'color' ? 'on' : ''}`} title={$t('色板')} onClick={toggleColors}><Palette size={14} /></button>
       </LibToolbar>
       <LibFilter
         id="media"
         cats={[
-          ...(['all', 'video', 'image', 'audio'] as const).map((f) => ({ id: f, label: f === 'all' ? $t('全部') : KIND_LABEL[f], count: f === 'all' ? media.length : media.filter((m) => m.kind === f).length })),
-          { id: 'color', label: $t('色板'), icon: <Palette size={12} /> },
+          ...(['all', 'video', 'image', 'audio'] as const).map((f) => ({ id: f, label: f === 'all' ? $t('全部') : KIND_LABEL[f], count: f === 'all' ? library.length : library.filter((m) => m.kind === f).length })),
         ]}
         cur={filter}
         set={(f) => useLayout.getState().set({ mediaFilter: f as typeof filter })}
       />
-      {filter === 'color' ? (
-        <div className="lib-body"><ColorSwatches /></div>
-      ) : (
       <div className="lib-body" onClick={onBlank(() => { closeSource(); setSelectedIds([]); setAnchorId(null); })} onDoubleClick={onBlank(async () => importFiles(await pickFiles()))}>
         {missing > 0 && <div className="warn"><TriangleAlert size={13} /> {missing}{' '}{$t('個素材遺失')}</div>}
-        {media.length === 0 && <p className="muted small center">{$t('還沒有素材')}<br />{$t('雙擊匯入')}</p>}
-        {media.length > 0 && list.length === 0 && <p className="muted small center">{$t('沒有符合的素材')}</p>}
+        {library.length === 0 && <p className="muted small center">{$t('還沒有素材')}<br />{$t('雙擊匯入')}</p>}
+        {library.length > 0 && list.length === 0 && <p className="muted small center">{$t('沒有符合的素材')}</p>}
         <div className={view === 'grid' ? 'lib-grid' : 'lib-list'}>
           {list.map((m) => (
             <div
@@ -356,7 +229,6 @@ export function MediaPanel() {
           ))}
         </div>
       </div>
-      )}
     </div>
   );
 }
@@ -370,37 +242,110 @@ function TextThumb({ style }: { style: TextStyle }) {
 
 export function TextPanel() {
   const view = useLayout((s) => s.libView.text ?? 'grid');
+  const userStyles = usePrefs((s) => s.textStyles);
+  const [q, setQ] = useState('');
+  const [cat, setCat] = useState<'all' | 'preset' | 'user'>('all');
   const styles = useMemo(() => TEXT_PRESETS.map((p) => ({ ...DEFAULT_TEXT, ...p.style })), []);
   const add = (id: string) => {
     const s = useStore.getState();
-    const p = TEXT_PRESETS.find((x) => x.id === id);
     s.addText(id, s.time, s.trackForInsert('video', s.time, stillDur()));
     revealSelection();
   };
+  const items = [
+    ...(cat !== 'user' ? TEXT_PRESETS.map((p, i) => ({ id: p.id, name: p.name, style: styles[i], user: undefined as UserTextStyle | undefined })) : []),
+    ...(cat !== 'preset' ? userStyles.map((u) => ({ id: u.id, name: u.name, style: { ...DEFAULT_TEXT, ...u.style }, user: u })) : []),
+  ].filter((x) => match(x.name, q));
+  const itemMenu = (e: React.MouseEvent, u?: UserTextStyle) => {
+    e.preventDefault();
+    if (!u) return;
+    const P = usePrefs.getState();
+    openMenu(e.clientX, e.clientY, [
+      {
+        label: $t('重新命名…'),
+        action: async () => {
+          const n = await promptDialog({ title: $t('重新命名樣式'), value: u.name });
+          if (n?.trim()) P.set({ textStyles: usePrefs.getState().textStyles.map((x) => (x.id === u.id ? { ...x, name: n.trim() } : x)) });
+        },
+      },
+      { label: $t('刪除樣式'), danger: true, action: () => P.set({ textStyles: usePrefs.getState().textStyles.filter((x) => x.id !== u.id) }) },
+    ]);
+  };
+  const empty = cat === 'user' && !userStyles.length ? $t('還沒有我的樣式') : $t('沒有符合的樣式');
   return (
-    <div className="lib">
-      <div className="lib-bar">
-        <span className="muted small">{$t('文字 / 字幕')}</span>
-        <span className="spacer" />
+    <div className="lib" onContextMenu={(e) => e.preventDefault()}>
+      <LibToolbar id="text" query={q} setQuery={setQ} filter={{ active: cat !== 'all', reset: () => setCat('all') }}>
         <button className="lib-add" title={$t('在播放頭加入文字')} onClick={() => add('title')}><Plus size={15} /></button>
-      </div>
+      </LibToolbar>
+      <LibFilter
+        id="text"
+        cats={[
+          { id: 'all', label: $t('全部') },
+          { id: 'preset', label: $t('預設'), count: TEXT_PRESETS.length },
+          { id: 'user', label: $t('我的樣式'), count: userStyles.length },
+        ]}
+        cur={cat}
+        set={(v) => setCat(v as typeof cat)}
+      />
       <div className="lib-body" onDoubleClick={onBlank(() => add('title'))}>
+        {!items.length && <p className="muted small center">{empty}</p>}
         <div className={view === 'grid' ? 'lib-grid mods' : 'lib-list'}>
-          {TEXT_PRESETS.map((p, i) => (
+          {items.map((it) => (
             <div
-              key={p.id}
+              key={it.id}
               className="lib-item mod mk-text"
-              onPointerDown={(e) => startLibraryDrag(e, { kind: 'text', preset: p.id }, p.name)}
-              title={p.name}
+              onPointerDown={(e) => startLibraryDrag(e, { kind: 'text', preset: it.id }, it.name)}
+              onContextMenu={(e) => itemMenu(e, it.user)}
+              title={it.name}
             >
-              <TextThumb style={styles[i]} />
-              <div className="lib-meta"><div className="lib-name">{p.name}</div></div>
+              <TextThumb style={it.style} />
+              <div className="lib-meta">
+                <div className="lib-name">{it.name}</div>
+                {view === 'list' && it.user && <div className="lib-sub">{$t('我的樣式')}</div>}
+              </div>
             </div>
           ))}
         </div>
       </div>
     </div>
   );
+}
+
+/** 把這個文字片段的樣式、位置、轉場、片段特效存成「我的樣式」 */
+async function saveTextStyle(clipId: string) {
+  const c = useStore.getState().clips.find((x) => x.id === clipId);
+  if (!c?.text) return;
+  const sample = c.text.text.split('\n')[0].trim().slice(0, 12) || $t('文字');
+  const name = await promptDialog({ title: $t('存成我的樣式'), value: sample });
+  if (!name?.trim()) return;
+  const style: UserTextStyle = {
+    id: `user:${uid()}`,
+    name: name.trim(),
+    style: { ...c.text, text: sample },
+    transform: { ...c.transform },
+    caption: !!c.caption,
+    transitionIn: c.transitionIn ? structuredClone(c.transitionIn) : null,
+    transitionOut: c.transitionOut ? structuredClone(c.transitionOut) : null,
+    effects: structuredClone(c.effects ?? []),
+  };
+  const P = usePrefs.getState();
+  P.set({ textStyles: [...P.textStyles, style] });
+  toast($t('已存成我的樣式'));
+}
+
+function captionApplyMenu(e: React.MouseEvent, clipId: string) {
+  const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+  const run = (parts: CaptionPart[]) => {
+    const n = applyToAllCaptions(clipId, parts);
+    toast(n ? $t('已套用到 {0} 段字幕', n) : $t('沒有其他字幕'), n ? undefined : 'error');
+  };
+  openMenu(r.left, r.bottom, [
+    { label: $t('套用樣式到全部字幕'), action: () => run(['style']) },
+    { label: $t('套用位置到全部字幕'), action: () => run(['position']) },
+    { label: $t('套用轉場到全部字幕'), action: () => run(['transition']) },
+    { label: $t('套用片段特效到全部字幕'), action: () => run(['effects']) },
+    { separator: true },
+    { label: $t('全部套用到所有字幕'), action: () => run(['style', 'position', 'transition', 'effects']) },
+  ]);
 }
 
 // ───────────────────────── 轉場 / 特效 / 變速 ─────────────────────────
@@ -422,19 +367,21 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
   const all = useStore((s) => s.modules);
   const previewing = usePreviewFx((s) => s.fx?.moduleId);
   const view = useLayout((s) => s.libView[kind] ?? 'grid');
-  const favorites = useLayout((s) => s.favorites);
+  const favorites = useFavList(kind);
   const cat = useLayout((s) => (s.libFilterOpen[kind] ? s.modCat[kind] ?? 'all' : 'all'));
   const [q, setQ] = useState('');
 
   const favSet = new Set(favorites);
   const ofKind = all.filter((m) => m.kind === kind);
   const inCat = (m: Module, c: string) => c === 'all' || (c === 'fav' ? favSet.has(m.id) : categoryOf(m) === c);
-  const modules = ofKind.filter((m) => match(m.name, q) && inCat(m, cat));
+  const filtered = ofKind.filter((m) => match(m.name, q) && inCat(m, cat));
+  const modules = cat === 'fav' ? byFavOrder(filtered, (m) => m.id, favorites) : filtered;
+  // 我的最愛：拖曳調整順序（挑選視窗、搜尋中不行）
+  const gridRef = useRef<HTMLDivElement>(null);
+  const sortable = cat === 'fav' && !q.trim() && !onPick;
+  const sortOpts = (id: string) => (sortable ? favSortOpts(gridRef.current, id, modules.map((m) => m.id), kind) : undefined);
   const setCat = (c: string) => useLayout.getState().set({ modCat: { ...useLayout.getState().modCat, [kind]: c } });
-  const toggleFav = (id: string) => {
-    const f = useLayout.getState().favorites;
-    useLayout.getState().set({ favorites: f.includes(id) ? f.filter((x) => x !== id) : [...f, id] });
-  };
+  const toggleFav = (id: string) => useFavorites.getState().toggle(kind, id);
   const cats = [
     { id: 'all', label: $t('全部') },
     { id: 'fav', label: $t('我的最愛') },
@@ -535,12 +482,13 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
         {modules.length === 0 && (
           <p className="muted small center">{cat === 'fav' ? $t('還沒有我的最愛') : cat === 'custom' ? $t('還沒有自訂模組') : $t('沒有符合的模組')}</p>
         )}
-        <div className={view === 'grid' ? 'lib-grid mods' : 'lib-list'}>
+        <div ref={gridRef} className={view === 'grid' ? 'lib-grid mods' : 'lib-list'}>
           {modules.map((m) => (
             <div
               key={m.id}
+              data-sort-key={sortable ? m.id : undefined}
               className={`lib-item mod mk-${kind} ${!onPick && previewing === m.id ? 'previewing' : ''} ${current === m.id ? 'current' : ''}`}
-              onPointerDown={(e) => !onPick && startLibraryDrag(e, { kind: 'module', id: m.id, moduleKind: kind }, displayName(m.name))}
+              onPointerDown={(e) => !onPick && startLibraryDrag(e, { kind: 'module', id: m.id, moduleKind: kind }, displayName(m.name), undefined, sortOpts(m.id))}
               onClick={() => (onPick ? onPick(m.id) : togglePreview(m.id))}
               onContextMenu={(e) => (onPick ? e.preventDefault() : itemMenu(e, m))}
               title={onPick ? $t('{0}（點一下加入）', displayName(m.name)) : displayName(m.name)}
@@ -759,6 +707,12 @@ function textSection(clip: Clip & { text: TextStyle }): Section {
   return {
     id: 'text',
     title: $t('文字'),
+    actions: (
+      <>
+        {clip.caption && <button className="ec-icon" title={$t('套用到全部字幕')} onClick={(e) => captionApplyMenu(e, clip.id)}><CopyCheck size={13} /></button>}
+        <button className="ec-icon" title={$t('存成我的樣式')} onClick={() => saveTextStyle(clip.id)}><BookmarkPlus size={13} /></button>
+      </>
+    ),
     rows: [
       { label: $t('列入字幕／歌詞匯出'), node: <Switch v={!!clip.caption} on={(v) => useStore.getState().updateClip(clip.id, { caption: v })} /> },
       {

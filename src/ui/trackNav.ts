@@ -1,7 +1,7 @@
 /**
  * 用鍵盤在時間軸上換片段 / 多選：
  * - Ctrl+← / →：同一條軌道的上一個 / 下一個項目
- * - Ctrl+Shift+← / →：往旁邊延伸（或縮回）選取範圍，像選文字一樣
+ * - Ctrl+Shift+← / →：往旁邊延伸（或縮回）選取範圍，像選文字一樣；畫面與播放頭跟著移動的那一端
  * - Ctrl+Home / End：軌道上第一個 / 最後一個；加 Shift = 從目前的一路選到頭 / 尾
  * - Ctrl+↑ / ↓：換到上面 / 下面的軌道（選播放頭所在、或最接近播放頭的項目）
  */
@@ -52,12 +52,13 @@ function pickOne(r: Ref) {
   revealSelection(false);
 }
 
-/** 從主選取（anchor）選到 r（focus）這一段 */
+/** 從主選取（anchor）選到 r（focus）這一段；播放頭與畫面跟著 focus（跟 Ctrl+← / → 換片段一樣） */
 function extendTo(r: Ref) {
   const s = useStore.getState();
   s.select({ type: r.type, id: r.it.id }, 'range');
+  if (s.time < r.it.start || s.time >= r.it.start + r.it.duration) s.setTime(r.it.start);
   focus = { type: r.type, id: r.it.id };
-  revealSelection(false);
+  revealSelection(false, focus);
 }
 
 /** 目前「游標」在哪一個項目：延伸中 = focus，不然 = 主選取 */

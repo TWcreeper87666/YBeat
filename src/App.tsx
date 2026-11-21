@@ -1,10 +1,10 @@
 import { $t, LANGS, lang, saveLang, type Lang } from './i18n';
 import { Check, CircleDot, LoaderCircle } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { FORMATS, formatLabel, projectDuration, useStore } from './store';
 import { InspectorPanel, MediaPanel, ModulePanel, TextPanel } from './ui/LeftPanel';
-import { isTextField } from './ui/focus';
+import { isTextField, modalOpen } from './ui/focus';
 import { MaskPanel } from './ui/MaskPanel';
 import { navEdge, navItem, navRow } from './ui/trackNav';
 import { CodePanel } from './ui/CodePanel';
@@ -27,14 +27,15 @@ import { loadDemo } from './engine/demo';
 import { undo, redo, useHistory } from './engine/history';
 import { newProject, saveNow, useSaveState, exportProjectPack, importProjectPack } from './engine/project';
 import { importFiles, pickFiles } from './engine/media';
-import { LyricsPanel, SubtitlesDialog } from './ui/SubtitlesDialog';
+import { LyricsPanel } from './ui/SubtitlesDialog';
+import { ColorPanel } from './ui/ColorPanel';
 import { EditorWindow, openEditorWindow, useEditorWindow } from './ui/EditorWindow';
 
 const FPS = 60;
 
 // ───────────── 對話框 ─────────────
 
-type Dialog = 'export' | 'subtitles' | 'shortcuts' | 'tutorial' | 'about' | 'new' | 'demo' | 'saveLayout' | 'settings' | null;
+type Dialog = 'export' | 'shortcuts' | 'tutorial' | 'about' | 'new' | 'demo' | 'saveLayout' | 'settings' | null;
 let setDialogGlobal: (d: Dialog) => void = () => {};
 const openDialog = (d: Dialog) => setDialogGlobal(d);
 
@@ -93,9 +94,9 @@ function ExportDialog({ close }: { close: () => void }) {
 
 function TutorialDialog({ close }: { close: () => void }) {
   return (
-    <div className="dialog wide tutorial">
+    <div className="dialog sheet tutorial">
       <h3>{$t('使用教學')}</h3>
-      <div className="tutorial-body">
+      <div className="dialog-body tutorial-body">
         {TUTORIAL.map((sec) => (
           <section key={sec.title}>
             <h4>{sec.title}</h4>
@@ -111,12 +112,14 @@ function TutorialDialog({ close }: { close: () => void }) {
 
 function ShortcutsDialog({ close }: { close: () => void }) {
   return (
-    <div className="dialog wide">
+    <div className="dialog sheet">
       <h3>{$t('快捷鍵')}</h3>
-      <div className="shortcut-grid">
-        {SHORTCUTS.map(([k, v]) => (
-          <div key={k} className="sc-row"><kbd>{k}</kbd><span>{v}</span></div>
-        ))}
+      <div className="dialog-body">
+        <div className="shortcut-grid">
+          {SHORTCUTS.map(([k, v]) => (
+            <div key={k} className="sc-row"><kbd>{k}</kbd><span>{v}</span></div>
+          ))}
+        </div>
       </div>
       <div className="dialog-actions"><button className="btn primary" onClick={close}>{$t('關閉')}</button></div>
     </div>
@@ -160,69 +163,79 @@ function SaveLayoutDialog({ close }: { close: () => void }) {
 
 const QUALITIES = [1, 0.75, 0.5, 0.33];
 
+/** 設定的一項：標題、副標題，下面是輸入；inline = 輸入放右邊（數值類） */
+function SetRow({ label, desc, inline, children }: { label: string; desc: ReactNode; inline?: boolean; children: ReactNode }) {
+  return (
+    <div className={`set-row ${inline ? 'inline' : ''}`}>
+      <div className="set-text">
+        <div className="set-name">{label}</div>
+        <div className="set-desc">{desc}</div>
+      </div>
+      <div className="set-ctl">{children}</div>
+    </div>
+  );
+}
+
 function SettingsDialog({ close }: { close: () => void }) {
   const L = useLayout();
   const P = usePrefs();
   const fmt = useStore((s) => s.format);
   return (
-    <div className="dialog wide settings">
+    <div className="dialog sheet settings">
       <h3>{$t('設定')}</h3>
-      <div className="set-sec">{$t('專案')}</div>
-      <div className="form-row col">
-        <span>{$t('輸出比例')}</span>
-        <div className="seg wrap">
-          {FORMATS.map((f) => (
-            <button key={f.id} className={fmt.w === f.w && fmt.h === f.h ? 'on' : ''} onClick={() => useStore.getState().setFormat(f)} title={`${f.w} × ${f.h}`}>
-              <span className="ratio-box" style={{ aspectRatio: `${f.w} / ${f.h}` }} />
-              {f.label}
-            </button>
-          ))}
-        </div>
-        <small className="muted">{fmt.w} × {fmt.h}</small>
-      </div>
-      <div className="set-sec">{$t('預覽')}</div>
-      <div className="form-row col">
-        <span>{$t('預覽畫質')}</span>
-        <div className="seg">
-          {QUALITIES.map((q) => (
-            <button key={q} className={L.previewScale === q ? 'on' : ''} onClick={() => L.set({ previewScale: q })}>
-              {q === 1 ? $t('完整') : `${Math.round(q * 100)}%`}
-            </button>
-          ))}
-        </div>
-        <small className="muted">{$t('降低預覽解析度可以減少 GPU 負擔，特效多、素材大時編輯會比較順。匯出一律是完整解析度。')}</small>
-      </div>
-      <div className="set-sec">{$t('時間軸')}</div>
-      <div className="form-row col">
-        <span>{$t('上層軌道顯示在')}</span>
-        <div className="seg">
-          <button className={L.upperLayerAt === 'bottom' ? 'on' : ''} onClick={() => L.set({ upperLayerAt: 'bottom' })}>{$t('下方')}</button>
-          <button className={L.upperLayerAt === 'top' ? 'on' : ''} onClick={() => L.set({ upperLayerAt: 'top' })}>{$t('上方')}</button>
-        </div>
-      </div>
-      <div className="form-row">
-        <span>{$t('圖片 / 色板 / 文字預設長度')}</span>
-        <div className="set-num"><DragNumber variant="text" value={P.stillDur} min={0.1} max={60} step={0.1} def={2} suffix="s" onChange={(v) => P.set({ stillDur: Math.round(v * 100) / 100 })} /></div>
-      </div>
-      <div className="form-row">
-        <span>{$t('轉場預設長度')}</span>
-        <div className="set-num"><DragNumber variant="text" value={P.transDur} min={0.05} max={5} step={0.05} def={0.4} suffix="s" onChange={(v) => P.set({ transDur: Math.round(v * 100) / 100 })} /></div>
-      </div>
-      <div className="form-row col">
-        <span>{$t('節拍提前')}</span>
-        <div className="beat-lead">
-          <DragNumber variant="text" value={L.beatLead} min={0} max={30} step={1} decimals={0} def={5} onChange={(v) => L.set({ beatLead: Math.round(v) })} />
-          <span className="muted small">/ 60 {$t('秒')} ≈ {Math.round((L.beatLead / 60) * 1000)} ms</span>
-        </div>
-        <small className="muted">{$t('節拍格線、吸附與節拍分割都會往前移這麼多：畫面先切換、聲音稍後到，看起來才會對到拍子。預設 5（約 0.08 秒）。')}</small>
-      </div>
-      <div className="set-sec">{$t('語言')} / Language</div>
-      <div className="form-row col">
-        <div className="seg">
-          {LANGS.map((l) => (
-            <button key={l.id} className={lang === l.id ? 'on' : ''} onClick={() => changeLanguage(l.id)}>{l.label}</button>
-          ))}
-        </div>
+      <div className="dialog-body">
+        <div className="set-sec">{$t('專案')}</div>
+        <SetRow label={$t('輸出比例')} desc={<>{$t('匯出與預覽的畫面比例')} · {fmt.w} × {fmt.h}</>}>
+          <div className="seg wrap">
+            {FORMATS.map((f) => (
+              <button key={f.id} className={fmt.w === f.w && fmt.h === f.h ? 'on' : ''} onClick={() => useStore.getState().setFormat(f)} title={`${f.w} × ${f.h}`}>
+                <span className="ratio-box" style={{ aspectRatio: `${f.w} / ${f.h}` }} />
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </SetRow>
+        <div className="set-sec">{$t('預覽')}</div>
+        <SetRow label={$t('預覽畫質')} desc={$t('調低編輯會比較順，不影響匯出')}>
+          <div className="seg">
+            {QUALITIES.map((q) => (
+              <button key={q} className={L.previewScale === q ? 'on' : ''} onClick={() => L.set({ previewScale: q })}>
+                {q === 1 ? $t('完整') : `${Math.round(q * 100)}%`}
+              </button>
+            ))}
+          </div>
+        </SetRow>
+        <div className="set-sec">{$t('時間軸')}</div>
+        <SetRow label={$t('上層軌道顯示在')} desc={$t('疊在上面的軌道放在時間軸的哪一邊')}>
+          <div className="seg">
+            <button className={L.upperLayerAt === 'bottom' ? 'on' : ''} onClick={() => L.set({ upperLayerAt: 'bottom' })}>{$t('下方')}</button>
+            <button className={L.upperLayerAt === 'top' ? 'on' : ''} onClick={() => L.set({ upperLayerAt: 'top' })}>{$t('上方')}</button>
+          </div>
+        </SetRow>
+        <SetRow label={$t('滾輪捲動方向')} desc={$t('在時間軸上直接滾動滾輪時')}>
+          <div className="seg">
+            <button className={L.wheelScroll !== 'vertical' ? 'on' : ''} onClick={() => L.set({ wheelScroll: 'horizontal' })}>{$t('水平')}</button>
+            <button className={L.wheelScroll === 'vertical' ? 'on' : ''} onClick={() => L.set({ wheelScroll: 'vertical' })}>{$t('垂直')}</button>
+          </div>
+        </SetRow>
+        <SetRow label={$t('圖片 / 色板 / 文字預設長度')} desc={$t('新加入時的長度')} inline>
+          <DragNumber value={P.stillDur} min={0.1} max={60} step={0.1} def={2} suffix=" s" onChange={(v) => P.set({ stillDur: Math.round(v * 100) / 100 })} />
+        </SetRow>
+        <SetRow label={$t('轉場預設長度')} desc={$t('新加入轉場時的長度')} inline>
+          <DragNumber value={P.transDur} min={0.05} max={5} step={0.05} def={0.4} suffix=" s" onChange={(v) => P.set({ transDur: Math.round(v * 100) / 100 })} />
+        </SetRow>
+        <SetRow label={$t('節拍提前')} desc={$t('節拍格線比聲音早一點，看起來才會對拍')} inline>
+          <span className="set-hint">≈ {Math.round((L.beatLead / 60) * 1000)} ms</span>
+          <DragNumber value={L.beatLead} min={0} max={30} step={1} decimals={0} def={4} suffix=" / 60 s" onChange={(v) => L.set({ beatLead: Math.round(v) })} />
+        </SetRow>
+        <div className="set-sec">{$t('語言')} / Language</div>
+        <SetRow label={$t('介面語言')} desc={$t('切換後會重新載入')}>
+          <div className="seg">
+            {LANGS.map((l) => (
+              <button key={l.id} className={lang === l.id ? 'on' : ''} onClick={() => changeLanguage(l.id)}>{l.label}</button>
+            ))}
+          </div>
+        </SetRow>
       </div>
       <div className="dialog-actions"><button className="btn primary" onClick={close}>{$t('完成')}</button></div>
     </div>
@@ -243,7 +256,6 @@ function Dialogs() {
   return (
     <div className="overlay" onPointerDown={(e) => e.target === e.currentTarget && close()}>
       {d === 'export' && <ExportDialog close={close} />}
-      {d === 'subtitles' && <SubtitlesDialog close={close} />}
       {d === 'shortcuts' && <ShortcutsDialog close={close} />}
       {d === 'tutorial' && <TutorialDialog close={close} />}
       {d === 'new' && <NewDialog close={close} />}
@@ -310,7 +322,6 @@ function menus(): { label: string; items: () => MenuItem[] }[] {
         { label: $t('匯入媒體…'), shortcut: 'Ctrl+O', action: async () => importFiles(await pickFiles()) },
         { label: $t('匯入專案包…'), action: async () => { const [file] = await pickFiles('.ybeat', false); if (!file) return; if (!await confirmDialog({ title: $t('匯入專案包？'), message: $t('目前專案會被取代，請先匯出專案包備份。'), ok: $t('匯入') })) return; try { await importProjectPack(file); toast($t('專案包已匯入')); } catch (e) { toast($t('匯入失敗：{0}', e instanceof Error ? e.message : e), 'error'); } } },
         { label: $t('匯出專案包…'), action: async () => { try { downloadBlob(await exportProjectPack(), 'YBeat_project.ybeat'); toast($t('專案包已匯出')); } catch (e) { toast($t('匯出失敗：{0}', e instanceof Error ? e.message : e), 'error'); } } },
-        { label: $t('字幕／歌詞…'), action: () => useDock.getState().activatePanel('lyrics') },
         { label: $t('載入示範專案…'), action: () => (projectDuration(S()) > 0 ? openDialog('demo') : loadDemo()) },
         { separator: true },
         { label: $t('立即存檔'), shortcut: 'Ctrl+S', action: () => saveNow().then(() => toast($t('已儲存'))) },
@@ -418,14 +429,13 @@ function onKey(e: KeyboardEvent) {
   if (isTextField(el)) return; // 只有打字欄位攔住快捷鍵（滑桿、下拉選單等由 focus.ts 處理）
   const s = useStore.getState();
   const mod = e.ctrlKey || e.metaKey;
-  // 對話框開著（例如使用教學）時，Ctrl+C / A 交給瀏覽器（複製 / 全選文字），不要動到時間軸
-  if (mod && (e.key.toLowerCase() === 'c' || e.key.toLowerCase() === 'a') && document.querySelector('.dialog')) {
-    if (e.key.toLowerCase() === 'a') {
-      const body = document.querySelector('.dialog .tutorial-body');
-      if (body) {
-        e.preventDefault();
-        getSelection()?.selectAllChildren(body);
-      }
+  // 對話框開著：編輯器的快捷鍵一律不作用（對話框自己處理 Enter / Esc）。
+  // Ctrl+A 只全選使用教學的文字（沒有就什麼都不做，免得瀏覽器全選），Ctrl+C 交給瀏覽器複製
+  if (modalOpen()) {
+    if (mod && e.key.toLowerCase() === 'a') {
+      e.preventDefault();
+      const body = document.querySelector('.overlay .tutorial-body');
+      if (body) getSelection()?.selectAllChildren(body);
     }
     return;
   }
@@ -559,6 +569,7 @@ export default function App() {
       )}
       <EditorWindow hosts={hosts} />
       {createPortal(<MediaPanel />, hosts.media)}
+      {createPortal(<ColorPanel />, hosts.color)}
       {createPortal(<TextPanel />, hosts.text)}
       {createPortal(<LyricsPanel />, hosts.lyrics)}
       {createPortal(<ModulePanel kind="transition" />, hosts.transition)}

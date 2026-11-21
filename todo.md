@@ -41,7 +41,7 @@
 
 - [ ] no idea speed curve how to use
 - [x] drag clip start/end should always allow overlap other clips, and press ctrl during the period should work(speed change by clip length)
-- [ ] stupid lyrics UI and function fix, should have a lyrics tab
+- [x] stupid lyrics UI and function fix, should have a lyrics tab
 - [x] 鎖住軌道後就無法選取track的任何片段(選中該軌道也不行)，右鍵會出現解鎖選項，鎖住的UI簡化，就是變深色，鎖頭顏色變亮，不需要bg什麼的
 - [x] undo時media card遺失，我說的自動移除是只有missing的片段才會自動剔除
 - [x] ghost item can't snap other track

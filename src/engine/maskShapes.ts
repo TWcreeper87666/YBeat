@@ -79,33 +79,29 @@ export const builtinShapes = () => (builtinCache ??= BUILTIN());
 
 interface MaskLib {
   customs: CustomShape[];
-  favorites: string[];
   add(s: Omit<CustomShape, 'id'>): string;
   remove(id: string): void;
   rename(id: string, name: string): void;
   update(id: string, patch: Partial<Omit<CustomShape, 'id'>>): void;
-  toggleFav(id: string): void;
 }
 
 export const useMaskLib = create<MaskLib>()(
   persist(
     (set, get) => ({
       customs: [],
-      favorites: [],
       add: (s) => {
         const id = `custom:${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
         set({ customs: [...get().customs, { ...s, id }] });
         return id;
       },
-      remove: (id) => set({ customs: get().customs.filter((c) => c.id !== id), favorites: get().favorites.filter((f) => f !== id) }),
+      remove: (id) => set({ customs: get().customs.filter((c) => c.id !== id) }),
       rename: (id, name) => set({ customs: get().customs.map((c) => (c.id === id ? { ...c, name } : c)) }),
       update: (id, patch) => {
         fields.delete(id); // 形狀改了：距離場重算
         set({ customs: get().customs.map((c) => (c.id === id ? { ...c, ...patch } : c)) });
       },
-      toggleFav: (id) => set({ favorites: get().favorites.includes(id) ? get().favorites.filter((f) => f !== id) : [...get().favorites, id] }),
     }),
-    { name: 'ybeat-masks', partialize: (s) => ({ customs: s.customs, favorites: s.favorites }) },
+    { name: 'ybeat-masks', partialize: (s) => ({ customs: s.customs }) },
   ),
 );
 

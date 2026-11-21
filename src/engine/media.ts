@@ -1,4 +1,5 @@
 import { dropMatte } from './matte';
+import { colorBlob } from './colorBlob';
 import { $t } from '../i18n';
 import { uid, useStore, type Media } from '../store';
 import { PEAKS_PER_SEC, computePeaks, getAudioBuffer } from './audio';
@@ -126,18 +127,16 @@ export const colorName = (hex: string) => $t('色板 {0}', hex.toLowerCase());
 
 /** 純色素材（色板）：已經有同色的就直接用，沒有就產生一張 9:16 純色圖 */
 export async function colorMedia(hex: string): Promise<Media | null> {
-  const name = colorName(hex);
-  const hit = useStore.getState().media.find((m) => m.name === name && !m.missing);
+  const color = hex.toLowerCase();
+  const hit = useStore.getState().media.find((m) => m.color === color && !m.missing);
   if (hit) return hit;
-  const c = document.createElement('canvas');
-  c.width = 108;
-  c.height = 192;
-  const g = c.getContext('2d')!;
-  g.fillStyle = hex;
-  g.fillRect(0, 0, c.width, c.height);
-  const blob = await new Promise<Blob | null>((res) => c.toBlob(res, 'image/png'));
+  const blob = await colorBlob(color);
   if (!blob) return null;
-  return addMediaBlob(blob, name);
+  const m = await addMediaBlob(blob, colorName(color));
+  if (!m) return null;
+  const out = { ...m, color };
+  useStore.setState({ media: useStore.getState().media.map((x) => (x.id === m.id ? out : x)) });
+  return out;
 }
 
 /** 從素材庫移除：沒被使用就直接刪；被使用就變成「遺失」狀態，片段保留 */
@@ -175,12 +174,12 @@ export function removeMediaEverywhere(ids: string[]): boolean {
   return true;
 }
 
-/** 時間軸最後一個引用消失時，只自動移除來源遺失的素材；復原時重新顯示。 */
+/** 時間軸最後一個引用消失時，自動移除來源遺失的素材與色板（色板隨時可以重新產生）；復原時重新顯示。 */
 useStore.subscribe((s, prev) => {
   if (s.clips === prev.clips && s.audios === prev.audios) return;
   const before = new Set([...prev.clips.map((c) => c.mediaId), ...prev.audios.map((a) => a.mediaId)]);
   const after = new Set([...s.clips.map((c) => c.mediaId), ...s.audios.map((a) => a.mediaId)]);
-  const gone = s.media.filter((m) => m.missing && before.has(m.id) && !after.has(m.id));
+  const gone = s.media.filter((m) => (m.missing || m.color) && before.has(m.id) && !after.has(m.id));
   const back = [...after].filter((id) => !s.media.some((m) => m.id === id) && detachedMedia.has(id)).map((id) => detachedMedia.get(id)!);
   if (!gone.length && !back.length) return;
   for (const m of gone) { detachedMedia.set(m.id, m); detachedMediaOrder.set(m.id, s.media.findIndex((x) => x.id === m.id)); }
@@ -192,3 +191,4 @@ useStore.subscribe((s, prev) => {
   }
   useStore.setState({ media });
 });
+

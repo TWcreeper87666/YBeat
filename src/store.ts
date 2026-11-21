@@ -10,7 +10,7 @@ export { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualR
 import { ANIM_PROPS, newKey, scaleKeyList, scaleKeyMap, splitKeys, type Ease, type Keyframe, type Keys } from './engine/keyframes';
 import { CURVE_ID, curveToKeys, parseCurve } from './engine/remapCurve';
 import { fitStart, groupFits, resolveShift, overwriteParts, insertParts, type Span } from './engine/overlap';
-import { stillDur, transDur } from './prefs';
+import { stillDur, transDur, userTextStyle } from './prefs';
 import { PPS_MAX, PPS_MIN } from './engine/rulerTicks';
 import { DEFAULT_TEXT, TEXT_PRESETS, type TextStyle } from './engine/text';
 import type { Mask } from './engine/mask';
@@ -31,6 +31,8 @@ export interface Media {
   peaksPerSec?: number;
   /** 檔案遺失（重新整理後找不到 / 被移除），需要重新連結 */
   missing?: boolean;
+  /** 色板素材（純色）：色碼。不顯示在素材分頁、資料不見時會重新產生，不會遺失 */
+  color?: string;
 }
 
 export interface TransitionRef {
@@ -959,6 +961,7 @@ export const useStore = create<State>()(
 
         addText: (presetId, start, track, duration) => {
           const s = get();
+          const user = userTextStyle(presetId);
           const p = TEXT_PRESETS.find((x) => x.id === presetId) ?? TEXT_PRESETS[0];
           const dur = duration ?? stillDur();
           // 預設放在最上面的影片軌
@@ -971,10 +974,18 @@ export const useStore = create<State>()(
             start: fitStart(spansOf(s), laneOf('clip', tk), t0, dur),
             duration: dur,
             fit: 'contain',
-            text: { ...DEFAULT_TEXT, ...p.style },
-            caption: presetId === 'subtitle' || presetId === 'boxed',
-            transform: { ...DEFAULT_TRANSFORM, y: p.y },
+            text: user ? { ...DEFAULT_TEXT, ...user.style } : { ...DEFAULT_TEXT, ...p.style },
+            caption: user ? user.caption : presetId === 'subtitle' || presetId === 'boxed',
+            transform: user ? { ...DEFAULT_TRANSFORM, ...user.transform } : { ...DEFAULT_TRANSFORM, y: p.y },
           });
+          // 我的樣式：一起套上存下來的轉場與片段特效（模組已刪除的略過）
+          if (user) {
+            const has = (id?: string) => !!id && s.modules.some((m) => m.id === id);
+            clip.transitionIn = has(user.transitionIn?.moduleId) ? structuredClone(user.transitionIn) : null;
+            clip.transitionOut = has(user.transitionOut?.moduleId) ? structuredClone(user.transitionOut) : null;
+            const fx = user.effects.filter((f) => has(f.moduleId)).map((f) => ({ ...structuredClone(f), id: uid() }));
+            if (fx.length) clip.effects = fx;
+          }
           set({ clips: [...s.clips, clip], selection: { type: 'clip', id: clip.id }, selected: [keyOf('clip', clip.id)], leftTab: 'editor' });
         },
 

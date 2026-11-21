@@ -1,6 +1,6 @@
 /** 版面樹（純函式，不依賴 React，方便測試） */
 
-export type PanelId = 'media' | 'text' | 'lyrics' | 'transition' | 'effect' | 'mask' | 'remap' | 'inspector' | 'code' | 'ai' | 'preview' | 'timeline';
+export type PanelId = 'media' | 'color' | 'text' | 'lyrics' | 'transition' | 'effect' | 'mask' | 'remap' | 'inspector' | 'code' | 'ai' | 'preview' | 'timeline';
 export interface TabsNode { type: 'tabs'; id: string; tabs: PanelId[]; active: PanelId }
 export interface SplitNode { type: 'split'; id: string; dir: 'row' | 'col'; children: DockNode[]; sizes: number[] }
 export type DockNode = TabsNode | SplitNode;
@@ -16,6 +16,7 @@ export type DropTarget =
  */
 export const PANEL_MIN: Record<PanelId, { w: number; h: number }> = {
   media: { w: 220, h: 160 },
+  color: { w: 220, h: 200 },
   text: { w: 220, h: 160 },
   lyrics: { w: 300, h: 180 },
   transition: { w: 220, h: 160 },

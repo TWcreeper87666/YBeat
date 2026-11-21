@@ -65,3 +65,17 @@ assert.deepEqual(useStore.getState().media.map((m) => m.id), ['missing', 'b']);
   assert.equal(attachedAudioIds(useStore.getState()).has(audio.id), true);
 }
 console.log('PASS media follows timeline references and restores on undo');
+
+// 色板：最後一個片段刪掉時跟著移除、復原時回來
+{
+
+  const col = { id: 'col', name: '色板 #ff3d6e', kind: 'image' as const, url: 'blob:col', width: 108, height: 192, duration: 0, thumb: 'blob:col', hasAudio: false, color: '#ff3d6e' };
+  const cc = makeClip({ id: 'cc', mediaId: col.id, start: 0, duration: 2 });
+  useStore.setState({ media: [col, b], clips: [cc], audios: [], effects: [], tracks: { video: [{}], fx: [], audio: [{}] } });
+  resetHistory();
+  useStore.setState({ clips: [] });
+  assert.deepEqual(useStore.getState().media.map((m) => m.id), ['b']);
+  undo();
+  assert.deepEqual(useStore.getState().media.map((m) => m.id), ['col', 'b']);
+  console.log('PASS 色板跟著時間軸移除 / 復原');
+}

@@ -5,6 +5,9 @@
  *   按鍵時先把焦點拿掉，快捷鍵照常作用；方向鍵 / Space / Enter 也不會再去改那個控制項。
  */
 
+/** 有開著的對話框（全螢幕遮罩裡的 .dialog）：這時編輯器的快捷鍵一律不作用 */
+export const modalOpen = () => !!document.querySelector('.overlay .dialog');
+
 /** 不能打字的 input 類型（其他類型都當文字欄位） */
 const NON_TEXT_INPUT = new Set(['range', 'checkbox', 'radio', 'color', 'button', 'submit', 'reset', 'file', 'image']);
 

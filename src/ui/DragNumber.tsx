@@ -7,6 +7,7 @@ import { openMenu, toast } from './uiStore';
  * - 按住左右拖曳改數值（游標會鎖定，可以一直拖）；Shift = 微調，Ctrl = 對齊刻度
  * - 單擊進入輸入模式，可輸入算式（例如 1/3、2*0.5），Enter 確定、Esc 取消
  * - 兩側箭頭一次加減一格；右鍵可重設為預設值
+ * - 輸入模式中按 ↑ / ↓ 加減一格（Shift = 十格），數值立刻套用
  */
 export function DragNumber({
   label,
@@ -21,6 +22,9 @@ export function DragNumber({
   bar = false,
   variant = 'box',
   display,
+  format,
+  parse,
+  disabled = false,
 }: {
   label?: string;
   value: number;
@@ -37,6 +41,11 @@ export function DragNumber({
   variant?: 'box' | 'text';
   /** 顯示倍率（例如縮放 1.0 顯示成 100%） */
   display?: number;
+  /** 自訂顯示文字（例如時間碼）；輸入模式也用它當初始文字 */
+  format?: (v: number) => string;
+  /** 自訂輸入解析（回傳 null / NaN = 無效）；沒給就用算式 */
+  parse?: (s: string) => number | null;
+  disabled?: boolean;
 }) {
   const mul = display ?? 1;
   const ranged = Number.isFinite(min) && Number.isFinite(max);
@@ -52,11 +61,40 @@ export function DragNumber({
     if (editing) inputRef.current?.select();
   }, [editing]);
 
+  // 輸入模式按 ↑ / ↓ 後，輸入框顯示實際套用的值（外部可能有再限制範圍）
+  const syncText = useRef(false);
+  useEffect(() => {
+    if (!syncText.current) return;
+    syncText.current = false;
+    if (editing) setText(toText(value));
+  }, [value]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const clamp = (v: number) => Math.min(max, Math.max(min, v));
   const round = (v: number) => Number(v.toFixed(Math.max(dec, 0) + 1));
+  const toText = (v: number) => (format ? format(v) : String(Number((v * mul).toFixed(dec + 2))));
+  const fromText = (t: string) => {
+    if (!parse) {
+      const v = evalExpr(t);
+      return v === null ? null : v / mul;
+    }
+    const v = parse(t);
+    return v === null || !Number.isFinite(v) ? null : v;
+  };
+  const startEdit = () => {
+    setText(toText(value));
+    setEditing(true);
+  };
+  /** ↑ / ↓：加減一格，Shift = 十格。回傳新數值；不是方向鍵回傳 null */
+  const arrowStep = (e: React.KeyboardEvent, from: number) => {
+    if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return null;
+    e.preventDefault();
+    const v = round(clamp(from + (e.key === 'ArrowUp' ? 1 : -1) * st * (e.shiftKey ? 10 : 1)));
+    onChange(v);
+    return v;
+  };
 
   const onPointerDown = (e: React.PointerEvent) => {
-    if (e.button !== 0 || editing) return;
+    if (e.button !== 0 || editing || disabled) return;
     e.preventDefault();
     const el = ref.current!;
     const start = value;
@@ -85,24 +123,22 @@ export function DragNumber({
       window.removeEventListener('pointerup', up);
       if (locked && document.pointerLockElement) document.exitPointerLock();
       setDragging(false);
-      if (!moved) {
-        setText(String(Number((value * mul).toFixed(dec + 2))));
-        setEditing(true);
-      }
+      if (!moved) startEdit();
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   };
 
   const commit = () => {
-    const v = evalExpr(text);
-    if (v !== null) onChange(round(clamp(v / mul)));
+    const v = fromText(text);
+    if (v !== null) onChange(round(clamp(v)));
     setEditing(false);
   };
 
   const stepBy = (dir: number) => (e: React.PointerEvent) => {
     e.stopPropagation();
     e.preventDefault();
+    if (disabled) return;
     onChange(round(clamp(value + dir * st)));
   };
 
@@ -111,24 +147,25 @@ export function DragNumber({
   return (
     <div
       ref={ref}
-      className={`dragnum ${variant} ${dragging ? 'dragging' : ''} ${editing ? 'editing' : ''} ${def !== undefined && Math.abs(value - def) > 1e-9 ? 'modified' : ''}`}
+      className={`dragnum ${variant} ${dragging ? 'dragging' : ''} ${editing ? 'editing' : ''} ${disabled ? 'disabled' : ''} ${def !== undefined && Math.abs(value - def) > 1e-9 ? 'modified' : ''}`}
       onPointerDown={onPointerDown}
       onContextMenu={(e) => {
         e.preventDefault();
         e.stopPropagation();
+        if (disabled) return;
         openMenu(e.clientX, e.clientY, [
           { label: $t('重設為預設值'), action: def !== undefined ? () => onChange(def) : undefined },
-          { label: $t('複製數值'), action: () => navigator.clipboard?.writeText(String(Number((value * mul).toFixed(dec + 2)))) },
+          { label: $t('複製數值'), action: () => navigator.clipboard?.writeText(toText(value)) },
           {
             label: $t('貼上數值'),
             action: async () => {
               try {
-                const pasted = evalExpr(await navigator.clipboard.readText());
+                const pasted = fromText(await navigator.clipboard.readText());
                 if (pasted === null) {
                   toast($t('剪貼簿內容不是有效數值'), 'error');
                   return;
                 }
-                onChange(round(clamp(pasted / mul)));
+                onChange(round(clamp(pasted)));
               } catch {
                 toast($t('無法讀取剪貼簿'), 'error');
               }
@@ -147,7 +184,12 @@ export function DragNumber({
           onBlur={commit}
           onKeyDown={(e) => {
             e.stopPropagation();
-            if (e.key === 'Enter') commit();
+            const v = arrowStep(e, fromText(text) ?? value);
+            if (v !== null) {
+              syncText.current = true;
+              setText(toText(v));
+            }
+            else if (e.key === 'Enter') commit();
             else if (e.key === 'Escape') setEditing(false);
           }}
         />
@@ -155,7 +197,7 @@ export function DragNumber({
         <>
           <span className="dn-arrow l" onPointerDown={stepBy(-1)}>‹</span>
           {label && <span className="dn-label">{label}</span>}
-          <span className="dn-value">{(value * mul).toFixed(Math.max(0, dec - Math.round(Math.log10(mul))))}{suffix}</span>
+          <span className="dn-value">{format ? format(value) : (value * mul).toFixed(Math.max(0, dec - Math.round(Math.log10(mul))))}{suffix}</span>
           <span className="dn-arrow r" onPointerDown={stepBy(1)}>›</span>
         </>
       )}

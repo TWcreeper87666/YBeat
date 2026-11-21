@@ -1,13 +1,14 @@
 import { $t } from '../i18n';
 import { Ban, Plus, CircleHelp, PenTool } from 'lucide-react';
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { useStore, type FxItem } from '../store';
 import { DEFAULT_MASK, type Mask, type MaskShape } from '../engine/mask';
 import { allShapes, shapeFromImage, shapeInfo, useMaskLib, type ShapeInfo } from '../engine/maskShapes';
 import { pickFiles } from '../engine/media';
 import { CLIP_MASK_ID } from '../modules/extra';
-import { FavButton, LibFilter, LibToolbar, match, onBlank } from './Library';
+import { FavButton, LibFilter, LibToolbar, byFavOrder, favSortOpts, match, onBlank } from './Library';
 import { startLibraryDrag } from './dnd';
+import { useFavList, useFavorites } from './favorites';
 import { cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { openShapeDrawer } from './ShapeDrawer';
 import { confirmDialog, openMenu, promptDialog, toast, useLayout, type MenuItem } from './uiStore';
@@ -184,7 +185,9 @@ export function MaskLibrary({ onPick, current, allowNone, drawKey }: { onPick?: 
   const setCat = (c: string) => useLayout.getState().set({ modCat: { ...useLayout.getState().modCat, mask: c } });
   const [q, setQ] = useState('');
   const shapes = allShapes();
-  const fav = new Set(lib.favorites);
+  const favorites = useFavList('mask');
+  const fav = new Set(favorites);
+  const toggleFav = (id: string) => useFavorites.getState().toggle('mask', id);
   const inCat = (s: ShapeInfo, c: string) => c === 'all' || (c === 'fav' ? fav.has(s.id) : s.cat === c);
   const cats = [
     { id: 'all', label: $t('全部') },
@@ -193,7 +196,12 @@ export function MaskLibrary({ onPick, current, allowNone, drawKey }: { onPick?: 
     { id: 'symbol', label: $t('符號') },
     { id: 'custom', label: $t('自訂') },
   ].map((c) => ({ ...c, count: shapes.filter((s) => inCat(s, c.id)).length }));
-  const list = shapes.filter((s) => inCat(s, cat) && match(s.name, q));
+  const filtered = shapes.filter((s) => inCat(s, cat) && match(s.name, q));
+  const list = cat === 'fav' ? byFavOrder(filtered, (s) => s.id, favorites) : filtered;
+  // 我的最愛：拖曳調整順序（挑選視窗、搜尋中不行）
+  const gridRef = useRef<HTMLDivElement>(null);
+  const sortable = cat === 'fav' && !q.trim() && !onPick;
+  const sortOpts = (id: string) => (sortable ? favSortOpts(gridRef.current, id, list.map((s) => s.id), 'mask') : undefined);
 
   const pick = (id: string) => (onPick ? onPick(id) : applyToSelection(id));
 
@@ -201,7 +209,7 @@ export function MaskLibrary({ onPick, current, allowNone, drawKey }: { onPick?: 
     e.preventDefault();
     e.stopPropagation();
     const items: MenuItem[] = [
-      { label: fav.has(s.id) ? $t('從我的最愛移除') : $t('加入我的最愛'), action: () => lib.toggleFav(s.id) },
+      { label: fav.has(s.id) ? $t('從我的最愛移除') : $t('加入我的最愛'), action: () => toggleFav(s.id) },
       { label: onPick ? $t('使用這個形狀') : $t('套用到選取的片段 / 特效'), action: () => pick(s.id) },
     ];
     if (s.cat === 'custom') {
@@ -221,7 +229,7 @@ export function MaskLibrary({ onPick, current, allowNone, drawKey }: { onPick?: 
           danger: true,
           action: async () => {
             const ok = await confirmDialog({ title: $t('刪除形狀？'), message: $t('已經用了這個形狀的遮罩會變成「形狀遺失」（改用矩形顯示），可以再換成別的形狀。'), ok: $t('刪除'), danger: true });
-            if (ok) lib.remove(s.id);
+            if (ok) { lib.remove(s.id); useFavorites.getState().remove('mask', s.id); }
           },
         },
       );
@@ -240,7 +248,7 @@ export function MaskLibrary({ onPick, current, allowNone, drawKey }: { onPick?: 
       <LibFilter id="mask" cats={cats} cur={cat} set={setCat} />
       <div className="lib-body" onDoubleClick={onBlank(onPick ? undefined : () => openShapeDrawer({ target: drawKey ?? drawKeyForSelection() }))}>
         {list.length === 0 && <p className="muted small center">{empty}</p>}
-        <div className={view === 'grid' ? 'lib-grid shapes' : 'lib-list'}>
+        <div ref={gridRef} className={view === 'grid' ? 'lib-grid shapes' : 'lib-list'}>
           {allowNone && cat === 'all' && !q && (
             <div className={`lib-item shape-item ${current === 'none' ? 'current' : ''}`} onClick={() => pick('none')} title={$t('不使用遮罩')}>
               <div className="lib-thumb shape-cell"><ShapeThumb id="none" /></div>
@@ -251,13 +259,14 @@ export function MaskLibrary({ onPick, current, allowNone, drawKey }: { onPick?: 
             <div
               key={s.id}
               className={`lib-item shape-item ${current === s.id ? 'current' : ''}`}
-              onPointerDown={(e) => !onPick && startLibraryDrag(e, { kind: 'mask', shape: s.id }, s.name, dragThumb(s))}
+              data-sort-key={sortable ? s.id : undefined}
+              onPointerDown={(e) => !onPick && startLibraryDrag(e, { kind: 'mask', shape: s.id }, s.name, dragThumb(s), sortOpts(s.id))}
               onClick={() => pick(s.id)}
               onContextMenu={(e) => itemMenu(e, s)}
               title={s.name}
             >
               <div className="lib-thumb shape-cell"><ShapeThumb id={s.id} /></div>
-              <FavButton on={fav.has(s.id)} toggle={() => lib.toggleFav(s.id)} />
+              <FavButton on={fav.has(s.id)} toggle={() => toggleFav(s.id)} />
               <div className="lib-meta">
                 <div className="lib-name">{s.name}</div>
                 {view === 'list' && s.cat === 'custom' && <div className="lib-sub">{$t('自訂')}</div>}

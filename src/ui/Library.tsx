@@ -4,6 +4,9 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { create } from 'zustand';
 import { useStore } from '../store';
 import { useLayout } from './uiStore';
+import { reorderSubset } from './sortKeys';
+import type { SortOpts } from './dnd';
+import { useFavorites, type LibId } from './favorites';
 
 /**
  * 素材庫的共用底板：搜尋 + 檢視切換、分類籤、以及「挑選視窗」。
@@ -16,7 +19,7 @@ import { useLayout } from './uiStore';
  * filter：有分類籤的素材庫才給。搜尋列右邊多一個篩選按鈕，開關分類籤；
  * 收起來時一律顯示全部（呼叫 filter.reset 把分類改回「全部」）。
  */
-export function LibToolbar({ id, query, setQuery, children, filter }: { id: string; query: string; setQuery: (q: string) => void; children?: React.ReactNode; filter?: { active: boolean; reset: () => void } }) {
+export function LibToolbar({ id, query, setQuery, children, filter, views = true }: { id: string; query: string; setQuery: (q: string) => void; children?: React.ReactNode; filter?: { active: boolean; reset: () => void }; views?: boolean }) {
   const view = useLayout((s) => s.libView[id] ?? 'grid');
   const open = useLayout((s) => !!s.libFilterOpen[id]);
   const toggleFilter = () => {
@@ -39,10 +42,10 @@ export function LibToolbar({ id, query, setQuery, children, filter }: { id: stri
         </button>
       )}
       {children}
-      <div className="lib-view">
+      {views && <div className="lib-view">
         <button className={view === 'list' ? 'on' : ''} title={$t('清單')} onClick={() => setView('list')}><List size={14} /></button>
         <button className={view === 'grid' ? 'on' : ''} title={$t('格狀')} onClick={() => setView('grid')}><LayoutGrid size={14} /></button>
-      </div>
+      </div>}
     </div>
   );
 }
@@ -174,4 +177,21 @@ export function PickerHost() {
       <div className="float-body picker-body">{req.body(closePicker)}</div>
     </div>
   );
+}
+
+// ───────────── 我的最愛：照加入 / 拖曳排好的順序，可以拖曳排序（各分頁共用） ─────────────
+
+/** 「我的最愛」分類裡的項目照 favorites 的順序排 */
+export function byFavOrder<T>(items: T[], id: (t: T) => string, favorites: string[]): T[] {
+  const pos = new Map(favorites.map((f, i) => [f, i]));
+  return [...items].sort((a, b) => (pos.get(id(a)) ?? 0) - (pos.get(id(b)) ?? 0));
+}
+
+/**
+ * 我的最愛的拖曳排序設定（給 startLibraryDrag）：container 是放卡片的格子（卡片要有 data-sort-key）。
+ * keys = 目前顯示的項目；清單裡如果還有已經刪掉、沒顯示的項目，留在原位。
+ */
+export function favSortOpts(container: HTMLElement | null, key: string, keys: string[], lib: LibId): SortOpts | undefined {
+  if (!container) return undefined;
+  return { container, key, keys, apply: (next) => useFavorites.getState().set(lib, reorderSubset(useFavorites.getState().lists[lib] ?? [], next)) };
 }

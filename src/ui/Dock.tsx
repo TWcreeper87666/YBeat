@@ -16,6 +16,7 @@ export type { PanelId };
 
 export const PANELS: { id: PanelId; title: string }[] = [
   { id: 'media', title: $t('素材') },
+  { id: 'color', title: $t('色板') },
   { id: 'text', title: $t('文字') },
   { id: 'lyrics', title: $t('字幕／歌詞') },
   { id: 'transition', title: $t('轉場') },
@@ -29,7 +30,7 @@ export const PANELS: { id: PanelId; title: string }[] = [
   { id: 'timeline', title: $t('時間軸') },
 ];
 const TITLE = Object.fromEntries(PANELS.map((p) => [p.id, p.title])) as Record<PanelId, string>;
-const LIB: PanelId[] = ['media', 'text', 'lyrics', 'transition', 'effect', 'mask', 'remap'];
+const LIB: PanelId[] = ['media', 'color', 'text', 'lyrics', 'transition', 'effect', 'mask', 'remap'];
 
 /** 內建版面 */
 export const PRESETS: { id: string; name: string; build: () => DockNode }[] = [
@@ -108,42 +109,6 @@ export const useDock = create<DockState>()(
     {
       name: 'ybeat-dock',
       partialize: (s) => ({ layout: s.layout, current: s.current, customs: s.customs }),
-      // 舊版存的版面沒有「文字」分頁：加在「素材」旁邊
-      merge: (persisted, current) => {
-        const p = (persisted ?? {}) as Partial<DockState>;
-        const addText = (l: DockNode | null | undefined) =>
-          l && !panelsIn(l).includes('text')
-            ? mapTabs(l, (t) => (t.tabs.includes('media') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'media' ? ['media', 'text'] : [x])) as PanelId[] } : t))
-            : l;
-        // 「素材預覽」分頁已併回「預覽」：舊版面裡的拿掉
-        const dropSource = (l: DockNode | null | undefined) => (l ? removePanel(l, 'source' as PanelId) : l);
-        // 「遮罩」加在「特效」後面
-        const addMask = (l: DockNode | null | undefined) =>
-          l && !panelsIn(l).includes('mask')
-            ? mapTabs(l, (t) => (t.tabs.includes('effect') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'effect' ? ['effect', 'mask'] : [x])) as PanelId[] } : t))
-            : l;
-        // 「程式碼」加在「屬性」後面
-        const addCode = (l: DockNode | null | undefined) =>
-          l && !panelsIn(l).includes('code')
-            ? mapTabs(l, (t) => (t.tabs.includes('inspector') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'inspector' ? ['inspector', 'code'] : [x])) as PanelId[] } : t))
-            : l;
-        // 「AI」加在「程式碼」後面
-        const addAi = (l: DockNode | null | undefined) =>
-          l && !panelsIn(l).includes('ai')
-            ? mapTabs(l, (t) => (t.tabs.includes('code') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'code' ? ['code', 'ai'] : [x])) as PanelId[] } : t))
-            : l;
-        const addLyrics = (l: DockNode | null | undefined) =>
-          l && !panelsIn(l).includes('lyrics')
-            ? mapTabs(l, (t) => (t.tabs.includes('text') ? { ...t, tabs: t.tabs.flatMap((x) => (x === 'text' ? ['text', 'lyrics'] : [x])) as PanelId[] } : t))
-            : l;
-        const fix = (l: DockNode | null | undefined) => addLyrics(addAi(addCode(addMask(addText(dropSource(l))))));
-        return {
-          ...current,
-          ...p,
-          layout: p.layout === undefined ? current.layout : fix(p.layout) ?? null,
-          customs: (p.customs ?? current.customs).map((c) => ({ ...c, layout: fix(c.layout)! })),
-        };
-      },
     },
   ),
 );

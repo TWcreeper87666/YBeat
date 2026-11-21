@@ -13,7 +13,7 @@ type S = ReturnType<typeof useStore.getState>;
 
 let memo: { audios: S['audios']; clips: S['clips']; media: S['media']; lead: number; division: number; beats: Beat[] } | null = null;
 /** 節拍提前（秒）：設定裡是 1/60 秒為單位 */
-export const beatLead = () => Math.max(0, useLayout.getState().beatLead ?? 5) / 60;
+export const beatLead = () => Math.max(0, useLayout.getState().beatLead ?? 4) / 60;
 /** 目前專案的節拍（時間軸秒數，已經往前移「節拍提前」）；音訊 / 素材沒變就用上次算好的 */
 export function getBeats(s: S = useStore.getState(), division = useLayout.getState().beatDivision): Beat[] {
   const lead = beatLead();

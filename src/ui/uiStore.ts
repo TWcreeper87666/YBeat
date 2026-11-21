@@ -1,7 +1,7 @@
 import { $t } from '../i18n';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
-import type { TrackKind } from '../store';
+import type { DropFit, TrackKind } from '../store';
 import type { MediaPlacement } from '../engine/mediaBatch';
 
 // ───────────── 版面（記住在 localStorage）─────────────
@@ -28,7 +28,7 @@ interface Layout {
   ecCollapsed: Record<string, boolean>;
   /** 素材庫顯示方式 / 篩選 */
   libView: Record<string, 'list' | 'grid'>;
-  mediaFilter: 'all' | 'video' | 'image' | 'audio' | 'color';
+  mediaFilter: 'all' | 'video' | 'image' | 'audio';
   /** 預覽畫質（渲染解析度倍率；匯出一律全解析度） */
   previewScale: number;
   /** 循環播放：播到結尾（編輯視窗 = 片段結尾）回到開頭繼續播 */
@@ -37,10 +37,10 @@ interface Layout {
   scrubAudio: boolean;
   /** 節拍提前（1/60 秒）：節拍格線 / 吸附 / 節拍分割都往前移這麼多，畫面先切、聲音後到，看起來才對拍 */
   beatLead: number;
+  /** 時間軸滾輪：horizontal = 直接滾左右捲、Shift 上下捲；vertical = 直接滾上下捲、Shift 左右捲 */
+  wheelScroll: 'horizontal' | 'vertical';
   /** 時間軸上，上層（蓋在上面的）軌道顯示在下方還是上方 */
   upperLayerAt: 'bottom' | 'top';
-  /** 我的最愛（模組 id） */
-  favorites: string[];
   /** 特效 / 轉場 / 變速分頁目前選的分類 */
   modCat: Record<string, string>;
   /** 素材庫的分類籤有沒有展開（搜尋列右邊的篩選按鈕；收起來 = 全部） */
@@ -53,7 +53,7 @@ interface Layout {
   set(p: Partial<Omit<Layout, 'set' | 'reset'>>): void;
   reset(): void;
 }
-const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, beatDivision: 1 as const, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], favorites: [] as string[], previewScale: 1, repeat: false, scrubAudio: true, beatLead: 5, upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300 };
+const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, beatDivision: 1 as const, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], previewScale: 1, repeat: false, scrubAudio: true, beatLead: 4, wheelScroll: 'horizontal' as Layout['wheelScroll'], upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300 };
 
 export const useLayout = create<Layout>()(
   persist(
@@ -62,7 +62,11 @@ export const useLayout = create<Layout>()(
       set: (p) => set(p),
       reset: () => set(LAYOUT_DEFAULT),
     }),
-    { name: 'ybeat-layout' },
+    {
+      name: 'ybeat-layout',
+      // 存檔是 version 1；改掉的話 zustand 會因為版本不符丟掉存檔
+      version: 1,
+    },
   ),
 );
 
@@ -121,7 +125,7 @@ export type DragPayload =
   | { kind: 'files'; count: number };
 
 export type DropTarget =
-  | { kind: 'lane'; lane: TrackKind; idx: number; time: number; duration: number; label: string; items?: MediaPlacement[] }
+  | { kind: 'lane'; lane: TrackKind; idx: number; time: number; duration: number; label: string; items?: MediaPlacement[]; overlap?: { fit: DropFit | null; replaceId?: string } }
   | { kind: 'clip'; clipId: string; action: 'transition' | 'transitionOut' | 'remap' | 'relink' | 'replace' | 'effect' | 'mask'; valid: boolean }
   | { kind: 'effect'; fxId: string }
   | null;
@@ -164,12 +168,13 @@ export const useSnapLine = create<{ t: number | null }>(() => ({ t: null }));
 
 // ───────────── 加入項目後，時間軸捲到它並閃一下 ─────────────
 
-export const useReveal = create<{ n: number; flash: boolean }>(() => ({ n: 0, flash: true }));
+export const useReveal = create<{ n: number; flash: boolean; target?: { type: string; id: string } }>(() => ({ n: 0, flash: true }));
 /**
  * 讓時間軸捲動到目前選取的項目。
  * flash = true（預設）：再閃一下（用按鈕 / 選單加入時，才知道放到哪裡）；鍵盤換片段只要捲過去就好。
+ * target：要捲到的項目（沒給 = 主選取）；延伸選取時捲到正在移動的那一端
  */
-export const revealSelection = (flash = true) => setTimeout(() => useReveal.setState((s) => ({ n: s.n + 1, flash })), 30);
+export const revealSelection = (flash = true, target?: { type: string; id: string }) => setTimeout(() => useReveal.setState((s) => ({ n: s.n + 1, flash, target })), 30);
 
 // ───────────── 編輯視窗（狀態放這裡：屬性表格、預覽、視窗本身都要用） ─────────────
 

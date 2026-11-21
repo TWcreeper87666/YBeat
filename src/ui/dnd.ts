@@ -1,13 +1,16 @@
 import { $t, displayName } from '../i18n';
 import type React from 'react';
-import { attachedAudioIds, useStore, mediaUsable, spansOf, type TrackKind } from '../store';
+import { attachedAudioIds, useStore, mediaUsable, parseKey, spansOf, type Clip, type PlacementGhost, type TimelineDropMode, type TrackKind } from '../store';
+import { beginHistoryTransaction, endHistoryTransaction } from '../engine/history';
+import { showPendingPlacement } from './Timeline';
 import { parseDuration } from '../engine/params';
 import { addMediaBlob, colorMedia } from '../engine/media';
 import { fitInGap, fitStart } from '../engine/overlap';
 import { laneSnapPoints } from '../engine/snap';
-import { stillDur } from '../prefs';
+import { stillDur, userTextStyle } from '../prefs';
 import { applyMediaBatch, planMediaBatch } from '../engine/mediaBatch';
 import { TEXT_PRESETS } from '../engine/text';
+import { moveKey } from './sortKeys';
 import { setClipMask, setEffectMask } from './MaskPanel';
 import { confirmDialog, revealSelection, toast, useDrag, useSnapLine, type DragPayload, type DragState, type DropTarget } from './uiStore';
 
@@ -41,7 +44,7 @@ function laneDuration(payload: DragPayload): { dur: number; label: string; accep
   }
   if (payload.kind === 'color') return { dur: stillDur(), label: payload.color, accepts: (k) => k === 'video' };
   if (payload.kind === 'text') {
-    const p = TEXT_PRESETS.find((x) => x.id === payload.preset);
+    const p = userTextStyle(payload.preset) ?? TEXT_PRESETS.find((x) => x.id === payload.preset);
     return { dur: stillDur(), label: p?.name ?? '', accepts: (k) => k === 'video' };
   }
   if (payload.kind === 'files') return { dur: stillDur(), label: $t('{0} 個檔案', payload.count), accepts: (k) => k !== 'fx' };
@@ -54,8 +57,8 @@ export function laneAccepts(payload: DragPayload, kind: TrackKind): boolean {
   return laneDuration(payload)?.accepts(kind) ?? false;
 }
 
-/** 依滑鼠位置計算放置目標 */
-export function computeTarget(payload: DragPayload, x: number, y: number): DropTarget {
+/** 依滑鼠位置計算放置目標；alt = 按住 Alt：素材 / 色板放到影片或圖片片段上直接取代 */
+export function computeTarget(payload: DragPayload, x: number, y: number, alt = false): DropTarget {
   const els = elementsAt(x, y);
   const s = useStore.getState();
   const clipEl = els.find((e) => e.dataset.key?.startsWith('clip:'));
@@ -123,10 +126,10 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
       return { kind: 'clip', clipId: clip.id, action: 'relink', valid };
     }
   }
-  // 圖片 / 影片 / 色板拖到時間軸上的影片或圖片片段 → 直接取代這個片段的素材（文字片段、音訊素材不算）
-  if (clip && !clip.text && (payload.kind === 'media' || payload.kind === 'color' || payload.kind === 'files')) {
+  // 按住 Alt：圖片 / 影片 / 色板拖到影片或圖片片段上 → 直接取代那個片段的素材（文字片段、音訊素材不算）
+  if (alt && clip && !clip.text && (payload.kind === 'media' || payload.kind === 'color')) {
     const nm = payload.kind === 'media' ? s.media.find((x) => x.id === payload.id) : undefined;
-    if (payload.kind !== 'media' || (mediaUsable(nm) && nm.kind !== 'audio')) return { kind: 'clip', clipId: clip.id, action: 'replace', valid: true };
+    if (payload.kind === 'color' || (mediaUsable(nm) && nm.kind !== 'audio')) return { kind: 'clip', clipId: clip.id, action: 'replace', valid: !s.tracks.video[clip.track]?.locked };
   }
 
   const laneEl = els.find((e) => e.dataset.laneKind);
@@ -163,14 +166,32 @@ export function computeTarget(payload: DragPayload, x: number, y: number): DropT
     }
   }
   useSnapLine.setState({ t: snapped });
+  // 素材 / 色板：放在游標位置；跟其他片段重疊時，放開後再選覆蓋、取代、插入…
+  if (payload.kind === 'media' || payload.kind === 'color') {
+    const lk = `${lane}:${idx}`;
+    const spans = spansOf(s).filter((o) => o.lane === lk);
+    const hits = spans.filter((o) => time < o.start + o.duration - 1e-4 && o.start < time + info.dur - 1e-4);
+    if (!hits.length) return { kind: 'lane', lane, idx, time, duration: info.dur, label: info.label };
+    const nm = payload.kind === 'media' ? s.media.find((m) => m.id === payload.id) : undefined;
+    let replaceId: string | undefined;
+    if (lane === 'video' && nm?.kind !== 'audio') {
+      const cands = s.clips.filter((c) => c.track === idx && !c.text && time < c.start + c.duration - 1e-4 && c.start < time + info.dur - 1e-4);
+      const overlapLen = (c: Clip) => Math.min(c.start + c.duration, time + info.dur) - Math.max(c.start, time);
+      replaceId = (clip && cands.includes(clip) ? clip : cands.sort((a, b) => overlapLen(b) - overlapLen(a))[0])?.id;
+    }
+    let gap = Infinity;
+    for (const o of spans) if (o.start + o.duration > time + 1e-4) gap = Math.min(gap, Math.max(0, o.start - time));
+    const fit = gap >= 0.05 && gap < info.dur - 1e-4 ? { duration: gap, speed: nm?.kind === 'video' && info.dur / gap <= 8 + 1e-4 } : null;
+    return { kind: 'lane', lane, idx, time, duration: info.dur, label: info.label, overlap: { fit, replaceId } };
+  }
   // 同一軌不能重疊：放到最近的空位；圖片 / 色板 / 文字放進空隙時縮短到剛好填滿
-  const flexible = payload.kind === 'color' || payload.kind === 'text' || (payload.kind === 'media' && s.media.find((m) => m.id === payload.id)?.kind === 'image');
+  const flexible = payload.kind === 'text';
   const fit = flexible ? fitInGap(spansOf(s), `${lane}:${idx}`, time, info.dur) : { start: fitStart(spansOf(s), `${lane}:${idx}`, time, info.dur), duration: info.dur };
   return { kind: 'lane', lane, idx, time: fit.start, duration: fit.duration, label: info.label };
 }
 
 /** 執行放置 */
-export async function applyDrop(payload: DragPayload, target: DropTarget, files?: File[]) {
+export async function applyDrop(payload: DragPayload, target: DropTarget, files?: File[], point?: { x: number; y: number }) {
   const s = useStore.getState();
   if (!target) {
     if (files) await importMany(files);
@@ -225,7 +246,7 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
     else if (payload.kind === 'color') newId = (await colorMedia(payload.color))?.id ?? null;
     else if (files?.length) newId = (await addMediaBlob(files[0], files[0].name))?.id ?? null;
     if (!newId) return;
-    // 取代：只換這一個片段
+    // Alt + 拖曳：只換這一個片段的素材
     if (target.action === 'replace') {
       if (useStore.getState().replaceClipMedia(clip.id, newId)) toast($t('已取代片段的素材'));
       else toast($t('這裡不能放'), 'error');
@@ -250,6 +271,33 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
     const it = sel && [...after.clips, ...after.audios].find((x) => x.id === sel.id);
     return it ? it.duration : 0;
   };
+  if ((payload.kind === 'media' || payload.kind === 'color') && target.overlap) {
+    const overlap = target.overlap;
+    const mediaId = async () => (payload.kind === 'media' ? payload.id : (await colorMedia(payload.color))?.id);
+    const choose = async (mode: TimelineDropMode) => {
+      const id = await mediaId();
+      if (!id) return;
+      beginHistoryTransaction();
+      const st = useStore.getState();
+      const known = new Set([...st.clips, ...st.audios].map((x) => x.id));
+      place(id, target.time);
+      const after = useStore.getState();
+      const keys = after.selected.filter((k) => !known.has(parseKey(k).id));
+      if (!keys.length) return endHistoryTransaction(false);
+      after.patchItems(Object.fromEntries(keys.map((k) => [k, { start: target.time }])));
+      useStore.getState().resolveTimelineDrop(keys, mode);
+      endHistoryTransaction(true);
+    };
+    const replaceId = overlap.replaceId;
+    const replace = replaceId ? async () => {
+      const id = await mediaId();
+      if (id && useStore.getState().replaceClipMedia(replaceId, id)) toast($t('已取代片段的素材'));
+    } : undefined;
+    const preview: PlacementGhost[] = [{ type: target.lane === 'audio' ? 'audio' : 'clip', track: target.idx, start: target.time, duration: target.duration, label: target.label, thumb: payload.kind === 'media' ? s.media.find((m) => m.id === payload.id)?.thumb : undefined }];
+    const p = point ?? { x: innerWidth / 2, y: innerHeight / 2 };
+    showPendingPlacement({ fit: overlap.fit, preview }, p.x, p.y, (mode) => { void choose(mode); }, replace);
+    return;
+  }
   if (payload.kind === 'media') place(payload.id, target.time);
   else if (payload.kind === 'module') s.addEffect(payload.id, target.time, target.idx);
   else if (payload.kind === 'text') s.addText(payload.preset, target.time, target.idx, target.duration);
@@ -274,7 +322,41 @@ async function importMany(files: File[]) {
 }
 
 /** 素材庫項目：按下後拖超過 4px 才開始拖曳；回傳 true 代表變成拖曳（外部應取消 click） */
-export function startLibraryDrag(e: React.PointerEvent, payload: DragPayload, label: string, thumb?: string) {
+/**
+ * 素材庫卡片的拖曳排序（共用）：拖曳中游標在 container 裡 = 調整順序，拖出去 = 照常放到時間軸。
+ * 可以排序的卡片要加 data-sort-key（跟 keys 同一套 key、同樣的順序）。
+ */
+export interface SortOpts {
+  container: HTMLElement;
+  /** 被拖的那張卡片的 key */
+  key: string;
+  /** 目前顯示順序的所有 key */
+  keys: string[];
+  apply(next: string[]): void;
+}
+
+/** 游標位置在第幾張卡片前面（照格狀 / 清單的閱讀順序：由上而下、由左而右） */
+function sortIndex(container: HTMLElement, x: number, y: number): number {
+  const els = [...container.querySelectorAll<HTMLElement>('[data-sort-key]')];
+  for (let i = 0; i < els.length; i++) {
+    const r = els[i].getBoundingClientRect();
+    if (y < r.top) return i;
+    if (y <= r.bottom && x < r.left + r.width / 2) return i;
+  }
+  return els.length;
+}
+
+function showSortMark(container: HTMLElement | null, index: number | null) {
+  document.querySelectorAll('.sort-before, .sort-after, .sorting').forEach((el) => el.classList.remove('sort-before', 'sort-after', 'sorting'));
+  if (!container || index === null) return;
+  const els = [...container.querySelectorAll<HTMLElement>('[data-sort-key]')];
+  if (!els.length) return;
+  container.classList.add('sorting');
+  if (index < els.length) els[index].classList.add('sort-before');
+  else els[els.length - 1].classList.add('sort-after');
+}
+
+export function startLibraryDrag(e: React.PointerEvent, payload: DragPayload, label: string, thumb?: string, sort?: SortOpts) {
   if (e.button !== 0) return;
   const x0 = e.clientX, y0 = e.clientY;
   let started = false;
@@ -284,37 +366,75 @@ export function startLibraryDrag(e: React.PointerEvent, payload: DragPayload, la
     const m = bg && /url\("?(.*?)"?\)/.exec(getComputedStyle(bg).backgroundImage);
     if (m) thumb = m[1];
   }
+  let last = { x: x0, y: y0, alt: e.altKey };
+  let sortAt: number | null = null;
+  const update = () => {
+    // 還在素材庫的格子裡：排序模式，不放到時間軸
+    if (sort) {
+      const r = sort.container.getBoundingClientRect();
+      const inside = last.x >= r.left && last.x <= r.right && last.y >= r.top && last.y <= r.bottom;
+      sortAt = inside ? sortIndex(sort.container, last.x, last.y) : null;
+      showSortMark(sort.container, sortAt);
+      if (inside) {
+        document.body.classList.remove('drag-no');
+        document.body.classList.add('drag-ok');
+        useDrag.setState({ drag: { payload, label, thumb, x: last.x, y: last.y, target: null } as DragState });
+        return;
+      }
+    }
+    const target = computeTarget(payload, last.x, last.y, last.alt);
+    document.body.classList.toggle('drag-ok', !!target);
+    document.body.classList.toggle('drag-no', !target);
+    useDrag.setState({ drag: { payload, label, thumb, x: last.x, y: last.y, target } as DragState });
+  };
   const move = (ev: PointerEvent) => {
     if (!started && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return;
     started = true;
-    const target = computeTarget(payload, ev.clientX, ev.clientY);
-    document.body.classList.toggle('drag-ok', !!target);
-    document.body.classList.toggle('drag-no', !target);
-    useDrag.setState({ drag: { payload, label, thumb, x: ev.clientX, y: ev.clientY, target } as DragState });
+    last = { x: ev.clientX, y: ev.clientY, alt: ev.altKey };
+    update();
+  };
+  // 拖曳中按下 / 放開 Alt：滑鼠沒動也要馬上切換取代模式
+  const altKey = (ev: KeyboardEvent) => {
+    if (ev.key !== 'Alt' || !started) return;
+    ev.preventDefault();
+    last = { ...last, alt: ev.type === 'keydown' };
+    update();
   };
   const up = () => {
     window.removeEventListener('pointermove', move);
     window.removeEventListener('pointerup', up);
     window.removeEventListener('keydown', esc);
+    window.removeEventListener('keydown', altKey);
+    window.removeEventListener('keyup', altKey);
     const d = useDrag.getState().drag;
     useDrag.setState({ drag: null });
     useSnapLine.setState({ t: null });
     document.body.classList.remove('drag-ok', 'drag-no');
     document.querySelector('.panel-inspector')?.classList.remove('drop-here');
+    showSortMark(null, null);
+    if (started && sort && sortAt !== null) {
+      suppressClick();
+      const next = moveKey(sort.keys, sort.key, sortAt);
+      if (next !== sort.keys) sort.apply(next);
+      return;
+    }
     if (started && d) {
       suppressClick();
-      applyDrop(payload, d.target);
+      applyDrop(payload, d.target, undefined, { x: d.x, y: d.y });
     }
   };
   const esc = (ev: KeyboardEvent) => {
     if (ev.key !== 'Escape') return;
     started = false;
+    sortAt = null;
     useDrag.setState({ drag: null });
     up();
   };
   window.addEventListener('pointermove', move);
   window.addEventListener('pointerup', up);
   window.addEventListener('keydown', esc);
+  window.addEventListener('keydown', altKey);
+  window.addEventListener('keyup', altKey);
 }
 
 /** 拖曳結束後吞掉緊接著的 click，避免誤觸 */
