@@ -182,4 +182,6 @@ LLM 不擅長精確的時間計算，但擅長「看懂內容、做大方向決�
 5. **AI 接上（2026-11-23）**：AI 助手有 `get_auto_edit`（讀設定、音樂段落）和 `set_auto_edit`（提議改設定，可以順便產生一版；按套用才生效），在 `src/ai/autoEditTools.ts`。這是第 7 階段「AI 導演」的第一步：AI 調參數，還沒有看素材內容挑鏡頭。
 6. **第 4、7 階段（2026-11-23）**：素材分析（`src/engine/mediaAnalysis.ts` 統計、`src/engine/mediaSampler.ts` 取樣；運動量、畫質、影片內剪接點，臉部還沒接）、AI 導演（`src/ai/director.ts`：Gemini 看每個素材的畫面，回傳適合的段落、優先度、精彩時間點），結果都只放記憶體。
 7. **能量曲線（2026-11-23）**：使用者 / AI 可以調整分析出來的能量（整體強度、對比、控制點），`src/engine/energyShape.ts`；段落與 drop 不變，影響剪接密度與點綴。
-8. **分工**：純邏輯（`src/engine/musicAnalysis.ts`、`src/engine/autoEdit.ts`＋測試）交給 Codex；套用、對話框、說明文字由 Claude 做。
+8. **主體跳出第 1 期（2026-11-23）**：見 `subject-pop-plan.md`。只用圖片；四種：逐拍放大（預設開）、黑白背景、飛入、震閃（預設關），面板可以整個關掉或個別開關。`src/engine/subjectPop.ts`（去背評分、展開）、`add_items` 改成多層。
+9. **跟拍變速第 1 期（2026-11-23）**：見 `speed-ramp-plan.md`。只往前播：每拍快慢（預設開）、衝入剪接、緩速、重音定格；用 `remap-curve` 的素材時間曲線，`src/engine/speedRamp.ts`。下一步是第 3 期的倒播預解碼。
+10. **分工**：純邏輯（`src/engine/musicAnalysis.ts`、`src/engine/autoEdit.ts`＋測試）交給 Codex；套用、對話框、說明文字由 Claude 做。

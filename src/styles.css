@@ -667,12 +667,12 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .lib-sub { font-size: 10.5px; color: var(--muted); }
 .lib-item.mod.mk-transition .lib-thumb { border-bottom: 2px solid var(--tr); }
 .lib-item.mod.mk-effect .lib-thumb { border-bottom: 2px solid var(--fx); }
-.lib-item .combo-count { position: absolute; left: 4px; top: 4px; z-index: 2; background: #000b; color: #fff; font-size: 10px; padding: 0 5px; border-radius: 3px; pointer-events: none; }
+.lib-item .combo-count { position: absolute; left: 4px; top: 4px; z-index: 2; background: #000b; color: #fff; font-size: 10px; padding: 0 5px; border-radius: 3px; }
 .lib-item.mod.mk-remap .lib-thumb { border-bottom: 2px solid var(--accent2); }
-.lib-thumb .fx-short { position: absolute; right: 3px; bottom: 3px; z-index: 2; display: flex; padding: 2px; border-radius: 3px; background: #000b; color: #ffd27a; pointer-events: none; }
+.lib-thumb .fx-short { position: absolute; right: 3px; bottom: 3px; z-index: 2; display: flex; padding: 3px; cursor: help; border-radius: 3px; background: #000b; color: #ffd27a; }
 .lib-list .lib-thumb .fx-short { right: 1px; bottom: 1px; padding: 1px; }
 .lib-list .lib-thumb .fx-short svg { width: 8px; height: 8px; }
-.lib-thumb .fx-face { position: absolute; left: 3px; bottom: 3px; z-index: 2; display: flex; padding: 2px; border-radius: 3px; background: #000b; color: #ffd23f; pointer-events: none; }
+.lib-thumb .fx-face { position: absolute; left: 3px; bottom: 3px; z-index: 2; display: flex; padding: 3px; cursor: help; border-radius: 3px; background: #000b; color: #ffd23f; }
 .lib-list .lib-thumb .fx-face { left: 1px; bottom: 1px; padding: 1px; }
 .lib-list .lib-thumb .fx-face svg { width: 8px; height: 8px; }
 .badge.face { color: #ffd23f; }
@@ -719,19 +719,21 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .ec-watch { background: none; border: none; padding: 0; width: 18px; font-size: 12px; opacity: .35; filter: grayscale(1); flex: none; }
 .ec-watch.on { opacity: 1; filter: none; }
 .ec-watch:hover { opacity: .9; }
+.ec-row.driven .ec-lane, .ec-row.driven .ec-ch .dragnum { opacity: .35; }
 .ec-label { flex: 1; min-width: 0; color: #b9bdc9; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ec-row.anim .ec-label { color: var(--accent2); }
-.ec-tip { position: fixed; z-index: 1000; transform: translateY(-50%); pointer-events: none; padding: 2px 6px; background: var(--panel2); border: 1px solid var(--line); border-radius: 4px; color: #e3e6ee; font-size: 12px; white-space: nowrap; box-shadow: 0 2px 8px #0008; }
 .ec-plain .ec-label { flex: 0 0 auto; max-width: 55%; padding-left: 18px; }
 .ec-plain .ec-node { margin-left: auto; }
 .ec.plain .ec-plain .ec-label { padding-left: 4px; }
 .ec-node { flex: 0 1 auto; min-width: 0; display: flex; align-items: center; justify-content: flex-end; gap: 6px; }
 /* 本來就要拉寬的控制項：右側佔滿剩下的空間 */
-.ec-node:has(.select.wide, .text-area, .drive-row, .btn-row) { flex: 1 1 62%; max-width: none; }
-.ec-plain .ec-label:has(+ .ec-node .select.wide), .ec-plain .ec-label:has(+ .ec-node .text-area), .ec-plain .ec-label:has(+ .ec-node .drive-row), .ec-plain .ec-label:has(+ .ec-node .btn-row) { flex: 0 1 auto; max-width: 45%; }
-.ec-node .select { min-width: 0; }
-.ec-node .select { max-width: 100%; padding: 2px 6px; font-size: 12px; }
-.ec-node .select.wide { width: 100%; }
+.ec-node:has(.text-area, .drive-row, .btn-row) { flex: 1 1 62%; max-width: none; }
+.ec-plain .ec-label:has(+ .ec-node .text-area), .ec-plain .ec-label:has(+ .ec-node .drive-row), .ec-plain .ec-label:has(+ .ec-node .btn-row) { flex: 0 1 auto; max-width: 45%; }
+.ec-node .select { padding: 2px 6px; font-size: 12px; }
+/* 屬性面板的下拉（含形狀、來源這種按鈕式下拉）：同一個寬度、靠右，放不下顯示 …；旁邊有按鈕時下拉在按鈕左邊 */
+.ec { --ec-pick: 110px; }
+.ec-node .select, .ec-node .shape-pick { flex: 0 1 var(--ec-pick); width: var(--ec-pick); min-width: 0; max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ec-node .shape-pick-row { justify-content: flex-end; }
 .ec-node .color { width: 40px; height: 20px; border: 1px solid var(--line); background: none; padding: 0; border-radius: 4px; }
 .ec-node .switch { grid-column: auto; }
 /* 保持音調開關外面包了一層（掛提示文字用）：要是 flex，裡面的 label.switch 寬高才有效 */
@@ -1019,7 +1021,6 @@ svg.lucide { flex: none; }
 /* 子屬性列（例如音訊反應的來源）：往內縮、標題小一號 */
 .ec-row.sub .ec-plain { padding-left: 22px; }
 .ec-row.sub .ec-label { font-size: 11px; color: var(--muted); }
-.ec-node .drive-pick, .ec-node .select.drive-pick { width: 130px; min-width: 130px; max-width: 130px; flex: none; }
 .picker-win.small { max-height: calc(100vh - 16px); }
 .picker-win.small .picker-body { overflow: auto; }
 .src-pick { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; }
@@ -1195,7 +1196,6 @@ body.panning, body.panning * { cursor: grabbing !important; }
 .shape-pick .shape-thumb { width: 16px; height: 16px; flex: none; }
 .shape-pick-name { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .shape-pick-row { display: flex; align-items: center; gap: 4px; min-width: 0; max-width: 100%; }
-.shape-pick-row .shape-pick { min-width: 0; flex: 0 1 auto; }
 .shape-draw { flex: none; width: 24px; height: 24px; color: var(--muted); }
 .shape-draw:hover { color: var(--accent2); }
 .cfx-add-row { flex-wrap: wrap; }
@@ -1404,26 +1404,44 @@ body.panning, body.panning * { cursor: grabbing !important; }
 .cue-more:hover { color: #fff; background: #ffffff10; }
 .cue-text { width: 100%; resize: vertical; min-height: 30px; font-size: 14px; line-height: 1.4; }
 
-/* 自動剪輯面板（區塊、列沿用屬性面板的 .ec） */
-.auto-edit-panel { display: flex; flex-direction: column; min-height: 100%; }
-.ae-bar { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 6px; padding: 8px; background: #15171d; border-bottom: 1px solid var(--line); }
+/* 自動剪輯面板：上面是常用的卡片，下面是收起的細節（沿用屬性面板的 .ec 列） */
+.auto-edit-panel { display: flex; flex-direction: column; gap: 8px; min-height: 100%; padding-bottom: 12px; }
+.ae-bar { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 6px; padding: 8px 10px; background: #15171d; border-bottom: 1px solid var(--line); }
 .ae-bar .btn { display: inline-flex; align-items: center; gap: 6px; }
-.ae-bar .spacer { flex: 1; }
+.ae-go { padding: 6px 18px; }
+.auto-edit-panel .spacer { flex: 1; }
+.ae-card { margin: 0 8px; padding: 10px; display: flex; flex-direction: column; gap: 8px; background: #191b22; border: 1px solid #ffffff0d; border-radius: 8px; }
+.ae-card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; font-size: 11px; font-weight: 700; letter-spacing: .4px; color: var(--accent2); }
+.ae-card-head .ae-stat { font-weight: 400; letter-spacing: 0; }
+.ae-line { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.ae-grow { flex: 1; min-width: 0; }
+.ae-empty { color: var(--muted); font-size: 12px; padding: 6px 0; }
+.ae-stat { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ae-count { margin-left: 6px; font-weight: 400; color: var(--muted); font-size: 11px; }
-.ae-stat { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
-.ae-sec-row { padding: 6px 8px 8px; border-bottom: 1px solid #ffffff07; }
-.ae-sections { position: relative; display: flex; gap: 1px; height: 14px; border-radius: 3px; overflow: hidden; }
+.ae-style { width: 100%; display: flex; }
+.ae-style button { flex: 1; min-height: 30px; font-weight: 600; }
+.ae-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 10px; }
+.ae-knob { display: flex; flex-direction: column; gap: 3px; min-width: 0; font-size: 11px; color: var(--muted); }
+.ae-knob > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ae-curve-tools .ae-knob { flex-direction: row; align-items: center; gap: 6px; }
+.ae-levels { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.ae-levels i { width: 8px; height: 8px; border-radius: 2px; margin-left: 4px; }
+.ae-levels i.high { background: #c2413f; }
+.ae-levels i.mid { background: #2b7d74; }
+.ae-levels i.low { background: #3d4a66; }
+.ae-card .check { min-height: 26px; }
+.ae-card .text-input { width: 100%; }
+.ae-more { margin-top: 4px; border-top: 1px solid var(--line); }
+.ae-sections { position: relative; display: flex; gap: 1px; height: 8px; border-radius: 3px; overflow: hidden; margin-top: -4px; }
 .ae-sections i { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #fff; opacity: .85; }
 .ae-picks { display: flex; flex-direction: column; gap: 1px; padding: 2px 8px 6px 40px; border-bottom: 1px solid #ffffff07; }
 .ae-group .ec-label { cursor: pointer; }
 .ae-media { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .ae-media img { width: 32px; height: 18px; object-fit: cover; border-radius: 2px; flex: none; }
 .ae-media span { overflow: hidden; text-overflow: ellipsis; }
-.ae-note { padding: 2px 8px 6px 26px; border-bottom: 1px solid #ffffff07; }
-.ae-note .text-input { width: 100%; }
 .ae-media.dim { opacity: .45; }
 .ae-role { font-style: normal; font-size: 10.5px; color: var(--accent2); white-space: nowrap; flex: none; }
-.ae-curve { position: relative; height: 84px; margin-bottom: 6px; border-radius: 4px; overflow: hidden; background: #111318; cursor: crosshair; touch-action: none; }
+.ae-curve { position: relative; height: 110px; border-radius: 6px; overflow: hidden; background: #111318; cursor: crosshair; touch-action: none; }
 .ae-curve svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .ae-curve .band.high { fill: #c2413f22; }
 .ae-curve .band.mid { fill: #2b7d7418; }
@@ -1435,3 +1453,16 @@ body.panning, body.panning * { cursor: grabbing !important; }
 .ae-handle:first-of-type { margin-left: 0; }
 .ae-handle:last-of-type { margin-left: -10px; }
 .ae-handle:active { cursor: grabbing; }
+.ae-card-head .switch { margin-left: auto; }
+.ae-card.off .ae-card-head > span { color: var(--muted); }
+.ae-progress { margin: 0 8px; display: flex; flex-direction: column; gap: 5px; }
+.ae-progress-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.ae-progress-line .ae-stat { flex: 1; }
+.ae-progress-bar { position: relative; height: 4px; border-radius: 2px; background: #ffffff12; overflow: hidden; }
+.ae-progress-bar i { position: absolute; left: 0; top: 0; bottom: 0; width: 0; background: var(--accent2); border-radius: 2px; transition: width .15s linear; }
+.ae-progress-bar.busy i { width: 30%; animation: ae-busy 1.1s ease-in-out infinite; }
+@keyframes ae-busy { from { left: -30%; } to { left: 100%; } }
+.ae-result { margin: 0 8px; display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-radius: 6px; font-size: 11.5px; }
+.ae-result span { flex: 1; min-width: 0; }
+.ae-result.ok { background: #29d3c214; color: var(--accent2); }
+.ae-result.err { background: #ff7d9314; color: #ff9aac; }

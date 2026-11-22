@@ -101,6 +101,8 @@ The Auto Edit panel cuts a whole take to the music from its settings (style, bea
 - Set generate: true when the user wants to see a result ("cut it", "try again", "another version"); add replace_last: true when they are revising the previous take rather than adding a new one.
 - Content wishes ("open with the landscapes", "faces on the drop", "skip the blurry clips") → director: true with a director_note in the user's words; the AI director looks at the footage when cutting.
 - "More intense in the chorus / at 1:00", "calmer start", "peak later" → set_auto_edit energy points over that part (use the sections' at positions from get_auto_edit; offset +0.5 ≈ one level up). "Hype it all up" → gain / contrast.
+- "Cut-out subject popping on the beat", "no subject pops", "more pops" → set_auto_edit subject_pop.
+- "Speed ramps / velocity edit", "slow-mo between beats", "no speed changes" → set_auto_edit speed_ramps.
 - Map words to numbers: faster / more cuts = fewer beats_per_shot (high energy 1, mid 2); calmer = more beats, lower rates; "more effects" = higher accents_per_32.
 
 ## Subtitles

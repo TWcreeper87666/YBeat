@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, RotateCcw, Wand2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, RotateCcw, Wand2, X } from 'lucide-react';
 import { $t, displayName } from '../i18n';
 import { useStore } from '../store';
 import { usePrefs } from '../prefs';
@@ -9,10 +9,12 @@ import { isHitFx } from '../engine/params';
 import { RECIPES, type Recipe, type RecipeId } from '../engine/autoEdit';
 import type { MusicInfo } from '../engine/musicAnalysis';
 import { FLAT_SHAPE, LOW_MAX, MID_MAX, isFlat, offsetAt, shapeMusic, type EnergyShape } from '../engine/energyShape';
-import { analyzeSource, canReplaceLast, footage, generateAutoEdit, musicClips, musicSource, useAutoEdit, type AutoEditSettings } from '../engine/autoEditApply';
+import { analyzeSource, canReplaceLast, cancelAutoEdit, footage, generateAutoEdit, musicClips, musicSource, useAutoEdit, useAutoEditRun, type AutoEditSettings } from '../engine/autoEditApply';
 import { useHistory } from '../engine/history';
 import { useAiSettings } from '../ai/assistant';
-import { Check, Seg, Switch } from './Toggle';
+import { Check, Seg, SegToggles, Switch } from './Toggle';
+import { POP_VARIANTS, type PopVariant } from '../engine/subjectPop';
+import { SPEED_VARIANTS, type SpeedVariant } from '../engine/speedRamp';
 import { DragNumber } from './DragNumber';
 
 const set = (p: Partial<AutoEditSettings>) => useAutoEdit.getState().set(p);
@@ -81,6 +83,10 @@ function PickList({ groups, off, onOff, open, toggle }: {
 }
 
 const roleName = (k: string) => ({ intro: $t('開頭'), build: $t('鋪陳'), drop: $t('高潮'), body: $t('主體'), outro: $t('結尾') } as Record<string, string>)[k] ?? k;
+
+const popName = (v: PopVariant) => ({ step: $t('逐拍放大'), mono: $t('黑白背景'), fly: $t('飛入'), shake: $t('震閃') })[v];
+
+const speedName = (v: SpeedVariant) => ({ beatPulse: $t('每拍快慢'), hitRamp: $t('衝入剪接'), drift: $t('緩速'), holdHit: $t('重音定格') })[v];
 
 const KIND_COLOR: Record<string, string> = { intro: '#3d4a66', build: '#8a6d2c', drop: '#c2413f', outro: '#3d4a66', body: '#2b7d74' };
 
@@ -176,7 +182,8 @@ export function AutoEditPanel() {
   const feet = useMemo(() => footage({ ...useStore.getState(), media }), [media]);
   const audioId = st.audioId && music.some((a) => a.id === st.audioId) ? st.audioId : music[0]?.id ?? null;
 
-  const [open, setOpen] = useState<Set<string>>(() => new Set(['music', 'style', 'media', 'tr', 'fx']));
+  // 細節區塊預設收起（很少動）
+  const [open, setOpen] = useState<Set<string>>(() => new Set());
   const toggle = (id: string) => setOpen((o) => { const n = new Set(o); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
   // 音樂分析（段落條）
@@ -219,79 +226,137 @@ export function AutoEditPanel() {
     </>
   );
 
-  const canGo = !!audioId && mediaOn > 0 && (st.range === 'all' || !!loop);
+  const run = useAutoEditRun();
+  const canGo = !run.running && !!audioId && mediaOn > 0 && (st.range === 'all' || !!loop);
   const replace = canReplaceLast();
+  const knob = (label: string, node: React.ReactNode) => <label className="ae-knob"><span>{label}</span>{node}</label>;
+  const pct = (v: number, on: (v: number) => void, max = 100) => <DragNumber value={Math.round(v * 100)} min={0} max={max} step={5} decimals={0} suffix="%" onChange={(x) => on(x / 100)} />;
+  const beatsKnob = (i: number) => <DragNumber value={p.beatsPerShot[i]} min={1} max={32} step={1} decimals={0} suffix={$t(' 拍')} onChange={(v) => setLevel(i, Math.round(v))} />;
 
   return (
     <div className="auto-edit-panel">
+      {/* 常用：產生、音樂與能量曲線、風格、智慧挑選 */}
       <div className="ae-bar">
-        <button className="btn primary" disabled={!canGo} onClick={() => void generateAutoEdit(false)}><Wand2 size={14} />{$t('產生')}</button>
+        <button className="btn primary ae-go" disabled={!canGo} onClick={() => void generateAutoEdit(false)}><Wand2 size={15} />{$t('產生')}</button>
         <button className="btn" disabled={!canGo || !replace} onClick={() => void generateAutoEdit(true)}>{$t('再一版')}</button>
         <span className="spacer" />
         <button className="ec-icon" title={$t('重設')} onClick={() => useAutoEdit.getState().reset()}><RotateCcw size={14} /></button>
       </div>
-      <div className="ec plain">
-        <Section id="music" title={$t('音樂')} open={open.has('music')} toggle={toggle}>
-          {!music.length ? (
-            <div className="empty">{$t('沒有節拍：先在音訊軌放音樂')}</div>
-          ) : (
-            <>
-              <Row label={$t('音樂')}>
-                <select className="select" value={audioId ?? ''} onChange={(e) => set({ audioId: e.target.value })}>
-                  {music.map((a) => <option key={a.id} value={a.id}>{a.name || media.find((m) => m.id === a.mediaId)?.name} · {a.duration.toFixed(1)}s</option>)}
-                </select>
-              </Row>
-              <Row label={$t('範圍')}>
-                <Seg value={loop ? st.range : 'all'} on={(v) => set({ range: v })} opts={[{ v: 'all', label: $t('整段') }, ...(loop ? [{ v: 'loop' as const, label: $t('循環範圍') }] : [])]} />
-              </Row>
-              <Row label={$t('分析')}>
-                <span className="ae-stat">{bpm ? `${bpm.toFixed(1)} BPM` : '—'}{musicInfo && ` · ${$t('{0} 段', musicInfo.sections.length)} · ${$t('{0} 個 drop', musicInfo.drops.length)}`}</span>
-              </Row>
-              {musicInfo && (
-                <div className="ae-sec-row">
-                  <EnergyCurve info={musicInfo} shape={st.shape} onChange={(shape) => set({ shape })} />
-                  <SectionBar info={shapedInfo ?? musicInfo} />
-                </div>
-              )}
-              {musicInfo && (
-                <>
-                  <Row label={$t('整體強度')} sub><DragNumber value={Math.round(st.shape.gain * 100)} min={-50} max={50} step={5} decimals={0} suffix="%" onChange={(v) => set({ shape: { ...st.shape, gain: v / 100 } })} /></Row>
-                  <Row label={$t('對比')} sub><DragNumber value={Math.round(st.shape.contrast * 100)} min={50} max={200} step={5} decimals={0} suffix="%" onChange={(v) => set({ shape: { ...st.shape, contrast: v / 100 } })} /></Row>
-                  <Row label={$t('能量分布')} sub>
-                    <span className="ae-stat">{$t('高 {0} · 中 {1} · 低 {2} 拍', levels[2], levels[1], levels[0])}</span>
-                    <button className="ec-icon" title={$t('重設曲線')} disabled={isFlat(st.shape)} onClick={() => set({ shape: FLAT_SHAPE() })}><RotateCcw size={13} /></button>
-                  </Row>
-                </>
-              )}
-            </>
-          )}
-        </Section>
+      {run.running ? (
+        <div className="ae-progress">
+          <div className="ae-progress-line">
+            <span className="ae-stat">{run.label}</span>
+            <button className="ec-icon" title={$t('取消')} onClick={cancelAutoEdit}><X size={13} /></button>
+          </div>
+          <div className={`ae-progress-bar ${run.frac === null ? 'busy' : ''}`}><i style={run.frac === null ? undefined : { width: `${Math.round(run.frac * 100)}%` }} /></div>
+        </div>
+      ) : run.result && (
+        <div className={`ae-result ${run.result.ok ? 'ok' : 'err'}`}>
+          <span>{run.result.text}</span>
+          <button className="ec-icon" title={$t('關閉')} onClick={() => useAutoEditRun.setState({ result: null })}><X size={12} /></button>
+        </div>
+      )}
 
-        <Section id="style" title={$t('節奏')} open={open.has('style')} toggle={toggle}>
-          <Row label={$t('風格')}>
-            <Seg value={st.recipe} on={(v: RecipeId | 'custom') => v !== 'custom' && set({ recipe: v, params: { ...RECIPES[v] } })}
-              opts={[{ v: 'calm', label: $t('穩') }, { v: 'rhythm', label: $t('節奏') }, { v: 'hype', label: $t('炸') }, ...(st.recipe === 'custom' ? [{ v: 'custom' as const, label: $t('自訂') }] : [])]} />
-          </Row>
-          <Row label={$t('低能量鏡頭')} sub><DragNumber value={p.beatsPerShot[0]} min={1} max={32} step={1} decimals={0} suffix={$t(' 拍')} onChange={(v) => setLevel(0, Math.round(v))} /></Row>
-          <Row label={$t('中能量鏡頭')} sub><DragNumber value={p.beatsPerShot[1]} min={1} max={32} step={1} decimals={0} suffix={$t(' 拍')} onChange={(v) => setLevel(1, Math.round(v))} /></Row>
-          <Row label={$t('高能量鏡頭')} sub><DragNumber value={p.beatsPerShot[2]} min={1} max={32} step={1} decimals={0} suffix={$t(' 拍')} onChange={(v) => setLevel(2, Math.round(v))} /></Row>
-          <Row label={$t('隨機變化')} sub><DragNumber value={Math.round(p.jitter * 100)} min={0} max={100} step={5} decimals={0} suffix="%" onChange={(v) => setParam('jitter', v / 100)} /></Row>
+      <div className="ae-card">
+        <div className="ae-card-head">
+          <span>{$t('音樂')}</span>
+          {bpm && <span className="ae-stat">{bpm.toFixed(1)} BPM{musicInfo && ` · ${$t('{0} 段', musicInfo.sections.length)} · ${$t('{0} 個 drop', musicInfo.drops.length)}`}</span>}
+        </div>
+        {!music.length ? (
+          <div className="ae-empty">{$t('沒有節拍：先在音訊軌放音樂')}</div>
+        ) : (
+          <>
+            <div className="ae-line">
+              <select className="select ae-grow" value={audioId ?? ''} onChange={(e) => set({ audioId: e.target.value })}>
+                {music.map((a) => <option key={a.id} value={a.id}>{a.name || media.find((m) => m.id === a.mediaId)?.name} · {a.duration.toFixed(1)}s</option>)}
+              </select>
+              {loop && <Seg value={st.range} on={(v) => set({ range: v })} opts={[{ v: 'all', label: $t('整段') }, { v: 'loop' as const, label: $t('循環範圍') }]} />}
+            </div>
+            {musicInfo && (
+              <>
+                <EnergyCurve info={musicInfo} shape={st.shape} onChange={(shape) => set({ shape })} />
+                <SectionBar info={shapedInfo ?? musicInfo} />
+                <div className="ae-line ae-curve-tools">
+                  {knob($t('整體強度'), <DragNumber value={Math.round(st.shape.gain * 100)} min={-50} max={50} step={5} decimals={0} suffix="%" onChange={(v) => set({ shape: { ...st.shape, gain: v / 100 } })} />)}
+                  {knob($t('對比'), <DragNumber value={Math.round(st.shape.contrast * 100)} min={50} max={200} step={5} decimals={0} suffix="%" onChange={(v) => set({ shape: { ...st.shape, contrast: v / 100 } })} />)}
+                  <span className="spacer" />
+                  <span className="ae-levels" title={$t('能量分布')}>
+                    <i className="high" />{levels[2]}<i className="mid" />{levels[1]}<i className="low" />{levels[0]}
+                  </span>
+                  <button className="ec-icon" title={$t('重設曲線')} disabled={isFlat(st.shape)} onClick={() => set({ shape: FLAT_SHAPE() })}><RotateCcw size={13} /></button>
+                </div>
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      <div className="ae-card">
+        <div className="ae-card-head"><span>{$t('風格')}</span></div>
+        <Seg className="ae-style" value={st.recipe} on={(v: RecipeId | 'custom') => v !== 'custom' && set({ recipe: v, params: { ...RECIPES[v] } })}
+          opts={[{ v: 'calm', label: $t('穩') }, { v: 'rhythm', label: $t('節奏') }, { v: 'hype', label: $t('炸') }, ...(st.recipe === 'custom' ? [{ v: 'custom' as const, label: $t('自訂') }] : [])]} />
+        <div className="ae-grid3">
+          {knob($t('低能量鏡頭'), beatsKnob(0))}
+          {knob($t('中能量鏡頭'), beatsKnob(1))}
+          {knob($t('高能量鏡頭'), beatsKnob(2))}
+          {knob($t('轉場'), pct(p.transitionRate, (v) => setParam('transitionRate', v)))}
+          {knob($t('點綴'), <DragNumber value={p.accentsPer32} min={0} max={16} step={0.5} decimals={1} suffix={$t(' / 32 拍')} onChange={(v) => setParam('accentsPer32', v)} />)}
+          {knob($t('隨機變化'), pct(p.jitter, (v) => setParam('jitter', v)))}
+        </div>
+      </div>
+
+      <div className={`ae-card ${st.popOn ? '' : 'off'}`}>
+        <div className="ae-card-head"><span>{$t('主體跳出')}</span><Switch v={st.popOn} on={(v) => set({ popOn: v })} /></div>
+        {st.popOn && (
+          <>
+            <SegToggles className="ae-style" items={POP_VARIANTS.map((v) => ({
+              key: v, label: popName(v), v: st.popVariants.includes(v),
+              on: (on: boolean) => set({ popVariants: on ? [...st.popVariants, v] : st.popVariants.filter((x) => x !== v) }),
+            }))} />
+            <div className="ae-grid3">
+              {knob($t('次數'), <DragNumber value={st.popsPer32} min={0} max={4} step={0.5} decimals={1} suffix={$t(' / 32 拍')} onChange={(v) => set({ popsPer32: v })} />)}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className={`ae-card ${st.speedOn ? '' : 'off'}`}>
+        <div className="ae-card-head"><span>{$t('跟拍變速')}</span><Switch v={st.speedOn} on={(v) => set({ speedOn: v })} /></div>
+        {st.speedOn && (
+          <>
+            <SegToggles className="ae-style" items={SPEED_VARIANTS.map((v) => ({
+              key: v, label: speedName(v), v: st.speedVariants.includes(v),
+              on: (on: boolean) => set({ speedVariants: on ? [...st.speedVariants, v] : st.speedVariants.filter((x) => x !== v) }),
+            }))} />
+            <div className="ae-grid3">
+              {knob($t('次數'), <DragNumber value={st.speedsPer32} min={0} max={8} step={0.5} decimals={1} suffix={$t(' / 32 拍')} onChange={(v) => set({ speedsPer32: v })} />)}
+              {knob($t('強度'), pct(st.speedIntensity, (v) => set({ speedIntensity: v })))}
+            </div>
+          </>
+        )}
+      </div>
+
+      <div className="ae-card">
+        <div className="ae-card-head"><span>{$t('智慧挑選')}</span></div>
+        <Check v={st.analyze} on={(v) => set({ analyze: v })} title={$t('依運動量、畫質、原本的剪接點挑片段')}>{$t('分析影片內容')}</Check>
+        <Check v={st.director && hasKey} on={(v) => hasKey && set({ director: v })} title={hasKey ? undefined : $t('AI 導演需要 API 金鑰')}>{$t('AI 導演')}</Check>
+        {st.director && hasKey && (
+          <input className="text-input" value={st.directorNote} placeholder={$t('給導演的指示')} onChange={(e) => set({ directorNote: e.target.value })} />
+        )}
+      </div>
+
+      {/* 細節：預設收起 */}
+      <div className="ec plain ae-more">
+        <Section id="shots" title={$t('鏡頭')} open={open.has('shots')} toggle={toggle}>
           <Row label={$t('鏡頭最短')} sub><DragNumber value={p.minShotSec} min={0.1} max={10} step={0.05} decimals={2} suffix="s" onChange={(v) => setParam('minShotSec', Math.min(v, p.maxShotSec))} /></Row>
           <Row label={$t('鏡頭最長')} sub><DragNumber value={p.maxShotSec} min={0.5} max={30} step={0.5} decimals={1} suffix="s" onChange={(v) => setParam('maxShotSec', Math.max(v, p.minShotSec))} /></Row>
+          <Row label={$t('圖片推近 / 拉遠')} sub><Switch v={st.kenBurns} on={(v) => set({ kenBurns: v })} /></Row>
         </Section>
 
         <Section id="media" title={$t('素材')} count={`${mediaOn}/${feet.length}`} open={open.has('media')} toggle={toggle} actions={allNone(feet.map((m) => m.id), 'mediaOff')}>
           <Row label={$t('順序')} sub>
             <Seg value={st.order} on={(v) => set({ order: v })} opts={[{ v: 'library', label: $t('素材庫順序') }, { v: 'shuffle', label: $t('隨機') }]} />
           </Row>
-          <Row label={$t('圖片推近 / 拉遠')} sub><Switch v={st.kenBurns} on={(v) => set({ kenBurns: v })} /></Row>
-          <Row label={$t('分析影片內容')} sub title={$t('依運動量、畫質、原本的剪接點挑片段')}><Switch v={st.analyze} on={(v) => set({ analyze: v })} /></Row>
-          <Row label={$t('AI 導演')} sub title={hasKey ? undefined : $t('AI 導演需要 API 金鑰')}><Switch v={st.director && hasKey} on={(v) => set({ director: v })} /></Row>
-          {st.director && hasKey && (
-            <div className="ae-note">
-              <input className="text-input" value={st.directorNote} placeholder={$t('給導演的指示')} onChange={(e) => set({ directorNote: e.target.value })} />
-            </div>
-          )}
           {feet.length ? (
             <div className="ae-picks">
               {feet.map((m) => (
@@ -307,14 +372,12 @@ export function AutoEditPanel() {
         </Section>
 
         <Section id="tr" title={$t('轉場')} count={`${trOn}/${trMods.length}`} open={open.has('tr')} toggle={toggle} actions={allNone(trMods.map((m) => m.id), 'trOff')}>
-          <Row label={$t('一般切點')} sub><DragNumber value={Math.round(p.transitionRate * 100)} min={0} max={100} step={5} decimals={0} suffix="%" onChange={(v) => setParam('transitionRate', v / 100)} /></Row>
-          <Row label={$t('段落交界 / drop')} sub><DragNumber value={Math.round(p.sectionTransitionRate * 100)} min={0} max={100} step={5} decimals={0} suffix="%" onChange={(v) => setParam('sectionTransitionRate', v / 100)} /></Row>
+          <Row label={$t('段落交界 / drop')} sub>{pct(p.sectionTransitionRate, (v) => setParam('sectionTransitionRate', v))}</Row>
           <Row label={$t('轉場長度')} sub><DragNumber value={p.transitionBeats} min={0.25} max={4} step={0.25} decimals={2} suffix={$t(' 拍')} onChange={(v) => setParam('transitionBeats', v)} /></Row>
           <PickList groups={groupsOf('transition', trMods)} off={st.trOff} onOff={(trOff) => set({ trOff })} open={open} toggle={toggle} />
         </Section>
 
         <Section id="fx" title={$t('點綴')} count={`${fxOn}/${fxMods.length + combos.length}`} open={open.has('fx')} toggle={toggle} actions={allNone([...fxMods.map((m) => m.id), ...combos.map((c) => c.id)], 'fxOff')}>
-          <Row label={$t('頻率')} sub><DragNumber value={p.accentsPer32} min={0} max={16} step={0.5} decimals={1} suffix={$t(' / 32 拍')} onChange={(v) => setParam('accentsPer32', v)} /></Row>
           <Row label={$t('drop 強調')} sub>
             <select className="select" value={st.dropHit ?? ''} onChange={(e) => set({ dropHit: e.target.value || null })}>
               <option value="">{$t('無')}</option>

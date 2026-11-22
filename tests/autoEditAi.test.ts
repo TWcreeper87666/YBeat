@@ -75,6 +75,26 @@ run('set_auto_edit', { energy: { reset: true } }, er);
 applyProposals(er);
 ok(useAutoEdit.getState().shape.points.every((p) => p.y === 0) && useAutoEdit.getState().shape.contrast === 1, '曲線重設');
 
+// 主體跳出
+ok(run('get_auto_edit', {}).subject_pop.variants.join() === 'step', '主體跳出預設只開逐拍放大');
+const pl: Proposal[] = [];
+run('set_auto_edit', { subject_pop: { variants: ['step', 'fly'], per_32: 2 } }, pl);
+applyProposals(pl);
+ok(useAutoEdit.getState().popVariants.join() === 'step,fly' && useAutoEdit.getState().popsPer32 === 2 && useAutoEdit.getState().popOn, '改主體跳出的種類與次數');
+ok('error' in run('set_auto_edit', { subject_pop: { variants: ['explode'] } }), '不認得的種類 → 錯誤');
+const off: Proposal[] = [];
+run('set_auto_edit', { subject_pop: { on: false } }, off);
+applyProposals(off);
+ok(!useAutoEdit.getState().popOn, '可以整個關掉');
+
+// 跟拍變速
+ok(run('get_auto_edit', {}).speed_ramps.variants.join() === 'beatPulse', '跟拍變速預設只開每拍快慢');
+const sl: Proposal[] = [];
+run('set_auto_edit', { speed_ramps: { variants: ['beatPulse', 'hitRamp'], intensity: 3 } }, sl);
+applyProposals(sl);
+ok(useAutoEdit.getState().speedVariants.join() === 'beatPulse,hitRamp' && useAutoEdit.getState().speedIntensity === 1, '改變速種類、強度夾在 0..1');
+ok('error' in run('set_auto_edit', { speed_ramps: { variants: ['rewind'] } }), '還沒做的種類 → 錯誤');
+
 // AI 導演的回覆解析
 const reply = 'Sure:\n```json\n{"media":[{"id":"v","roles":["drop","nope"],"weight":1.4,"highlights":[3,99],"note":"best"},{"id":"i","roles":["intro"],"weight":0,"highlights":[1]},{"id":"ghost","roles":["drop"]}]}\n```';
 const d = parseDirection(reply, media);

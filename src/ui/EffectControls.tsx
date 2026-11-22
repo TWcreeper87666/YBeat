@@ -19,25 +19,6 @@ import { beatHits, HIT_MIN, normalizeHits, overwriteHits, type BeatEvery, type F
 import { beatSnapPoints } from './beatGrid';
 import { AudioLines, ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Timer } from 'lucide-react';
 
-/** 屬性名稱被截斷時，滑鼠移上去立刻浮出完整名稱（屬性面板很窄時用） */
-function installLabelTip() {
-  let tip: HTMLDivElement | null = null;
-  const hide = () => tip?.remove();
-  document.addEventListener('mouseover', (e) => {
-    const el = (e.target as HTMLElement).closest?.('.ec-label') as HTMLElement | null;
-    if (!el || el.scrollWidth <= el.clientWidth + 1) return hide();
-    tip ??= Object.assign(document.createElement('div'), { className: 'ec-tip' });
-    tip.textContent = el.textContent;
-    const r = el.getBoundingClientRect();
-    tip.style.left = `${r.left - 4}px`;
-    tip.style.top = `${r.top + r.height / 2}px`;
-    document.body.appendChild(tip);
-  });
-  document.addEventListener('pointerdown', hide, true);
-  window.addEventListener('blur', hide);
-}
-installLabelTip();
-
 // ───────────────────────── 資料介面 ─────────────────────────
 
 /** 一個可動畫的數值屬性 */
@@ -1005,7 +986,6 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
                           </button>
                           {ch.drive && <button className={`ec-watch ${ch.drive.on ? 'on' : ''}`} title={$t('音訊反應')} onClick={ch.drive.toggle}><AudioLines size={13} /></button>}
                           <span className="ec-label" title={ch.label} onContextMenu={(e) => channelMenu(e, ch)}>{ch.label}{ch.icon}</span>
-                          <DragNumber variant="text" value={ch.value} step={ch.step} min={ch.min} max={ch.max} suffix={ch.suffix} display={ch.display} def={ch.def} menu={ch.menu} onChange={(v) => setValue(ch, v)} />
                           <span className="ec-nav">
                             {animated && (
                               <>
@@ -1017,6 +997,8 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
                               </>
                             )}
                           </span>
+                          {/* 數值一律靠右（跟其他列的控制項對齊）；關鍵影格導覽放在數值左邊 */}
+                          <DragNumber variant="text" value={ch.value} step={ch.step} min={ch.min} max={ch.max} suffix={ch.suffix} display={ch.display} def={ch.def} menu={ch.menu} onChange={(v) => setValue(ch, v)} />
                         </div>
                         <div
                           className="ec-right ec-lane"
@@ -1046,7 +1028,7 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
                       </div>
                       {ch.drive?.on && ch.drive.rows.map((r, i) => (
                         <div key={`${i}:${r.label}`} className="ec-row sub">
-                          <div className="ec-left ec-plain"><span className="ec-label" title={r.label}>{r.label}</span><div className="ec-node">{r.node}</div></div>
+                          <div className="ec-left ec-plain" onContextMenu={(e) => sectionResetMenu(e, sec)}><span className="ec-label" title={r.label}>{r.label}</span><div className="ec-node">{r.node}</div></div>
                           <div className="ec-right ec-dim" onPointerDown={startMarquee} onContextMenu={(e) => laneMenu(e)} />
                         </div>
                       ))}

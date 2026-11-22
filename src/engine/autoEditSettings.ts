@@ -7,6 +7,8 @@ import { attachedAudioIds, type AudioClip, type Media, type useStore } from '../
 import { beatSource, mediaBeats } from './beats';
 import { FLAT_SHAPE, type EnergyShape } from './energyShape';
 import { trackHistory } from './history';
+import type { PopVariant } from './subjectPop';
+import type { SpeedVariant } from './speedRamp';
 
 type S = ReturnType<typeof useStore.getState>;
 
@@ -25,6 +27,18 @@ export interface AutoEditSettings {
   order: PlanOptions['order'];
   /** 使用者調整的能量曲線（控制點的位置 = 整段音樂的比例） */
   shape: EnergyShape;
+  /** 主體跳出：去背的圖片跟著節拍進場，揭露拍切到完整圖 */
+  popOn: boolean;
+  popVariants: PopVariant[];
+  /** 每 32 拍最多幾次 */
+  popsPer32: number;
+  /** 跟拍變速：影片片段的播放速度跟著節拍變化 */
+  speedOn: boolean;
+  speedVariants: SpeedVariant[];
+  /** 每 32 拍最多幾次 */
+  speedsPer32: number;
+  /** 強度 0..1 */
+  speedIntensity: number;
   /** 分析影片內容（運動量、畫質、原本的剪接點）來挑片段 */
   analyze: boolean;
   /** AI 導演：Gemini 看素材畫面，決定每個素材適合哪些段落、優先度、精彩時間點 */
@@ -39,6 +53,8 @@ export interface AutoEditSettings {
 const DEFAULTS = (): Omit<AutoEditSettings, 'analysis' | 'direction'> => ({
   audioId: null, range: 'all', recipe: 'rhythm', params: { ...RECIPES.rhythm }, mediaOff: [], trOff: [], fxOff: [...ACCENT_OFF_BY_DEFAULT],
   dropHit: 'fx-flash', kenBurns: true, order: 'library', analyze: true, director: false, directorNote: '', shape: FLAT_SHAPE(),
+  popOn: true, popVariants: ['step'], popsPer32: 1,
+  speedOn: true, speedVariants: ['beatPulse'], speedsPer32: 2, speedIntensity: 0.5,
 });
 export const useAutoEdit = create<AutoEditSettings & { set(p: Partial<AutoEditSettings>): void; reset(): void }>((set) => ({
   ...DEFAULTS(),

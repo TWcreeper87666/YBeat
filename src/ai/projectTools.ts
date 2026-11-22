@@ -229,7 +229,7 @@ export type Op =
   | { op: 'translate_subtitles'; items: { clipId: string; text: string }[] }
   /** 改「自動剪輯」面板的設定（不動專案）；generate = 套用後產生一版 */
   | { op: 'auto_edit'; patch: AutoEditPatch; generate: boolean; replaceLast: boolean }
-  /** 一批新片段 / 特效方塊（自動剪輯）：放在新的影片軌 / 特效軌（track 欄位忽略） */
+  /** 一批新片段 / 特效方塊（自動剪輯）：clip.track = 第幾層（0 = 基本層，1 以上疊在上面），每層一條新的影片軌；特效放在新的特效軌（track 忽略） */
   | { op: 'add_items'; clips: Clip[]; effects: FxItem[] };
 
 /** 提議的修改（顯示用的摘要 + 實際操作） */
@@ -843,12 +843,13 @@ function applyOp(op: Op): number {
       const clips = op.clips.filter((c) => st.media.some((m) => m.id === c.mediaId && !m.missing));
       const effects = op.effects.filter((e) => ok(e.moduleId));
       if (!clips.length && !effects.length) return 0;
-      // 影片軌：只有一條而且是空的就直接用，不然在最上層新增一條
+      // 影片軌：每一層一條，疊在最上面；只有一條空的影片軌時，基本層直接用它
       let s = useStore.getState();
+      const layers = clips.length ? Math.max(...clips.map((c) => Math.max(0, Math.round(c.track)))) + 1 : 0;
       const reuse = s.tracks.video.length === 1 && !s.clips.length && !s.tracks.video[0].locked;
-      if (clips.length && !reuse) st.addTrack('video', s.tracks.video.length);
+      const base = reuse ? 0 : s.tracks.video.length;
+      for (let k = reuse ? 1 : 0; k < layers; k++) st.addTrack('video', useStore.getState().tracks.video.length);
       s = useStore.getState();
-      const vt = clips.length ? s.tracks.video.length - 1 : 0;
       // 特效軌：放在所有影片軌上方；已經有一條空的就用它
       let ft = -1;
       if (effects.length) {
@@ -860,7 +861,7 @@ function applyOp(op: Op): number {
         }
       }
       useStore.setState((x) => ({
-        clips: [...x.clips, ...clips.map((c) => ({ ...c, track: vt }))],
+        clips: [...x.clips, ...clips.map((c) => ({ ...c, track: base + Math.max(0, Math.round(c.track)) }))],
         effects: [...x.effects, ...effects.map((e) => ({ ...e, track: ft }))],
       }));
       return clips.length + effects.length;

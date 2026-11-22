@@ -818,9 +818,7 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
   const items: MenuItem[] = [
     // 編輯視窗：屬性 + 預覽的對話框（影片 / 文字片段、特效軌的特效）
     ...(type !== 'audio' ? [{ label: $t('在編輯視窗中編輯…'), shortcut: $t('雙擊'), action: () => openItemEditor(type, it.id) }, { separator: true } as MenuItem] : []),
-    { label: $t('在播放頭分割'), shortcut: 'S', action: S.split },
-    { label: $t('修剪開頭到播放頭'), shortcut: 'Q', action: () => S.trim('start') },
-    { label: $t('修剪結尾到播放頭'), shortcut: 'W', action: () => S.trim('end') },
+    // 分割（S）、修剪（Q / W）不放選單：快捷鍵與工具列就夠了
     { label: $t('節拍'), submenu: beatMenuItems() },
     { separator: true },
     { label: n > 1 ? $t('複製 {0} 個項目', n) : $t('複製'), shortcut: 'Ctrl+C', action: S.copy },

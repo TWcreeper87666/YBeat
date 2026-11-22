@@ -161,7 +161,8 @@ export const useDrag = create<{ drag: DragState | null }>(() => ({ drag: null })
 // ───────────── 素材庫點擊預覽（特效 / 轉場）─────────────
 
 /** 素材庫試看：fx = 特效 / 轉場 / 變速模組、text = 文字樣式（疊在目前畫面最上層循環播放）；兩者只會有一個 */
-export const usePreviewFx = create<{ fx: { moduleId: string; t0: number } | null; text: { preset: string; name: string; t0: number } | null }>(() => ({ fx: null, text: null }));
+/** fx.timeline：用時間軸畫面試看（預設用示範的 A / B 畫面） */
+export const usePreviewFx = create<{ fx: { moduleId: string; t0: number; timeline?: boolean } | null; text: { preset: string; name: string; t0: number } | null }>(() => ({ fx: null, text: null }));
 export const stopPreviewFx = () => {
   const s = usePreviewFx.getState();
   if (s.fx || s.text) usePreviewFx.setState({ fx: null, text: null });

@@ -445,9 +445,12 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
     else s.setRemap(clipId, id);
   };
 
-  const togglePreview = (id: string) => {
+  /** timeline：用時間軸畫面試看（預設用示範的 A / B 畫面）；再點一次同一個（同一種方式）= 停止 */
+  const togglePreview = (id: string, timeline = false) => {
     useStore.getState().setPlaying(false);
-    usePreviewFx.setState({ fx: previewing === id ? null : { moduleId: id, t0: performance.now() }, text: null });
+    const cur = usePreviewFx.getState().fx;
+    const same = cur?.moduleId === id && !!cur.timeline === timeline;
+    usePreviewFx.setState({ fx: same ? null : { moduleId: id, t0: performance.now(), ...(timeline ? { timeline } : {}) }, text: null });
   };
 
   const itemMenu = (e: React.MouseEvent, m: Module) => {
@@ -483,7 +486,7 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
       { label: favSet.has(m.id) ? $t('從我的最愛移除') : $t('加入我的最愛'), action: () => toggleFav(m.id) },
       { separator: true },
       ...(applyItems.length > 1 ? [{ label: $t('套用'), submenu: applyItems }] : applyItems),
-      { label: $t('在預覽中試看'), action: () => togglePreview(m.id) },
+      ...(kind !== 'remap' ? [{ label: $t('用時間軸畫面試看'), shortcut: $t('Alt+點擊'), action: () => togglePreview(m.id, true) }] : []),
       // 內建模組不能直接改：複製成自訂模組再編輯
       ...(m.builtin ? [] : [{ label: $t('編輯程式碼'), action: () => { stopPreviewFx(); openModuleEditor(m.id); } }]),
       { label: $t('複製為新模組'), action: () => openModuleEditor(S.forkModule(m.id)) },
@@ -509,7 +512,7 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
     openMenu(e.clientX, e.clientY, [
       { label: $t('在播放頭加入'), action: () => apply(c.id) },
       { label: $t('選取片段的片段特效'), action: ids.length ? () => ids.forEach((cid) => useStore.getState().addClipFx(cid, c.id)) : undefined },
-      { label: $t('在預覽中試看'), action: () => togglePreview(c.id) },
+      { label: $t('用時間軸畫面試看'), shortcut: $t('Alt+點擊'), action: () => togglePreview(c.id, true) },
       { separator: true },
       {
         label: $t('重新命名…'),
@@ -551,14 +554,13 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
                 key={c.id}
                 className={`lib-item mod mk-effect combo ${previewing === c.id ? 'previewing' : ''}`}
                 onPointerDown={(e) => startLibraryDrag(e, { kind: 'module', id: c.id, moduleKind: 'effect' }, c.name)}
-                onClick={() => togglePreview(c.id)}
+                onClick={(e) => togglePreview(c.id, e.altKey)}
                 onContextMenu={(e) => comboMenu(e, c)}
-                title={c.name}
               >
                 {m ? <ModuleThumb m={m} /> : <div className="lib-thumb mod" />}
-                {!!c.fx.stack?.length && <span className="combo-count">+{c.fx.stack.length}</span>}
+                {!!c.fx.stack?.length && <span className="combo-count" title={$t('另外疊加 {0} 個特效', c.fx.stack.length)}>+{c.fx.stack.length}</span>}
                 <div className="lib-meta">
-                  <div className="lib-name">{previewing === c.id && <Play size={10} fill="currentColor" />} {c.name}</div>
+                  <div className="lib-name" title={c.name}>{previewing === c.id && <Play size={10} fill="currentColor" />} {c.name}</div>
                   {view === 'list' && <div className="lib-sub">{$t('我的組合')}</div>}
                 </div>
               </div>
@@ -570,14 +572,14 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
               data-sort-key={sortable ? m.id : undefined}
               className={`lib-item mod mk-${kind} ${!onPick && previewing === m.id ? 'previewing' : ''} ${current === m.id ? 'current' : ''}`}
               onPointerDown={(e) => !onPick && startLibraryDrag(e, { kind: 'module', id: m.id, moduleKind: kind }, displayName(m.name), undefined, sortOpts(m.id))}
-              onClick={() => (onPick ? onPick(m.id) : togglePreview(m.id))}
+              onClick={(e) => (onPick ? onPick(m.id) : togglePreview(m.id, e.altKey && kind !== 'remap'))}
               onContextMenu={(e) => (onPick ? e.preventDefault() : itemMenu(e, m))}
-              title={onPick ? $t('{0}（點一下加入）', displayName(m.name)) : displayName(m.name)}
             >
               <ModuleThumb m={m} />
               <FavButton on={favSet.has(m.id)} toggle={() => toggleFav(m.id)} />
               <div className="lib-meta">
-                <div className="lib-name">{!onPick && previewing === m.id && <Play size={10} fill="currentColor" />} {displayName(m.name)}</div>
+                {/* 名稱提示只放在名稱上：整張卡片都有 title 的話，滑到角落的圖示時瀏覽器會一直顯示卡片的提示 */}
+                <div className="lib-name" title={onPick ? $t('{0}（點一下加入）', displayName(m.name)) : displayName(m.name)}>{!onPick && previewing === m.id && <Play size={10} fill="currentColor" />} {displayName(m.name)}</div>
                 {view === 'list' && !m.builtin && <div className="lib-sub">{$t('自訂')}</div>}
               </div>
             </div>
@@ -1685,7 +1687,7 @@ function PlainControls({ title, rows, more, footer, titleMenu }: { title: React.
   };
   const row = (r: PlainRow, i: number) => (
     <div key={r.label + i} className="ec-row">
-      <div className="ec-left ec-plain" onContextMenu={ctx(r.menu)}><span className="ec-label">{r.label}</span><div className="ec-node">{r.node}</div></div>
+      <div className="ec-left ec-plain" onContextMenu={ctx(r.menu)}><span className="ec-label" title={r.label}>{r.label}</span><div className="ec-node">{r.node}</div></div>
     </div>
   );
   return (

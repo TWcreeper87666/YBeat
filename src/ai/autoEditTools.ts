@@ -12,6 +12,8 @@ import { RECIPES, type Recipe, type RecipeId } from '../engine/autoEdit';
 import { accentOpt, comboAccentOpt, transitionOpt } from '../engine/autoEditPools';
 import { footage, musicClips, useAutoEdit, type AutoEditSettings } from '../engine/autoEditSettings';
 import { FLAT_SHAPE, shapeMusic, type EnergyShape } from '../engine/energyShape';
+import { POP_VARIANTS, type PopVariant } from '../engine/subjectPop';
+import { SPEED_VARIANTS, type SpeedVariant } from '../engine/speedRamp';
 
 type S = ReturnType<typeof useStore.getState>;
 export type AutoEditPatch = Partial<Omit<AutoEditSettings, 'analysis' | 'direction'>>;
@@ -62,6 +64,24 @@ export const AUTO_EDIT_DECLS = [
           properties: {
             gain: num(''), contrast: num(''), reset: { type: 'boolean' },
             points: { type: 'array', items: { type: 'object', properties: { at: num(''), offset: num('') }, required: ['at', 'offset'] } },
+          },
+        },
+        subject_pop: {
+          type: 'object',
+          description: 'Subject pop: a cut-out image grows / flies in on the beats before a drop or section change, and the reveal beat cuts to the full image. on: master switch; variants: which kinds may be used (step = grows one step per beat, mono = colour subject over its black-and-white image, fly = flies in, shake = grows with a shake + flash per beat); per_32: at most this many per 32 beats (0..4).',
+          properties: {
+            on: { type: 'boolean' },
+            variants: { type: 'array', items: { type: 'string', enum: POP_VARIANTS } },
+            per_32: num(''),
+          },
+        },
+        speed_ramps: {
+          type: 'object',
+          description: 'Beat-synced speed ramps on video shots (forward only for now). on: master switch; variants: beatPulse = fast through each beat, slow in between; hitRamp = accelerates into a hard cut at a drop / section change; drift = gentle slow motion in quiet parts; holdHit = brief freeze on an accent. per_32: at most this many per 32 beats (0..8); intensity 0..1.',
+          properties: {
+            on: { type: 'boolean' },
+            variants: { type: 'array', items: { type: 'string', enum: SPEED_VARIANTS } },
+            per_32: num(''), intensity: num(''),
           },
         },
         media: PICK('media'),
@@ -126,6 +146,8 @@ export function readAutoEdit(s: S): Record<string, unknown> {
     accents_per_32: p.accentsPer32,
     order: st.order, ken_burns: st.kenBurns, drop_hit: st.dropHit ?? 'none',
     energy: { gain: st.shape.gain, contrast: st.shape.contrast, points: st.shape.points.map((p) => ({ at: r2(p.x), offset: r2(p.y) })) },
+    subject_pop: { on: st.popOn, variants: st.popVariants, per_32: st.popsPer32 },
+    speed_ramps: { on: st.speedOn, variants: st.speedVariants, per_32: st.speedsPer32, intensity: st.speedIntensity },
     analyze: st.analyze, director: st.director, director_note: st.directorNote,
     ...(st.direction ? { last_direction: st.direction } : {}),
     media: P.media.map((m) => ({ ...m, on: !st.mediaOff.includes(m.id) })),
@@ -258,6 +280,40 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
       shape = { ...shape, points: pts };
     }
     patch.shape = shape;
+    changed++;
+  }
+  const sp = a.subject_pop as { on?: unknown; variants?: unknown; per_32?: unknown } | undefined;
+  if (sp && typeof sp === 'object') {
+    if (sp.on !== undefined) patch.popOn = !!sp.on;
+    if (sp.variants !== undefined) {
+      const list = (Array.isArray(sp.variants) ? sp.variants : []).map(String);
+      const bad = list.filter((v) => !POP_VARIANTS.includes(v as PopVariant));
+      if (bad.length) fail(`subject_pop.variants: unknown ${bad.join(', ')}`);
+      patch.popVariants = [...new Set(list)] as PopVariant[];
+      if (sp.on === undefined && list.length) patch.popOn = true;
+    }
+    if (sp.per_32 !== undefined) {
+      if (typeof sp.per_32 !== 'number' || !Number.isFinite(sp.per_32)) fail('subject_pop.per_32 must be a number');
+      patch.popsPer32 = Math.min(4, Math.max(0, sp.per_32 as number));
+    }
+    changed++;
+  }
+  const sr = a.speed_ramps as { on?: unknown; variants?: unknown; per_32?: unknown; intensity?: unknown } | undefined;
+  if (sr && typeof sr === 'object') {
+    if (sr.on !== undefined) patch.speedOn = !!sr.on;
+    if (sr.variants !== undefined) {
+      const list = (Array.isArray(sr.variants) ? sr.variants : []).map(String);
+      const bad = list.filter((v) => !SPEED_VARIANTS.includes(v as SpeedVariant));
+      if (bad.length) fail(`speed_ramps.variants: unknown ${bad.join(', ')}`);
+      patch.speedVariants = [...new Set(list)] as SpeedVariant[];
+      if (sr.on === undefined && list.length) patch.speedOn = true;
+    }
+    for (const [k, field, hi] of [['per_32', 'speedsPer32', 8], ['intensity', 'speedIntensity', 1]] as const) {
+      const v = sr[k];
+      if (v === undefined) continue;
+      if (typeof v !== 'number' || !Number.isFinite(v)) fail(`speed_ramps.${k} must be a number`);
+      patch[field] = Math.min(hi, Math.max(0, v as number));
+    }
     changed++;
   }
   if (a.analyze !== undefined) {

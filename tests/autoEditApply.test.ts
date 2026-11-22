@@ -9,6 +9,9 @@ import { applyProposals } from '../src/ai/projectTools';
 import { planItems, type MusicSource } from '../src/engine/autoEditApply';
 import { fxLevel } from '../src/engine/tracks';
 import type { EditPlan } from '../src/engine/autoEdit';
+import { speedCurve } from '../src/engine/speedRamp';
+import { clipSource } from '../src/engine/remap';
+import { makeCtx } from '../src/engine/renderer';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -68,6 +71,61 @@ reset(1);
 applyProposals([{ summary: '', op: { op: 'add_items', clips, effects } }]);
 ok(S().tracks.video.length === 2 && S().clips.filter((c) => c.track === 1).length === 3 && S().clips.filter((c) => c.track === 0).length === 1, '有內容 → 新增最上層影片軌，不動原本的片段');
 ok(S().effects.every((e) => fxLevel(S().tracks, e.track) >= 2), '特效軌在新影片軌上方');
+
+// 主體跳出：計畫 → 片段
+reset();
+const popPlan: EditPlan = {
+  seed: 1, recipe: 'rhythm',
+  shots: [
+    { b0: 0, b1: 8, mediaId: 'v', in: 0 },
+    { b0: 8, b1: 16, mediaId: 'i', in: 0, transition: { moduleId: 'tr-whip', beats: 0.5 }, motion: { from: { scale: 1.12, x: 0.03, y: -0.02 }, to: { scale: 1, x: 0, y: 0 } } },
+  ],
+  overlays: [],
+  pops: [{ b0: 4, b1: 8, variant: 'shake', mediaId: 'i', cx: 0.2, cy: -0.1 }],
+};
+const pp = planItems(popPlan, src, S());
+const layer = pp.clips.find((c) => c.track === 1)!;
+const revealClip = pp.clips.find((c) => c.track === 0 && c.start === 4)!;
+ok(!!layer && layer.aiMatte === true && layer.start === 2 && layer.start + layer.duration === 4 && layer.volume === 0, '主體層：去背、在揭露拍前 4 拍、剛好結束在揭露拍');
+ok(layer.keys.scaleX!.map((k) => k.v).join() === '0.55,0.7,0.85,1,1' && layer.keys.scaleX![0].ease === 'hold', '每拍放大一級（停住型關鍵影格），最後 = 1');
+ok(Math.abs(layer.keys.x![0].v - 0.09) < 1e-9 && layer.keys.x!.at(-1)!.v === 0, '縮放時位移補償，主體留在原位；最後位移 0 跟完整圖對齊');
+ok(layer.effects?.length === 2 && layer.effects.every((f) => f.timing?.kind === 'beat'), '震閃：兩個每拍觸發的片段特效');
+ok(!revealClip.transitionIn && revealClip.keys.scaleX![0].v === 1 && revealClip.keys.x![0].v === 0, '揭露拍：硬切、完整圖從原尺寸開始（拉遠改成推近）');
+
+// 跟拍變速：計畫 → 變速曲線片段
+reset();
+const T2 = (i: number) => Math.min(8, Math.max(0, i) * 0.5);
+const pulse = speedCurve('beatPulse', 0, 4, T2, 0.5)!;
+const hold = speedCurve('holdHit', 4, 8, T2, 1, { hitBeat: 5 })!;
+const spPlan: EditPlan = {
+  seed: 1, recipe: 'rhythm', overlays: [], pops: [],
+  shots: [
+    { b0: 0, b1: 4, mediaId: 'v', in: 0.5, speed: pulse },
+    { b0: 4, b1: 8, mediaId: 'v', in: 0.2, speed: hold },
+    { b0: 8, b1: 12, mediaId: 'v', in: 2.5, speed: speedCurve('beatPulse', 8, 12, T2, 0.5)! },
+  ],
+};
+const sc = planItems(spPlan, src, S()).clips;
+const mods = makeCtx(S()).modules;
+const srcAt = (c: typeof sc[number], t: number) => clipSource(c, t, media[0], mods).src;
+ok(sc[0].remap.moduleId === 'remap-curve' && sc[0].in === 0.5 && Math.abs(srcAt(sc[0], 2) - (0.5 + pulse.sourceMax)) < 1e-3, '每拍快慢：變速曲線、in 照計畫、結尾用掉的素材 = 曲線長度');
+const mid = srcAt(sc[0], 0.25), quarter = srcAt(sc[0], 0.05) - srcAt(sc[0], 0);
+ok(mid > 0.5 && quarter / 0.05 > (srcAt(sc[0], 0.3) - srcAt(sc[0], 0.2)) / 0.1, '拍點附近比拍與拍之間快');
+const h0 = srcAt(sc[1], 0.5 + 0.01), h1 = srcAt(sc[1], 0.5 + 0.2);
+ok(Math.abs(h0 - h1) < 1e-6 && srcAt(sc[1], 1.5) > h1, '重音定格：停住後再接著播');
+ok(sc[2].remap.moduleId === 'remap-speed', '素材不夠長（3 秒素材從 2.5 秒開始）→ 改回常速');
+
+// 多層：track = 第幾層 → 每層一條新的影片軌，疊在最上面
+reset(1);
+const base = makeClip({ mediaId: 'i', start: 0, duration: 2, track: 0 });
+const top1 = makeClip({ mediaId: 'i', start: 0, duration: 1, track: 1, aiMatte: true });
+const top2 = makeClip({ mediaId: 'i', start: 0, duration: 1, track: 2 });
+applyProposals([{ summary: '', op: { op: 'add_items', clips: [base, top1, top2], effects: [] } }]);
+const tr = (id: string) => S().clips.find((c) => c.id === id)?.track;
+ok(S().tracks.video.length === 4 && tr(base.id) === 1 && tr(top1.id) === 2 && tr(top2.id) === 3, `三層 → 三條新軌（原本的在最下面）：${[tr(base.id), tr(top1.id), tr(top2.id)]}`);
+reset();
+applyProposals([{ summary: '', op: { op: 'add_items', clips: [base, top1], effects: [] } }]);
+ok(S().tracks.video.length === 2 && tr(base.id) === 0 && tr(top1.id) === 1, '空時間軸：基本層用原本的軌，上面加一條');
 
 // 面板設定也能復原（能量曲線、數字），而且跟時間軸在同一條紀錄裡
 reset();

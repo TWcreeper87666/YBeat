@@ -9,9 +9,13 @@ import { analyzeMusic, bandEnvelopes, type Bands, type MusicInfo } from './music
 import { DEFAULT_OPTIONS, planEdit, type EditPlan, type PlanMedia, type PlanOptions, type Recipe } from './autoEdit';
 import { footage, musicClips, useAutoEdit, type AutoEditSettings } from './autoEditSettings';
 import { $t } from '../i18n';
-import { setBusy, toast } from '../ui/uiStore';
+import { create } from 'zustand';
 import { sampleAll, type Sampled } from './mediaSampler';
 import { shapeMusic } from './energyShape';
+import { expandPop, popFraming, scoreMatte, type PopLayer } from './subjectPop';
+import { beatTimeF } from './speedRamp';
+import { ensureMatte, matteAt, MATTE_SIZE } from './matte';
+import type { Keyframe } from './keyframes';
 import { directMedia } from '../ai/director';
 import { useAiSettings } from '../ai/assistant';
 export { useAutoEdit, type AutoEditSettings };
@@ -117,7 +121,14 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S): { clips: Clip
     if (!m || duration < 1 / 60) continue;
     let inn = 0;
     if (m.kind === 'video') inn = Math.max(0, Math.min(sh.in, m.duration - duration));
+    // 變速：素材時間曲線（相對 in）；整條曲線都要在素材範圍內，不然改回常速
+    const sp = m.kind === 'video' && sh.speed && sh.in + sh.speed.sourceMin >= -1e-6 && sh.in + sh.speed.sourceMax <= m.duration - 0.02 + 1e-6 ? sh.speed : null;
+    if (sp) inn = sh.in;
     const c = makeClip({ mediaId: m.id, start, duration, in: inn, volume: 0 });
+    if (sp) {
+      const tb = (beat: number) => beatTimeF(T, beat) - start;
+      c.remap = { moduleId: 'remap-curve', params: {}, keys: sp.knots.map((k) => newKey(Math.min(duration, Math.max(0, tb(k.beat))), k.source, k.ease)) };
+    }
     if (sh.motion) {
       const { from: a, to: b } = sh.motion;
       c.keys = {
@@ -134,6 +145,25 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S): { clips: Clip
       if (d >= 1 / 30) c.transitionIn = { moduleId: sh.transition.moduleId, params: {}, duration: d };
     }
     clips.push(c);
+  }
+  // 主體跳出：揭露拍的完整圖要跟去背的主體對齊（縮放 1、置中開始），推近 / 拉遠改成從原尺寸推近
+  const reveal = new Set((plan.pops ?? []).map((p) => p.b1));
+  for (const c of clips) {
+    const b = plan.shots.find((sh) => Math.abs(T(sh.b0) - c.start) < 1e-6)?.b0;
+    if (b === undefined || !reveal.has(b) || !c.keys.scaleX) continue;
+    // 放大那一端的縮放與位移（拉遠 = 開頭那一端）
+    const i = c.keys.scaleX[0].v >= c.keys.scaleX[c.keys.scaleX.length - 1].v ? 0 : c.keys.scaleX.length - 1;
+    const to = c.keys.scaleX[i].v, tx = c.keys.x?.[i]?.v ?? 0, ty = c.keys.y?.[i]?.v ?? 0;
+    const end = c.duration;
+    c.keys = {
+      scaleX: [newKey(0, 1, lin), newKey(end, to, lin)], scaleY: [newKey(0, 1, lin), newKey(end, to, lin)],
+      x: [newKey(0, 0, lin), newKey(end, tx, lin)], y: [newKey(0, 0, lin), newKey(end, ty, lin)],
+    };
+    c.transitionIn = null;
+  }
+  for (const p of plan.pops ?? []) for (const l of expandPop(p, T)) {
+    const c = popClip(l, s);
+    if (c) clips.push(c);
   }
   const effects: FxItem[] = [];
   for (const o of plan.overlays) {
@@ -163,6 +193,38 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S): { clips: Clip
   return { clips, effects };
 }
 
+const POP_EASE: Record<string, Keyframe['ease']> = { hold: 'hold', linear: [0, 0, 1, 1], out: [0, 0, 0.58, 1], back: [0.34, 1.56, 0.64, 1] };
+/** 主體跳出的一層 → 片段（track = 第幾層，add_items 會換成真正的軌道） */
+function popClip(l: PopLayer, s: S): Clip | null {
+  const m = s.media.find((x) => x.id === l.mediaId);
+  const duration = l.t1 - l.t0;
+  if (!m || duration < 1 / 60) return null;
+  const c = makeClip({ mediaId: m.id, start: l.t0, duration, track: l.layer, volume: 0, ...(l.matte ? { aiMatte: true } : {}) });
+  c.keys = Object.fromEntries(Object.entries(l.keys ?? {}).map(([k, list]) => [k, list!.map((x) => newKey(Math.min(duration, Math.max(0, x.t)), x.v, POP_EASE[x.ease] ?? 'hold'))]));
+  const fx = (l.effects ?? []).filter((e) => s.modules.some((x) => x.id === e.moduleId)).map((e) => ({
+    id: uid(), moduleId: e.moduleId, params: { ...e.params },
+    ...(e.beatEvery ? { timing: { kind: 'beat' as const, every: e.beatEvery, d: e.hitSec ?? 0.18 } } : {}),
+  }));
+  if (fx.length) c.effects = fx;
+  return c;
+}
+
+/** 圖片能不能做主體跳出（去背後量主體的位置 / 大小）；同一張圖算一次 */
+const popCache = new Map<string, { ok: boolean; centered: boolean; cx: number; cy: number }>();
+async function popInfo(m: Media, s: S): Promise<{ ok: boolean; centered: boolean; cx: number; cy: number }> {
+  const key = `${m.id}:${s.format.w}x${s.format.h}`;
+  const hit = popCache.get(key);
+  if (hit) return hit;
+  await ensureMatte(m, [0]);
+  const d = matteAt(m, 0);
+  const r = d ? popFraming(scoreMatte(d.data, MATTE_SIZE), m.width, m.height, s.format.w, s.format.h) : { ok: false, centered: false, cx: 0, cy: 0, area: 0 };
+  const out = { ok: r.ok, centered: r.centered, cx: r.cx, cy: r.cy };
+  popCache.set(key, out);
+  return out;
+}
+/** 最多替幾張圖去背（第一次要下載模型、每張要算一下） */
+const POP_MAX_IMAGES = 20;
+
 // ───────────── 面板設定 / 執行 ─────────────
 
 /** 設定 → 編排器的選項（只留目前存在的模組 / 組合） */
@@ -171,7 +233,9 @@ export function planOptions(st: AutoEditSettings, s: S = useStore.getState()): P
   const fx = s.modules.filter((m) => m.kind === 'effect' && !st.fxOff.includes(m.id)).map(accentOpt);
   const combos = usePrefs.getState().fxCombos.filter((c) => !st.fxOff.includes(c.id)).map((c) => comboAccentOpt(c, s.modules));
   const dropHit = st.dropHit && (s.modules.some((m) => m.id === st.dropHit) || fxCombo(st.dropHit)) ? st.dropHit : null;
-  return { transitions: tr, accents: [...fx, ...combos], dropHit, kenBurns: st.kenBurns, order: st.order };
+  const pops = st.popOn && st.popVariants.length ? { variants: st.popVariants, per32: st.popsPer32 } : undefined;
+  const speed = st.speedOn && st.speedVariants.length ? { variants: st.speedVariants, per32: st.speedsPer32, intensity: st.speedIntensity } : undefined;
+  return { transitions: tr, accents: [...fx, ...combos], dropHit, kenBurns: st.kenBurns, order: st.order, pops, speed };
 }
 
 /** 上一版：產生前 / 產生後的專案（「再一版」= 回到產生前再產生，跟復原紀錄裡後來的面板設定變更無關） */
@@ -179,12 +243,12 @@ let last: { before: HistoryDoc; after: HistoryDoc } | null = null;
 /** 上一版之後還沒有其他修改（「再一版」會先拿掉上一版） */
 export const canReplaceLast = () => !!last && !docChanged(last.after);
 
-export type AutoEditError = 'noMusic' | 'noMedia' | 'noRange' | 'noKey' | 'empty';
+export type AutoEditError = 'noMusic' | 'noMedia' | 'noRange' | 'noKey' | 'empty' | 'cancelled';
 /** 進度：音樂 / 素材分析（第幾個、共幾個）/ AI 導演 */
-export type AutoEditProgress = { stage: 'music' } | { stage: 'media'; i: number; n: number; name: string } | { stage: 'director' };
+export type AutoEditProgress = { stage: 'music' } | { stage: 'media'; i: number; n: number; name: string; frac: number } | { stage: 'matte'; i: number; n: number; name: string } | { stage: 'director' };
 
 /** 依目前的設定產生一版並套用（一步復原）；replaceLast：上一版之後沒有其他修改 → 先復原上一版 */
-export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditProgress) => void = () => {}): Promise<{ shots: number; effects: number; warn?: string } | { error: AutoEditError }> {
+export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditProgress) => void = () => {}, signal?: AbortSignal): Promise<{ shots: number; effects: number; pops: number; warn?: string } | { error: AutoEditError }> {
   const st = useAutoEdit.getState();
   let s = useStore.getState();
   const audioId = st.audioId && s.audios.some((a) => a.id === st.audioId) ? st.audioId : musicClips(s)[0]?.id;
@@ -193,19 +257,36 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
   const media = footage(s).filter((m) => !st.mediaOff.includes(m.id));
   if (!media.length) return { error: 'noMedia' };
   if (st.director && !useAiSettings.getState().key) return { error: 'noKey' };
+  const stopped = () => !!signal?.aborted;
   onProgress({ stage: 'music' });
   const music = shapeMusic(await analyzeSource(src0), st.shape);
+  if (stopped()) return { error: 'cancelled' };
 
   // 素材分析（影片）；AI 導演要看圖，圖片也取一張
   const extra = new Map<string, Partial<PlanMedia>>();
   let warn: string | undefined;
   const need = media.filter((m) => (st.analyze && m.kind === 'video') || st.director);
-  const sampled = need.length ? await sampleAll(need, (i, n, name) => onProgress({ stage: 'media', i, n, name })) : new Map<string, Sampled>();
+  const sampled = need.length ? await sampleAll(need, (i, n, name, frac) => onProgress({ stage: 'media', i, n, name, frac }), stopped) : new Map<string, Sampled>();
+  if (stopped()) return { error: 'cancelled' };
   if (st.analyze) for (const [id, x] of sampled) if (x.info) extra.set(id, { info: x.info });
+  // 主體跳出：替候選圖片去背、量主體
+  if (st.popOn && st.popVariants.length) {
+    const imgs = media.filter((m) => m.kind === 'image').slice(0, POP_MAX_IMAGES);
+    for (let i = 0; i < imgs.length; i++) {
+      if (stopped()) return { error: 'cancelled' };
+      const m = imgs[i];
+      if (!popCache.has(`${m.id}:${s.format.w}x${s.format.h}`)) onProgress({ stage: 'matte', i: i + 1, n: imgs.length, name: m.name });
+      try {
+        extra.set(m.id, { ...extra.get(m.id), pop: await popInfo(m, s) });
+      } catch {
+        // 去背失敗（模型載入失敗之類）：這張不做主體跳出
+      }
+    }
+  }
   if (st.director) {
     onProgress({ stage: 'director' });
     try {
-      const dir = await directMedia(music, media, sampled, st.directorNote);
+      const dir = await directMedia(music, media, sampled, st.directorNote, signal);
       for (const [id, d] of dir) extra.set(id, { ...extra.get(id), roles: d.roles, weight: d.weight, highlights: d.highlights });
       useAutoEdit.getState().set({ direction: Object.fromEntries(dir) });
     } catch (e) {
@@ -214,12 +295,13 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
     }
   }
 
+  if (stopped()) return { error: 'cancelled' };
   // 拿掉上一版 + 放上新的一版 = 一步復原
   const before = snapshotDoc();
   const replace = replaceLast && canReplaceLast() ? last!.before : null;
   beginHistoryTransaction();
   let ok = false;
-  let shots = 0, nfx = 0;
+  let shots = 0, nfx = 0, plannedPops = 0;
   try {
     if (replace) {
       const { aux: _aux, ...proj } = replace;
@@ -238,6 +320,7 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
     const plan = planFor(src, music, media, st.params, seed, planOptions(st, s), range, extra);
     const { clips, effects } = planItems(plan, src, s);
     if (!clips.length) return { error: 'empty' };
+    plannedPops = plan.pops?.length ?? 0;
     const p: Proposal = { summary: 'auto edit', op: { op: 'add_items', clips, effects } };
     applyProposals([p]);
     ok = true;
@@ -247,29 +330,51 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
     endHistoryTransaction(ok);
   }
   last = { before: replace ?? before, after: snapshotDoc() };
-  return { shots, effects: nfx, ...(warn ? { warn } : {}) };
+  return { shots, effects: nfx, pops: plannedPops, ...(warn ? { warn } : {}) };
 }
 
-/** 產生一版（顯示進度與結果）；replaceLast = 再一版 */
+/** 執行狀態（面板的進度條）：label = 現在在做什麼、frac = 0..1（null = 不知道要多久）、result = 上一次的結果 */
+export interface AutoEditRun {
+  running: boolean;
+  label: string;
+  frac: number | null;
+  result: { ok: boolean; text: string } | null;
+}
+export const useAutoEditRun = create<AutoEditRun>(() => ({ running: false, label: '', frac: null, result: null }));
+let abort: AbortController | null = null;
+export const cancelAutoEdit = () => abort?.abort();
+
+/** 產生一版（進度與結果顯示在自動剪輯面板）；replaceLast = 再一版 */
 export async function generateAutoEdit(replaceLast = false) {
-  setBusy($t('分析音樂…'));
+  if (useAutoEditRun.getState().running) return;
+  abort = new AbortController();
+  const set = (p: Partial<AutoEditRun>) => useAutoEditRun.setState(p);
+  set({ running: true, label: $t('分析音樂…'), frac: null, result: null });
+  // 從選單 / AI 助手開始的也看得到進度
+  void import('../ui/Dock').then((d) => d.useDock.getState().activatePanel('auto')).catch(() => {});
   try {
-    const r = await runAutoEdit(replaceLast, (p) => setBusy(
-      p.stage === 'music' ? $t('分析音樂…') : p.stage === 'media' ? $t('分析素材 {0}/{1}：{2}', p.i, p.n, p.name) : $t('AI 導演分配素材…'),
-    ));
+    const r = await runAutoEdit(replaceLast, (p) => set(
+      p.stage === 'music' ? { label: $t('分析音樂…'), frac: null }
+        : p.stage === 'media' ? { label: $t('分析素材 {0}/{1}：{2}', p.i, p.n, p.name), frac: (p.i - 1 + p.frac) / p.n }
+          : p.stage === 'matte' ? { label: $t('去背 {0}/{1}：{2}', p.i, p.n, p.name), frac: (p.i - 1) / p.n }
+            : { label: $t('AI 導演分配素材…'), frac: null },
+    ), abort.signal);
     if ('error' in r) {
+      if (r.error === 'cancelled') return set({ result: { ok: false, text: $t('已取消') } });
       const msg = {
         noMusic: $t('沒有節拍：先在音訊軌放音樂'), noMedia: $t('沒有可用的素材'), noRange: $t('循環範圍裡沒有節拍'),
         noKey: $t('AI 導演需要 API 金鑰'), empty: $t('沒有產生任何片段'),
       }[r.error];
-      toast(msg, 'error');
+      set({ result: { ok: false, text: msg } });
     } else {
-      toast($t('已產生 {0} 個鏡頭', r.shots));
-      if (r.warn) toast($t('AI 導演失敗，改用一般分配：{0}', r.warn), 'error');
+      const text = r.pops ? $t('已產生 {0} 個鏡頭、{1} 個主體跳出', r.shots, r.pops) : $t('已產生 {0} 個鏡頭', r.shots);
+      set({ result: r.warn ? { ok: false, text: `${text} · ${$t('AI 導演失敗，改用一般分配：{0}', r.warn)}` } : { ok: true, text } });
     }
   } catch (e) {
-    toast($t('自動剪輯失敗：{0}', e instanceof Error ? e.message : e), 'error');
+    if (abort?.signal.aborted) set({ result: { ok: false, text: $t('已取消') } });
+    else set({ result: { ok: false, text: $t('自動剪輯失敗：{0}', e instanceof Error ? e.message : e) } });
   } finally {
-    setBusy(null);
+    abort = null;
+    set({ running: false, label: '', frac: null });
   }
 }

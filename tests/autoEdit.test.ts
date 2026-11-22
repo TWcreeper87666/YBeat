@@ -1,6 +1,7 @@
 import { DEFAULT_OPTIONS, planEdit, planStats, RECIPES, type PlanMedia, type PlanOptions, type Recipe } from '../src/engine/autoEdit';
 import type { MusicInfo } from '../src/engine/musicAnalysis';
 import type { MediaInfo } from '../src/engine/mediaAnalysis';
+import { SPEED_VARIANTS } from '../src/engine/speedRamp';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -98,6 +99,58 @@ ok(planEdit({ ...input, media: weighted.slice(0, 1) }).shots.every((s) => s.medi
 const roleMedia: PlanMedia[] = [{ id: 'drop', kind: 'image', duration: 0, roles: ['drop'] }, { id: 'intro', kind: 'image', duration: 0, roles: ['intro'] }];
 const rolePlans = Array.from({ length: 60 }, (_, seed) => planEdit({ ...input, seed, media: roleMedia, range: [64, 66] }));
 ok(rolePlans.flatMap((p) => p.shots).filter((s) => s.mediaId === 'drop').length > rolePlans.length / 2, 'drop role preferred in drop section');
+const popMedia: PlanMedia[] = [
+  { id: 'subject', kind: 'image', duration: 0, pop: { ok: true, centered: true, cx: 0.2, cy: 0 } },
+  { id: 'background', kind: 'video', duration: 60 },
+];
+const popOptions = options({ pops: { variants: ['step'], per32: 4 } });
+const popped = planEdit({ ...input, media: popMedia, options: popOptions });
+const reveal = popped.pops.find((p) => p.b1 === 64);
+ok(!!reveal && reveal.variant === 'step' && reveal.b0 === 60, 'drop reveal uses step window');
+ok(popped.shots.some((s) => s.b0 === 64 && s.mediaId === 'subject' && !s.transition && !s.motion), 'reveal hard cuts to full image');
+ok(popped.shots.filter((s) => s.b0 < 64 && s.b1 > 60).every((s) => s.mediaId !== 'subject'), 'window base shots exclude subject');
+ok(popped.overlays.filter((o) => o.b0 < 64 && o.b1 > 60).length === 0 &&
+  popped.overlays.some((o) => o.b0 === 64 && o.moduleId === 'fx-flash'), 'pop window clears accents but keeps drop hit');
+ok(popped.pops.every((p, i) => i === 0 || p.b1 - popped.pops[i - 1].b1 >= 16), 'pop reveals spaced sixteen beats');
+const noPops = planEdit({ ...input, options: options({ pops: { variants: [], per32: 4 } }) });
+ok(plan.pops.length === 0 && noPops.pops.length === 0 && JSON.stringify(plan.shots) === JSON.stringify(noPops.shots), 'disabled pops preserve shots');
+const flyOnly = planEdit({ ...input, media: popMedia, options: options({ pops: { variants: ['fly'], per32: 4 } }) });
+ok(flyOnly.pops.length > 0 && flyOnly.pops.every((p) => p.variant === 'fly' && p.b1 - p.b0 === 2), 'fly variant respected');
+const offCentre = planEdit({ ...input, media: [{ ...popMedia[0], pop: { ok: true, centered: false, cx: 0.4, cy: 0 } }, popMedia[1]],
+  options: options({ pops: { variants: ['step', 'shake'], per32: 4 } }) });
+ok(offCentre.pops.length === 0, 'off centre media rejects step and shake');
+ok(JSON.stringify(popped) === JSON.stringify(planEdit({ ...input, media: popMedia, options: popOptions })), 'pops deterministic');
+
+const speedRecipe: Recipe = { ...RECIPES.rhythm, beatsPerShot: [4, 4, 4], jitter: 0, minShotSec: 0.1, maxShotSec: 20 };
+const speedSettings = options({ speed: { variants: SPEED_VARIANTS, per32: 3.5, intensity: 0.7 } });
+const speedMedia: PlanMedia[] = [{ id: 'speedVideo', kind: 'video', duration: 80 }, { id: 'speedImage', kind: 'image', duration: 0 }];
+const speedInput = { ...input, recipe: speedRecipe, media: speedMedia };
+const speedPlan = planEdit({ ...speedInput, options: speedSettings });
+const plainSpeedPlan = planEdit({ ...speedInput, options: options({}) });
+ok(JSON.stringify(plainSpeedPlan) === JSON.stringify(planEdit({ ...speedInput, options: options({ speed: undefined }) })) &&
+  plainSpeedPlan.shots.every((s) => s.speed === undefined), 'disabled speed preserves existing plan');
+ok(speedPlan.shots.every((s, i) => s.mediaId === plainSpeedPlan.shots[i].mediaId && s.b0 === plainSpeedPlan.shots[i].b0 && s.b1 === plainSpeedPlan.shots[i].b1),
+  'speed decisions preserve shot order');
+const speedShots = speedPlan.shots.filter((s) => s.speed);
+ok(speedShots.length > 0 && speedShots.every((s) => speedMedia.find((m) => m.id === s.mediaId)?.kind === 'video' &&
+  SPEED_VARIANTS.includes(s.speed!.variant)), 'speed only on videos with enabled variants');
+ok(speedShots.every((s) => s.in + s.speed!.sourceMin >= -1e-8 && s.in + s.speed!.sourceMax <= 80 - 0.02 + 1e-8),
+  'speed source windows stay in bounds');
+ok(speedShots.every((s, i) => i === 0 || s.b0 - speedShots[i - 1].b1 >= 4), 'speed cooldown');
+ok(Array.from({ length: 4 }, (_, bucket) => speedShots.filter((s) => Math.floor(s.b0 / 32) === bucket).length <= 4).every(Boolean),
+  'speed budget per 32 beats');
+ok(speedShots.filter((s) => s.speed!.variant === 'hitRamp').every((s) => music.drops.includes(s.b1) ||
+  music.sections.some((section) => section.b0 === s.b1 || section.b1 === s.b1)), 'hit ramps end at section boundaries');
+ok(JSON.stringify(speedPlan) === JSON.stringify(planEdit({ ...speedInput, options: speedSettings })), 'speed deterministic');
+const pulseOnly = planEdit({ ...speedInput, options: options({ speed: { variants: ['beatPulse'], per32: 12, intensity: 1 } }) });
+ok(pulseOnly.shots.filter((s) => s.speed).every((s) => s.speed!.variant === 'beatPulse'), 'enabled variant respected');
+const cutInfo: MediaInfo = { step: 0.5, duration: 80, motion: Array(160).fill(1), quality: Array(160).fill(1), cuts: [15, 30, 45, 60] };
+const cutSpeed = planEdit({ ...speedInput, media: [{ ...speedMedia[0], info: cutInfo }],
+  options: options({ speed: { variants: ['drift', 'beatPulse'], per32: 16, intensity: 1 } }) });
+ok(cutSpeed.shots.some((s) => s.speed) && cutSpeed.shots.filter((s) => s.speed).every((s) =>
+  cutInfo.cuts.every((cut) => !(s.in + s.speed!.sourceMin < cut + 0.1 && s.in + s.speed!.sourceMax > cut - 0.1))),
+  'analyzed speed windows avoid cuts');
+
 const rotationMedia: PlanMedia[] = [
   { id: 'intro', kind: 'image', duration: 0, roles: ['intro'], weight: 1 },
   { id: 'drop', kind: 'image', duration: 0, roles: ['drop'], weight: 0.8 },

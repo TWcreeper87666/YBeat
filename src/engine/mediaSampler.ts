@@ -96,12 +96,14 @@ export function sampleMedia(m: Media, onFrame: (k: number, n: number) => void = 
 }
 
 /** 依序分析一批素材；onProgress(第幾個, 共幾個) */
-export async function sampleAll(list: Media[], onProgress: (i: number, n: number, name: string) => void): Promise<Map<string, Sampled>> {
+/** 依序分析一批素材；onProgress(第幾個, 共幾個, 名稱, 這個素材的進度 0..1)；stop() = true 就停（回傳已經算好的） */
+export async function sampleAll(list: Media[], onProgress: (i: number, n: number, name: string, frac: number) => void, stop: () => boolean = () => false): Promise<Map<string, Sampled>> {
   const out = new Map<string, Sampled>();
   for (let i = 0; i < list.length; i++) {
+    if (stop()) break;
     const m = list[i];
-    if (!sampledNow.has(m.id)) onProgress(i + 1, list.length, m.name);
-    out.set(m.id, await sampleMedia(m));
+    if (!sampledNow.has(m.id)) onProgress(i + 1, list.length, m.name, 0);
+    out.set(m.id, await sampleMedia(m, (k, n) => onProgress(i + 1, list.length, m.name, k / n)));
   }
   return out;
 }

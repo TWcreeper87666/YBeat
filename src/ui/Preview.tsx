@@ -24,6 +24,7 @@ import { useFaces } from '../engine/face';
 import { useBoxTracks, trackKey } from '../engine/boxTrack';
 import { anchorTime, frameRectToBox, putAnchor, requestSubject, subjectAt, tracking } from '../engine/follow';
 import { stopBoxPick, useBoxPick } from './subjectUi';
+import { sampleCtx } from './previewSample';
 
 const frameAspect = () => useStore.getState().format.w / useStore.getState().format.h;
 
@@ -114,6 +115,11 @@ export function Preview() {
           const clip = { ...c, track: ctx.videoTracks.length, start: t - Math.min(el, c.duration - 1e-3) };
           ctx = { ...ctx, clips: [...ctx.clips, clip], videoTracks: [...ctx.videoTracks, [clip]] };
         } else trialText = null;
+        // 特效 / 轉場試看：預設換成示範的 A / B 畫面（右鍵「用時間軸畫面試看」才用目前的畫面）；變速一定要用時間軸上的影片
+        const fx0 = usePreviewFx.getState().fx;
+        const sample = fx0 && !fx0.timeline && !st.playing && ctx.modules.get(fx0.moduleId)?.kind !== 'remap' ? sampleCtx(ctx, st.format) : null;
+        if (sample) ctx = sample.ctx;
+        const ft = sample ? sample.mid : t;
         // 特效分頁點選的「我的組合」：放在最上層（多一條暫時的特效軌），整段循環播放
         const fxSel = usePreviewFx.getState().fx;
         const combo = fxSel && !st.playing ? fxCombo(fxSel.moduleId) : undefined;
@@ -121,19 +127,21 @@ export function Preview() {
           if (trialCombo?.key !== combo) trialCombo = { key: combo, item: { ...structuredClone(combo.fx), id: 'trial-combo', start: 0, track: 0 } };
           const it = trialCombo.item;
           const el = ((now - fxSel.t0) / 1000) % (it.duration + 0.6);
-          ctx = { ...ctx, effects: [...ctx.effects, { ...it, track: ctx.tracks.fx.length, start: t - Math.min(el, it.duration - 1e-3) }] };
+          ctx = { ...ctx, effects: [...ctx.effects, { ...it, track: ctx.tracks.fx.length, start: ft - Math.min(el, it.duration - 1e-3) }] };
         } else trialCombo = null;
         // 素材庫點選的特效 / 轉場：循環預覽
         let extra;
         // 修剪片段時：預覽暫時顯示邊緣那一格（播放頭不動）
-        const trimT = st.playing ? null : useTrimView.getState().t;
-        let rt = trimT ?? t, rPlaying = st.playing;
+        const trimT = st.playing || sample ? null : useTrimView.getState().t;
+        let rt = trimT ?? ft, rPlaying = st.playing;
         const fx = usePreviewFx.getState().fx;
         const m = fx && ctx.modules.get(fx.moduleId);
         const trial = !fx || !m || st.playing
           ? null
           : m.kind === 'transition'
-            ? trialTransitionAt(ctx, t, m, parseDuration(m.code, TRANSITION_PREVIEW), 0.1, st.activeTrack?.kind === 'video' ? st.activeTrack.idx : undefined)
+            ? sample
+              ? trialTransitionAt(ctx, sample.cut, m, parseDuration(m.code, TRANSITION_PREVIEW), 0.1)
+              : trialTransitionAt(ctx, t, m, parseDuration(m.code, TRANSITION_PREVIEW), 0.1, st.activeTrack?.kind === 'video' ? st.activeTrack.idx : undefined)
             : m.kind === 'remap'
               ? trialRemap(st, ctx, m.id, t)
               : null;
@@ -315,7 +323,7 @@ function FxPreviewLabel() {
   if (!label) return null;
   return (
     <div className="fx-preview-label">
-      {$t('預覽：')}{label}
+      {$t('預覽：')}{label}{fx?.timeline ? ` · ${$t('時間軸畫面')}` : ''}
       <button onClick={stopPreviewFx} title={$t('結束預覽 (Esc)')}><X size={12} /></button>
     </div>
   );
