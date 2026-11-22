@@ -1,5 +1,5 @@
 import { $t, displayName } from '../i18n';
-import { AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2, Zap, Crosshair } from 'lucide-react';
+import { AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2, Zap, Crosshair } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { cutTracks, type FxTrigger } from '../engine/trigger';
 import { attachedAudioIds, keyOf, uid, type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, type TrSide, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type AudioFrom, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
@@ -45,6 +45,8 @@ import { itemName } from './names';
 import { ensureMatte, matteCoverage, matteFrames, useMatte } from '../engine/matte';
 import { cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { closeSource, openSource, useSource } from './SourcePanel';
+import { useDock } from './Dock';
+import { aspectOf, formatBitrate, formatBytes, formatFps, probeMedia, type MediaProbe } from '../engine/mediaInfo';
 import { confirmDialog, openMenu, promptDialog, revealSelection, stopPreviewFx, toast, useColorPick, useLayout, usePreviewFx, type MenuItem } from './uiStore';
 import { DragNumber } from './DragNumber';
 import { ModuleCode } from './ModuleCode';
@@ -164,6 +166,7 @@ export function MediaPanel() {
       { separator: true },
       { label: items.length > 1 ? $t('插入選取的 {0} 個素材', items.length) : $t('插入到播放頭'), action: items.some(mediaUsable) ? () => insertPicked(items) : undefined },
       { label: m.missing ? $t('重新連結檔案…') : $t('替換檔案…'), action: items.length === 1 ? () => relinkWithPicker(m.id) : undefined },
+      { label: $t('素材資訊'), action: items.length === 1 && !m.missing ? () => { openSource(m.id); useDock.getState().activatePanel('inspector'); } : undefined },
       { separator: true },
       { label: items.length > 1 ? $t('移除選取的 {0} 個素材', items.length) : n ? $t('從素材庫移除（{0} 個片段使用中）', n) : $t('從素材庫移除'), action: () => removePicked(items), danger: true },
       { label: $t('從素材庫與時間軸移除'), action: inTimeline ? () => removePicked(items, true) : undefined, danger: true },
@@ -1244,7 +1247,7 @@ function maskBlock(
 }
 
 /**
- * 一個特效的屬性區塊：參數、遮罩、音訊反應。特效軌的特效與片段特效共用。
+ * 一個特效的屬性區塊：參數（含音訊反應）、遮罩。特效軌的特效與片段特效共用。
  * compact：遮罩併進參數區塊（片段特效用，比較不佔空間）
  */
 function effectSections(
@@ -1270,6 +1273,13 @@ function effectSections(
       return paramAt(d, resolveParams(defs, cur.params), cur.keys, local);
     });
   };
+  // 挑選視窗開著時資料會變：一律以 store 裡最新的為準
+  const setDrive = (n: string, v: AudioDrive | null) => {
+    const cur = { ...((o.fresh() ?? f).audio ?? {}) };
+    if (v) cur[n] = v;
+    else delete cur[n];
+    update({ audio: Object.keys(cur).length ? cur : undefined });
+  };
   // 跟隨目標（看的片段有追蹤時）：模組標了 @follow 的 point 參數有開關，打開時不顯示 X / Y（位置跟著目標，拖預覽上的點調偏移）；
   // 沒標的 point 參數可以從右鍵打開
   const followable = o.tracking ? defs.filter((d) => d.type === 'point' && !d.fit && (d.follow || f.follow?.[d.name])) : [];
@@ -1286,7 +1296,36 @@ function effectSections(
         const name = parsePointCh(c.id)?.name ?? c.id;
         const d = defs.find((x) => x.name === name);
         const fm = d && o.tracking ? followMenu(d, f.follow, (m) => update({ follow: m })) : [];
-        return { ...c, menu: [...fm, ...(menuFor(name) ?? [])] };
+        const dr = f.audio?.[name];
+        const fresh = () => (o.fresh() ?? f).audio?.[name];
+        const st = d?.type === 'int' ? 1 : d ? (d.max - d.min) / 200 || 0.01 : 0.01;
+        const drive: Channel['drive'] = d && isNumeric(d) ? {
+          on: !!dr,
+          toggle: () => setDrive(name, fresh() ? null : { source: 'level', min: Number(d.def), max: d.max }),
+          rows: dr ? [
+            {
+              label: $t('訊號'),
+              node: <select className="select drive-pick" value={dr.source} onChange={(e) => { const x = fresh(); if (x) setDrive(name, { ...x, source: e.target.value as AudioDrive['source'] }); }}>
+                <option value="level">{$t('跟著音量')}</option>
+                <option value="beat">{$t('跟著節拍')}</option>
+              </select>,
+            },
+            {
+              label: $t('範圍'),
+              node: <div className="drive-row">
+                <DragNumber variant="text" value={dr.min} step={st} onChange={(v) => { const x = fresh(); if (x) setDrive(name, { ...x, min: v }); }} />
+                <span className="muted">→</span>
+                <DragNumber variant="text" value={dr.max} step={st} onChange={(v) => { const x = fresh(); if (x) setDrive(name, { ...x, max: v }); }} />
+              </div>,
+            },
+            {
+              label: $t('來源'),
+              node: <SourcePick from={dr.from} title={`${$t(d.label)} · ${$t('來源')}`}
+                body={() => <DriveSourceBody from={fresh()?.from} set={(from) => { const x = fresh(); if (x) setDrive(name, from ? { ...x, from } : (({ from: _, ...rest }) => rest)(x)); }} />} />,
+            },
+          ] : [],
+        } : undefined;
+        return { ...c, menu: [...fm, ...(menuFor(name) ?? [])], drive };
       });
 
   const sections: Section[] = [
@@ -1299,7 +1338,7 @@ function effectSections(
       menu: owner ? () => fxTitleMenu(owner) : undefined,
       rows: [...(o.topRows ?? []), ...followRows, ...paramRows(other, f.params, (p) => update({ params: p }), o.sampleColor, (d) => menuFor(d.name) ?? []), ...(o.compact ? maskRows : [])],
       channels: [...(mod ? mapCh(withMenu(fxChannels(f as FxItem, mod.code, local))) : []), ...(o.compact ? maskChs : [])],
-      onReset: () => update({ params: {}, keys: {}, ...(o.compact ? { mask: undefined } : {}) }),
+      onReset: () => update({ params: {}, keys: {}, audio: undefined, ...(o.compact ? { mask: undefined } : {}) }),
       footer: (
         <>
           {mod && <ModuleCode module={mod} onFork={(nid) => (o.onFork ?? ((x: string) => update({ moduleId: x })))(nid)} />}
@@ -1309,74 +1348,6 @@ function effectSections(
   ];
   if (!o.compact) {
     sections.push({ id: `${o.idBase}.mask`, title: $t('遮罩'), rows: [{ ...maskRows[0], label: $t('形狀') }, ...maskRows.slice(1)], channels: maskChs, onReset: resetMask });
-  }
-  // 音訊反應：數值參數跟著音量 / 節拍變化
-  const numeric = defs.filter(isNumeric);
-  if (numeric.length) {
-    // 挑選視窗開著時資料會變：一律以 store 裡最新的為準
-    const setDrive = (n: string, v: AudioDrive | null) => {
-      const cur = { ...((o.fresh() ?? f).audio ?? {}) };
-      if (v) cur[n] = v;
-      else delete cur[n];
-      update({ audio: Object.keys(cur).length ? cur : undefined });
-    };
-    sections.push({
-      id: `${o.idBase}.audio`,
-      title: o.compact ? `${name} · ${$t('音訊反應')}` : $t('音訊反應'),
-      dim: o.dim,
-      // 片段特效：沒在用音訊反應就先收起來
-      defaultCollapsed: o.compact && !f.audio,
-      // 每個參數：第一列選來源訊號；開了之後下面兩列子屬性：範圍、聽哪些軌道
-      rows: numeric.flatMap((d) => {
-        const dr = f.audio?.[d.name];
-        const st = d.type === 'int' ? 1 : (d.max - d.min) / 200 || 0.01;
-        const main = {
-          label: $t(d.label),
-          node: (
-            <select
-              className="select drive-pick"
-              value={dr?.source ?? ''}
-              onChange={(e) => {
-                const src = e.target.value as AudioDrive['source'] | '';
-                setDrive(d.name, src ? { ...dr, source: src, min: dr?.min ?? Number(d.def), max: dr?.max ?? d.max } : null);
-              }}
-            >
-              <option value="">{$t('不使用')}</option>
-              <option value="level">{$t('跟著音量')}</option>
-              <option value="beat">{$t('跟著節拍')}</option>
-            </select>
-          ),
-        };
-        if (!dr) return [main];
-        const fresh = () => (o.fresh() ?? f).audio?.[d.name];
-        return [
-          main,
-          {
-            label: $t('範圍'),
-            sub: true,
-            node: (
-              <div className="drive-row">
-                <DragNumber variant="text" value={dr.min} step={st} onChange={(v) => { const x = fresh(); if (x) setDrive(d.name, { ...x, min: v }); }} />
-                <span className="muted">→</span>
-                <DragNumber variant="text" value={dr.max} step={st} onChange={(v) => { const x = fresh(); if (x) setDrive(d.name, { ...x, max: v }); }} />
-              </div>
-            ),
-          },
-          {
-            label: $t('來源'),
-            sub: true,
-            node: (
-              <SourcePick
-                from={dr.from}
-                title={`${$t(d.label)} · ${$t('來源')}`}
-                body={() => <DriveSourceBody from={fresh()?.from} set={(from) => { const x = fresh(); if (x) setDrive(d.name, from ? { ...x, from } : (({ from: _, ...rest }) => rest)(x)); }} />}
-              />
-            ),
-          },
-        ];
-      }),
-      onReset: () => update({ audio: undefined }),
-    });
   }
   return sections;
 }
@@ -1700,7 +1671,11 @@ function EffectInspector({ id }: { id: string }) {
 }
 
 /** 沒有時間軸的屬性列表（轉場、音訊） */
-function PlainControls({ title, rows, footer, titleMenu }: { title: React.ReactNode; rows: { label: string; node: React.ReactNode; menu?: MenuItem[] }[]; footer?: React.ReactNode; titleMenu?: () => MenuItem[] }) {
+type PlainRow = { label: string; node: React.ReactNode; menu?: MenuItem[] };
+
+/** more：次要資訊，收在可展開的區塊裡（預設收起） */
+function PlainControls({ title, rows, more, footer, titleMenu }: { title: React.ReactNode; rows: PlainRow[]; more?: { title: string; rows: PlainRow[] }; footer?: React.ReactNode; titleMenu?: () => MenuItem[] }) {
+  const [moreOpen, setMoreOpen] = useState(false);
   const ctx = (get: MenuItem[] | (() => MenuItem[]) | undefined) => (e: React.MouseEvent) => {
     const items = typeof get === 'function' ? get() : get;
     if (!items?.length) return;
@@ -1708,14 +1683,26 @@ function PlainControls({ title, rows, footer, titleMenu }: { title: React.ReactN
     e.stopPropagation();
     openMenu(e.clientX, e.clientY, items);
   };
+  const row = (r: PlainRow, i: number) => (
+    <div key={r.label + i} className="ec-row">
+      <div className="ec-left ec-plain" onContextMenu={ctx(r.menu)}><span className="ec-label">{r.label}</span><div className="ec-node">{r.node}</div></div>
+    </div>
+  );
   return (
     <div className="ec plain">
       <div className="ec-row ec-header" onContextMenu={ctx(titleMenu)}><div className="ec-left">{title}</div></div>
-      {rows.map((r, i) => (
-        <div key={r.label + i} className="ec-row">
-          <div className="ec-left ec-plain" onContextMenu={ctx(r.menu)}><span className="ec-label">{r.label}</span><div className="ec-node">{r.node}</div></div>
-        </div>
-      ))}
+      {rows.map(row)}
+      {more && more.rows.length > 0 && (
+        <>
+          <div className="ec-row ec-section">
+            <div className="ec-left" onClick={() => setMoreOpen(!moreOpen)}>
+              <span className="twirl">{moreOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}</span>
+              <span className="ec-sec-title">{more.title}</span>
+            </div>
+          </div>
+          {moreOpen && more.rows.map(row)}
+        </>
+      )}
       {footer && <div className="ec-footer">{footer}</div>}
     </div>
   );
@@ -1844,10 +1831,24 @@ function AudioInspector({ id }: { id: string }) {
   );
 }
 
+function useMediaProbe(m: Media | undefined) {
+  const key = m && !m.missing ? m.url : undefined;
+  const [probe, setProbe] = useState<MediaProbe | null>(null);
+  useEffect(() => {
+    setProbe(null);
+    if (!m || !key) return;
+    let alive = true;
+    probeMedia(m.id, key, m.name).then((p) => alive && setProbe(p));
+    return () => { alive = false; };
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
+  return probe;
+}
+
 /** 素材庫點開的素材：檔案資訊 + 素材預覽的入點 / 出點 */
 function MediaInspector({ id }: { id: string }) {
   const m = useStore((s) => s.media.find((x) => x.id === id));
   const uses = useStore((s) => s.clips.filter((c) => c.mediaId === id).length + s.audios.filter((a) => a.mediaId === id).length);
+  const p = useMediaProbe(m);
   if (!m) return null;
   const val = (v: React.ReactNode) => <span className="info-val">{v}</span>;
   const bpm = m.kind === 'audio' ? mediaBeats(m)?.bpm : undefined;
@@ -1856,13 +1857,28 @@ function MediaInspector({ id }: { id: string }) {
     <PlainControls
       title={<Title kind="k-media" label={$t('素材')} name={m.name} />}
       rows={[
-        { label: $t('類型'), node: val(KIND_LABEL[m.kind]) },
+        { label: $t('類型'), node: val(p ? `${KIND_LABEL[m.kind]} · ${p.format}` : KIND_LABEL[m.kind]) },
         ...(m.kind !== 'audio' && m.width && m.height ? [{ label: $t('解析度'), node: val(`${m.width}×${m.height}`) }] : []),
         ...(timed ? [{ label: $t('長度'), node: val(`${m.duration.toFixed(2)}s`) }] : []),
+        ...(p?.fps ? [{ label: $t('影格率'), node: val(`${formatFps(p.fps)} fps`) }] : []),
         ...(m.kind === 'video' ? [{ label: $t('聲音'), node: val(m.hasAudio ? $t('有') : $t('無')) }] : []),
         ...(bpm ? [{ label: 'BPM', node: val(bpm.toFixed(1)) }] : []),
+        ...(p ? [{ label: $t('檔案大小'), node: val(formatBytes(p.size)) }] : []),
         { label: $t('使用次數'), node: val(uses) },
       ]}
+      more={{
+        title: $t('詳細資訊'),
+        rows: [
+          ...(m.kind !== 'audio' && m.width && m.height ? [{ label: $t('長寬比'), node: val(aspectOf(m.width, m.height)) }] : []),
+          ...(p?.videoCodec ? [{ label: $t('影片編碼'), node: val(p.videoCodec) }] : []),
+          ...(p?.audioCodec ? [{ label: $t('音訊編碼'), node: val(p.audioCodec) }] : []),
+          ...(p?.sampleRate ? [{ label: $t('取樣率'), node: val(`${+(p.sampleRate / 1000).toFixed(1)} kHz`) }] : []),
+          ...(p?.channels ? [{ label: $t('聲道'), node: val(p.channels === 1 ? $t('單聲道') : p.channels === 2 ? $t('立體聲') : $t('{0} 聲道', p.channels)) }] : []),
+          ...(p && timed && m.duration > 0 ? [{ label: $t('位元率'), node: val(formatBitrate((p.size * 8) / m.duration)) }] : []),
+          ...(p?.created ? [{ label: $t('建立日期'), node: val(new Date(p.created).toLocaleString()) }] : []),
+          ...(p?.modified ? [{ label: $t('修改日期'), node: val(new Date(p.modified).toLocaleString()) }] : []),
+        ],
+      }}
     />
   );
 }

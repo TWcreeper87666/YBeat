@@ -37,6 +37,7 @@ console.log('PASS @follow 與設定');
   assert.equal(fitScale(sz, fd, { k: 2 }, undefined, 0), 2, '倍率 = 參數的值');
   assert.equal(fitScale(sz, fd, {}, { k: [{ id: 'a', t: 0, v: 3, ease: 'linear' } as any] }, 0), 3, '倍率可以打關鍵影格');
   assert.equal(fitScale(b2, fd, {}, undefined, 0), 1, '沒有倍率參數 = 1');
+  assert.equal(fitScale(sz, fd, { k: 2 }, undefined, 0, () => 4), 4, '倍率參數跟著音訊變化時用實際的值');
   void kd;
   const mo = BUILTIN_MODULES.find((m) => m.id === 'fx-mosaic');
   assert.ok(mo && !isHitFx(mo) && canFollow(mo), '馬賽克：持續特效、可以跟隨');

@@ -71,6 +71,8 @@ export async function exportMp4(fps: number, range?: { a: number; b: number }, b
   try {
     const mixed = await mixdown(st0, ctx.modules, dur, start);
     const aPick = mixed ? await pickAudioConfig() : null;
+    // 有聲音但編不了：不要默默匯出無聲影片
+    if (mixed && !aPick) throw new Error($t('找不到可用的音訊編碼設定'));
 
     const target = new ArrayBufferTarget();
     const muxer = new Muxer({

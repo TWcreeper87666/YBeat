@@ -30,15 +30,22 @@ function db() {
 async function run<T>(store: string, mode: IDBTransactionMode, fn: (os: IDBObjectStore) => IDBRequest<T>): Promise<T> {
   const d = await db();
   return new Promise((res, rej) => {
-    const req = fn(d.transaction(store, mode).objectStore(store));
-    req.onsuccess = () => res(req.result);
-    req.onerror = () => rej(req.error);
+    const tx = d.transaction(store, mode);
+    const req = fn(tx.objectStore(store));
+    if (mode === 'readonly') {
+      req.onsuccess = () => res(req.result);
+      req.onerror = () => rej(req.error);
+      return;
+    }
+    // 寫入：等交易真的完成才算成功（空間不足之類的錯誤會在交易中止時才出現）
+    tx.oncomplete = () => res(req.result);
+    tx.onabort = tx.onerror = () => rej(tx.error ?? req.error);
   });
 }
 
-export const saveMediaBlob = (id: string, blob: Blob) => run('media', 'readwrite', (os) => os.put(blob, id)).catch((e) => console.warn($t('素材存檔失敗'), e));
+export const saveMediaBlob = (id: string, blob: Blob) => run('media', 'readwrite', (os) => os.put(blob, id));
 export const deleteMediaBlob = (id: string) => run('media', 'readwrite', (os) => os.delete(id)).catch(() => {});
-const loadMediaBlob = (id: string) => run<Blob | undefined>('media', 'readonly', (os) => os.get(id));
+export const loadMediaBlob = (id: string) => run<Blob | undefined>('media', 'readonly', (os) => os.get(id));
 
 interface Saved {
   media: Media[];

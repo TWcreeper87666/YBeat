@@ -10,6 +10,8 @@ import { normalizeHits, type FxTiming } from '../engine/trigger';
 import { captionList } from '../engine/subtitles';
 import { anchorTime, fitOf, followOf, frameRectToBox, putAnchor, type Follow, type FollowMap, type Subject } from '../engine/follow';
 import { fitStart } from '../engine/overlap';
+import { fxLevel } from '../engine/tracks';
+import { AUTO_EDIT_DECLS, applyAutoEdit, proposeAutoEdit, readAutoEdit, type AutoEditPatch } from './autoEditTools';
 import { laneOf, spansOf } from '../store';
 import { triggerBeats, type BeatEvery, type FxTrigger } from '../engine/trigger';
 import { getBeats } from '../ui/beatGrid';
@@ -41,6 +43,7 @@ const TARGETS = {
 };
 
 export const PROJECT_TOOL_DECLS: ToolDecl[] = [
+  ...(AUTO_EDIT_DECLS as ToolDecl[]),
   {
     name: 'get_timeline',
     description: 'Read the timeline: video clips (with their transitions, remap, clip effects), effect-track blocks, audio clips. Times are timeline seconds. Optionally only items overlapping from..to.',
@@ -199,7 +202,7 @@ export const PROJECT_TOOL_DECLS: ToolDecl[] = [
   },
 ];
 
-const READ = new Set(['get_timeline', 'get_beats', 'get_selection', 'get_subtitles']);
+const READ = new Set(['get_timeline', 'get_beats', 'get_selection', 'get_subtitles', 'get_auto_edit']);
 export const isProjectTool = (name: string) => PROJECT_TOOL_DECLS.some((d) => d.name === name);
 
 // ───────────── 操作 ─────────────
@@ -223,7 +226,11 @@ export type Op =
   | { op: 'set_tracking'; clipIds: string[]; subject: Subject | null }
   | { op: 'edit_subtitles'; items: { clipId: string; text?: string; start?: number; end?: number }[] }
   | { op: 'split_subtitles'; items: { clipId: string; parts: string[]; times: number[] }[] }
-  | { op: 'translate_subtitles'; items: { clipId: string; text: string }[] };
+  | { op: 'translate_subtitles'; items: { clipId: string; text: string }[] }
+  /** 改「自動剪輯」面板的設定（不動專案）；generate = 套用後產生一版 */
+  | { op: 'auto_edit'; patch: AutoEditPatch; generate: boolean; replaceLast: boolean }
+  /** 一批新片段 / 特效方塊（自動剪輯）：放在新的影片軌 / 特效軌（track 欄位忽略） */
+  | { op: 'add_items'; clips: Clip[]; effects: FxItem[] };
 
 /** 提議的修改（顯示用的摘要 + 實際操作） */
 export interface Proposal { summary: string; op: Op }
@@ -334,6 +341,10 @@ function propose(name: string, a: Record<string, unknown>, s: S): { p: Proposal;
   };
   const tooMany = (n: number) => n > MAX_TARGETS && fail(`too many targets (${n}), max ${MAX_TARGETS}`);
 
+  if (name === 'set_auto_edit') {
+    const r = proposeAutoEdit(a, s, fail, warn);
+    return { p: { summary: r.summary, op: { op: 'auto_edit', patch: r.patch, generate: r.generate, replaceLast: r.replaceLast } }, warn };
+  }
   if (name === 'add_effects') {
     const m = moduleOf(s, a.moduleId, ['effect', 'transition']);
     const blocks = arr(a.blocks).map((b) => b as { start?: unknown; duration?: unknown });
@@ -782,6 +793,7 @@ export function runProjectTool(name: string, args: Record<string, unknown>, prop
     if (name === 'get_beats') return readBeats(s, args);
     if (name === 'get_selection') return readSelection(s);
     if (name === 'get_subtitles') return readSubtitles(s, args);
+    if (name === 'get_auto_edit') return readAutoEdit(s);
     if (READ.has(name)) return { error: 'unknown' };
     const { p, warn } = propose(name, args, s);
     proposals.push(p);
@@ -823,6 +835,36 @@ function applyOp(op: Op): number {
   const trField = (side: TrSide) => (side === 'out' ? 'transitionOut' : 'transitionIn') as 'transitionOut' | 'transitionIn';
   let n = 0;
   switch (op.op) {
+    case 'auto_edit':
+      applyAutoEdit(op.patch, op.generate, op.replaceLast);
+      return 1;
+    case 'add_items': {
+      const ok = (id: string) => st.modules.some((m) => m.id === id);
+      const clips = op.clips.filter((c) => st.media.some((m) => m.id === c.mediaId && !m.missing));
+      const effects = op.effects.filter((e) => ok(e.moduleId));
+      if (!clips.length && !effects.length) return 0;
+      // 影片軌：只有一條而且是空的就直接用，不然在最上層新增一條
+      let s = useStore.getState();
+      const reuse = s.tracks.video.length === 1 && !s.clips.length && !s.tracks.video[0].locked;
+      if (clips.length && !reuse) st.addTrack('video', s.tracks.video.length);
+      s = useStore.getState();
+      const vt = clips.length ? s.tracks.video.length - 1 : 0;
+      // 特效軌：放在所有影片軌上方；已經有一條空的就用它
+      let ft = -1;
+      if (effects.length) {
+        const top = s.tracks.video.length;
+        ft = s.tracks.fx.findIndex((t, i) => !t.locked && fxLevel(s.tracks, i) >= top && !s.effects.some((e) => e.track === i));
+        if (ft < 0) {
+          st.addTrack('fx', s.tracks.fx.length, top);
+          ft = useStore.getState().tracks.fx.length - 1;
+        }
+      }
+      useStore.setState((x) => ({
+        clips: [...x.clips, ...clips.map((c) => ({ ...c, track: vt }))],
+        effects: [...x.effects, ...effects.map((e) => ({ ...e, track: ft }))],
+      }));
+      return clips.length + effects.length;
+    }
     case 'add_effects': {
       if (!st.modules.some((m) => m.id === op.moduleId)) return 0;
       const isTr = st.modules.find((m) => m.id === op.moduleId)!.kind === 'transition';
@@ -1048,7 +1090,7 @@ export function applyProposals(list: Proposal[]): { done: number; skipped: numbe
   try {
     for (const p of list) {
       const o = p.op;
-      const want = o.op === 'add_effects' ? o.blocks.length : o.op === 'set_transitions' ? o.at.length : 'clipIds' in o ? o.clipIds.length : 'items' in o ? o.items.length : o.targets.length;
+      const want = o.op === 'auto_edit' ? 1 : o.op === 'add_items' ? o.clips.length + o.effects.length : o.op === 'add_effects' ? o.blocks.length : o.op === 'set_transitions' ? o.at.length : 'clipIds' in o ? o.clipIds.length : 'items' in o ? o.items.length : o.targets.length;
       const n = applyOp(p.op);
       done += n;
       skipped += Math.max(0, want - n);

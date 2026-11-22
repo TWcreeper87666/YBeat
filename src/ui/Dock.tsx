@@ -26,6 +26,7 @@ export const PANELS: { id: PanelId; title: string }[] = [
   { id: 'inspector', title: $t('屬性') },
   { id: 'code', title: $t('程式碼') },
   { id: 'ai', title: 'AI' },
+  { id: 'auto', title: $t('自動剪輯') },
   { id: 'preview', title: $t('預覽') },
   { id: 'timeline', title: $t('時間軸') },
 ];
@@ -34,10 +35,10 @@ const LIB: PanelId[] = ['media', 'color', 'text', 'lyrics', 'transition', 'effec
 
 /** 內建版面 */
 export const PRESETS: { id: string; name: string; build: () => DockNode }[] = [
-  { id: 'edit', name: $t('剪輯'), build: () => C([R([T(LIB), T(['inspector', 'code', 'ai'], 'inspector'), T(['preview'])], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
-  { id: 'right', name: $t('預覽在右'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai'], 'inspector')], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview'])], [0.72, 0.28]) },
-  { id: 'code', name: $t('寫程式'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai'], 'code')], [0.3, 0.7]), T(['timeline'])], [0.68, 0.32]), T(['preview'])], [0.74, 0.26]) },
-  { id: 'timeline', name: $t('大時間軸'), build: () => C([R([T([...LIB, 'inspector', 'code', 'ai'], 'media'), T(['preview'])], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
+  { id: 'edit', name: $t('剪輯'), build: () => C([R([T(LIB), T(['inspector', 'code', 'ai', 'auto'], 'inspector'), T(['preview'])], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
+  { id: 'right', name: $t('預覽在右'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai', 'auto'], 'inspector')], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview'])], [0.72, 0.28]) },
+  { id: 'code', name: $t('寫程式'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai', 'auto'], 'code')], [0.3, 0.7]), T(['timeline'])], [0.68, 0.32]), T(['preview'])], [0.74, 0.26]) },
+  { id: 'timeline', name: $t('大時間軸'), build: () => C([R([T([...LIB, 'inspector', 'code', 'ai', 'auto'], 'media'), T(['preview'])], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
 ];
 
 interface Custom { id: string; name: string; layout: DockNode }

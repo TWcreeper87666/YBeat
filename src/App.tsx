@@ -11,7 +11,8 @@ import { copyTransition, cutTransitions, navTransition, navTransitionEdge, navTr
 import { CodePanel } from './ui/CodePanel';
 import { AiPanel } from './ui/AiPanel';
 import { PickerHost } from './ui/Library';
-import { Timeline, duplicateTimeline, mergeOrHint, pasteTimeline } from './ui/Timeline';
+import { parseRowKey, useTrackSel } from './ui/trackSel';
+import { Timeline, deleteTracks, duplicateTimeline, mergeOrHint, pasteTimeline } from './ui/Timeline';
 import { closeSource, sourceHotkey } from './ui/SourcePanel';
 import { FloatingWindow, PreviewPanel, Slot } from './ui/PreviewPanel';
 import { DockRoot, PANELS, layoutMenuItems, panelMenuItems, useDock, type PanelId } from './ui/Dock';
@@ -26,10 +27,12 @@ import { usePrefs } from './prefs';
 import { Globe, Settings } from 'lucide-react';
 import { downloadBlob, exportMp4 } from './engine/exporter';
 import { loadDemo } from './engine/demo';
-import { stepsFrom, undo, redo, useHistory } from './engine/history';
+import { beginHistoryTransaction, endHistoryTransaction, stepsFrom, undo, redo, useHistory } from './engine/history';
 import { newProject, saveNow, useSaveState, exportProjectPack, importProjectPack } from './engine/project';
 import { importFiles, pickFiles } from './engine/media';
 import { LyricsPanel } from './ui/SubtitlesDialog';
+import { AutoEditPanel } from './ui/AutoEditPanel';
+import { canReplaceLast, generateAutoEdit } from './engine/autoEditApply';
 import { ColorPanel } from './ui/ColorPanel';
 import { EditorWindow, openEditorWindow, useEditorWindow } from './ui/EditorWindow';
 import { snapToDevicePixels } from './ui/pixelSnap';
@@ -214,6 +217,11 @@ function SettingsDialog({ close }: { close: () => void }) {
       format: useStore.getState().format,
     };
   });
+  // 輸出比例在對話框裡怎麼切都只算一步復原；取消（還原）就不留紀錄
+  useEffect(() => {
+    beginHistoryTransaction();
+    return () => endHistoryTransaction(true);
+  }, []);
   guard = {
     save: close,
     dirty: () => {
@@ -400,6 +408,9 @@ function menus(): { label: string; items: () => MenuItem[] }[] {
           { label: $t('修剪開頭到播放頭'), shortcut: 'Q', action: () => s.trim('start') },
           { label: $t('修剪結尾到播放頭'), shortcut: 'W', action: () => s.trim('end') },
           { separator: true },
+          { label: $t('自動剪輯'), action: () => useDock.getState().activatePanel('auto') },
+          { label: $t('自動剪輯：再一版'), action: canReplaceLast() ? () => void generateAutoEdit(true) : undefined },
+          { separator: true },
           { label: $t('全選'), shortcut: 'Ctrl+A', action: s.selectAll },
           { label: $t('取消選取'), shortcut: 'Esc', action: () => s.select(null) },
         ];
@@ -496,6 +507,11 @@ function onKey(e: KeyboardEvent) {
   const frame = 1 / fps();
   // 滑鼠在素材預覽上：Space / I / O 給素材預覽
   if (sourceHotkey(e)) return;
+  // 最後點的是軌道標籤：Delete 刪選取的軌道
+  if (!mod && (e.key === 'Delete' || e.key === 'Backspace') && useTrackSel.getState().focus && useTrackSel.getState().keys.length) {
+    e.preventDefault();
+    return void deleteTracks(useTrackSel.getState().keys.map(parseRowKey));
+  }
   // 最後點的是屬性面板的「作用」列：快捷鍵作用在 Hit 上
   if (hitsFocused()) {
     if (mod && k === 'c') return void (copyHits() && e.preventDefault());
@@ -663,6 +679,7 @@ export default function App() {
       {createPortal(<InspectorPanel />, hosts.inspector)}
       {createPortal(<CodePanel />, hosts.code)}
       {createPortal(<AiPanel />, hosts.ai)}
+      {createPortal(<AutoEditPanel />, hosts.auto)}
       {createPortal(<PreviewPanel />, hosts.preview)}
       {createPortal(<Timeline />, hosts.timeline)}
 

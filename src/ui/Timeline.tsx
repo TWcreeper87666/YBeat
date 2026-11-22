@@ -24,7 +24,7 @@ import { projectRestored } from '../engine/project';
 import { rememberScroll, savedScroll } from './timelineView';
 import { confirmDialog, openMenu, promptDialog, stopPreviewFx, toast, useDrag, useLayout, useReveal, useSnapLine, useMenu, useTrimView, type MenuItem } from './uiStore';
 import { itemName } from './names';
-import { clickTrack, moveRows, moveRowsToEnd, rowKey, useTrackSel } from './trackSel';
+import { clickTrack, moveRows, moveRowsToEnd, parseRowKey, rowKey, useTrackSel, type Row } from './trackSel';
 import { closeSource } from './SourcePanel';
 import { beatLead, beatSnapPoints, fitToBeats, getBeats, splitAtBeats, useBeats } from './beatGrid';
 import { beatSource } from '../engine/beats';
@@ -1325,6 +1325,41 @@ function fxLevelLabel(tracks: Tracks, idx: number) {
 
 type TrackDrag = { moving: string[]; over: { kind: TrackKind; idx: number; edge: 'top' | 'bottom' } | null };
 
+/** 點軌道選取；Ctrl 點已選的軌道 = 取消選取，作用中的軌道改成還選著的最後一條 */
+function pickTrack(rows: Row[], r: Row, mode: 'single' | 'toggle' | 'range') {
+  clickTrack(rows, r, mode);
+  const keys = useTrackSel.getState().keys;
+  const st = useStore.getState();
+  if (keys.includes(rowKey(r))) st.setActiveTrack(r);
+  else st.setActiveTrack(keys.length ? parseRowKey(keys[keys.length - 1]) : null);
+}
+
+/** 刪除多條軌道（鎖定的跳過）；上面有項目先確認，整批算一步復原 */
+export async function deleteTracks(rows: Row[]) {
+  const st = useStore.getState();
+  const list = rows.filter((r) => st.tracks[r.kind][r.idx] && !st.tracks[r.kind][r.idx].locked);
+  if (!list.length) return;
+  if (list.filter((r) => r.kind === 'video').length >= st.tracks.video.length) return toast($t('至少要保留一條影片軌'), 'error');
+  const n = list.reduce((a, r) => a + st.trackItemCount(r.kind, r.idx), 0);
+  if (n > 0) {
+    const ok = await confirmDialog({
+      title: $t('刪除軌道？'),
+      message:
+        list.length > 1
+          ? $t('選取的 {0} 條軌道上還有 {1} 個項目，會一起被刪除（可以用 Ctrl+Z 復原）。', list.length, n)
+          : $t('「{0} {1}」上還有 {2} 個項目，會一起被刪除（可以用 Ctrl+Z 復原）。', NAMES[list[0].kind], list[0].idx + 1, n),
+      ok: $t('刪除'),
+      danger: true,
+    });
+    if (!ok) return;
+  }
+  // 從編號大的刪，前面的編號才不會跑掉（各類型的編號互不影響）
+  beginHistoryTransaction();
+  for (const r of [...list].sort((a, b) => b.idx - a.idx)) useStore.getState().deleteTrack(r.kind, r.idx);
+  endHistoryTransaction(true);
+  useTrackSel.setState({ keys: [], anchor: null, focus: false });
+}
+
 export function Timeline() {
   const clips = useStore((s) => s.clips);
   const effects = useStore((s) => s.effects);
@@ -1354,14 +1389,23 @@ export function Timeline() {
   const trackSel = useTrackSel((s) => s.keys);
   // 軌道增減 → 編號會變，清掉軌道多選
   const trackCount = tracks.video.length + tracks.fx.length + tracks.audio.length;
-  useEffect(() => useTrackSel.setState({ keys: [], anchor: null }), [trackCount]);
+  useEffect(() => useTrackSel.setState({ keys: [], anchor: null, focus: false }), [trackCount]);
+  // 最後點的是不是軌道標籤：決定 Delete 刪軌道還是刪片段
+  useEffect(() => {
+    const down = (e: PointerEvent) => {
+      const focus = !!(e.target as Element | null)?.closest?.('.tl-label');
+      if (useTrackSel.getState().focus !== focus) useTrackSel.setState({ focus });
+    };
+    window.addEventListener('pointerdown', down, true);
+    return () => window.removeEventListener('pointerdown', down, true);
+  }, []);
   // 點選片段（或用鍵盤換片段）→ 軌道選取變成只有那個片段所在的軌道
   useEffect(
     () =>
       useStore.subscribe((s, p) => {
         if (s.selection === p.selection || !s.selection || !s.activeTrack) return;
         const k = rowKey(s.activeTrack);
-        useTrackSel.setState({ keys: [k], anchor: k });
+        useTrackSel.setState({ keys: [k], anchor: k, focus: false });
       }),
     [],
   );
@@ -1634,8 +1678,7 @@ export function Timeline() {
         const st = useStore.getState();
         const rows = displayRows(st.tracks, st.upperAt);
         if (!moved) {
-          clickTrack(rows, { kind, idx }, mode);
-          return st.setActiveTrack({ kind, idx });
+          return pickTrack(rows, { kind, idx }, mode);
         }
         if (!over) return;
         const target = rows.find((r) => r.kind === over!.kind && r.idx === over!.idx);
@@ -1740,26 +1783,16 @@ export function Timeline() {
         { label: $t('移到最下方'), action: toEnd('bottom') },
       );
     }
+    // 右鍵的軌道在多選裡：整組一起刪
+    const selKeys = useTrackSel.getState().keys;
+    const delGroup = selKeys.length > 1 && selKeys.includes(rowKey({ kind, idx })) ? selKeys.map(parseRowKey) : [{ kind, idx }];
     items.push(
       { separator: true },
       {
-        label: $t('刪除軌道'),
+        label: delGroup.length > 1 ? $t('刪除 {0} 條軌道', delGroup.length) : $t('刪除軌道'),
+        shortcut: 'Delete',
         danger: true,
-        action: async () => {
-          const st = useStore.getState();
-          if (kind === 'video' && st.tracks.video.length <= 1) return toast($t('至少要保留一條影片軌'), 'error');
-          const n = st.trackItemCount(kind, idx);
-          if (n > 0) {
-            const ok = await confirmDialog({
-              title: $t('刪除軌道？'),
-              message: $t('「{0} {1}」上還有 {2} 個項目，會一起被刪除（可以用 Ctrl+Z 復原）。', NAMES[kind], idx + 1, n),
-              ok: $t('刪除'),
-              danger: true,
-            });
-            if (!ok) return;
-          }
-          useStore.getState().deleteTrack(kind, idx);
-        },
+        action: () => void deleteTracks(delGroup),
       },
     );
     openMenu(e.clientX, e.clientY, items);
@@ -1932,8 +1965,7 @@ export function Timeline() {
                     const mode = e.ctrlKey || e.metaKey ? 'toggle' : e.shiftKey ? 'range' : 'single';
                     const pick = () => {
                       const S2 = useStore.getState();
-                      clickTrack(displayRows(S2.tracks, S2.upperAt), { kind, idx }, mode);
-                      S2.setActiveTrack({ kind, idx });
+                      pickTrack(displayRows(S2.tracks, S2.upperAt), { kind, idx }, mode);
                     };
                     if (st.locked) return pick();
                     startMarquee(e, pick);

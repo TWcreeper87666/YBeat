@@ -1403,3 +1403,35 @@ body.panning, body.panning * { cursor: grabbing !important; }
 .cue-more { margin-left: auto; background: none; border: none; color: var(--muted); padding: 2px; border-radius: 4px; display: inline-flex; }
 .cue-more:hover { color: #fff; background: #ffffff10; }
 .cue-text { width: 100%; resize: vertical; min-height: 30px; font-size: 14px; line-height: 1.4; }
+
+/* 自動剪輯面板（區塊、列沿用屬性面板的 .ec） */
+.auto-edit-panel { display: flex; flex-direction: column; min-height: 100%; }
+.ae-bar { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 6px; padding: 8px; background: #15171d; border-bottom: 1px solid var(--line); }
+.ae-bar .btn { display: inline-flex; align-items: center; gap: 6px; }
+.ae-bar .spacer { flex: 1; }
+.ae-count { margin-left: 6px; font-weight: 400; color: var(--muted); font-size: 11px; }
+.ae-stat { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.ae-sec-row { padding: 6px 8px 8px; border-bottom: 1px solid #ffffff07; }
+.ae-sections { position: relative; display: flex; gap: 1px; height: 14px; border-radius: 3px; overflow: hidden; }
+.ae-sections i { position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px; background: #fff; opacity: .85; }
+.ae-picks { display: flex; flex-direction: column; gap: 1px; padding: 2px 8px 6px 40px; border-bottom: 1px solid #ffffff07; }
+.ae-group .ec-label { cursor: pointer; }
+.ae-media { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
+.ae-media img { width: 32px; height: 18px; object-fit: cover; border-radius: 2px; flex: none; }
+.ae-media span { overflow: hidden; text-overflow: ellipsis; }
+.ae-note { padding: 2px 8px 6px 26px; border-bottom: 1px solid #ffffff07; }
+.ae-note .text-input { width: 100%; }
+.ae-media.dim { opacity: .45; }
+.ae-role { font-style: normal; font-size: 10.5px; color: var(--accent2); white-space: nowrap; flex: none; }
+.ae-curve { position: relative; height: 84px; margin-bottom: 6px; border-radius: 4px; overflow: hidden; background: #111318; cursor: crosshair; touch-action: none; }
+.ae-curve svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.ae-curve .band.high { fill: #c2413f22; }
+.ae-curve .band.mid { fill: #2b7d7418; }
+.ae-curve .band.low { fill: #3d4a6618; }
+.ae-curve .drop { stroke: #fff; stroke-opacity: .5; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.ae-curve .base { fill: none; stroke: #ffffff40; stroke-width: 1; vector-effect: non-scaling-stroke; }
+.ae-curve .shaped { fill: none; stroke: var(--accent2); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.ae-handle { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; background: var(--accent2); border: 2px solid #111318; cursor: grab; }
+.ae-handle:first-of-type { margin-left: 0; }
+.ae-handle:last-of-type { margin-left: -10px; }
+.ae-handle:active { cursor: grabbing; }

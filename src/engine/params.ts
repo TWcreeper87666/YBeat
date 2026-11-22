@@ -109,10 +109,10 @@ export function parsePointCh(ch: string): { name: string; axis: 0 | 1 } | null {
   return m && m[1] !== 'mask' ? { name: m[1], axis: m[2] === 'y' ? 1 : 0 } : null;
 }
 
-/** @fit 參數的倍率（倍率參數這一格的值；沒有倍率參數 = 1） */
-export function fitScale(d: ParamDef, defs: ParamDef[], values: ParamValues, keys: Record<string, Keyframe[]> | undefined, local: number): number {
+/** @fit 參數的倍率（倍率參數這一格的值；沒有倍率參數 = 1）。at：倍率參數的實際值（例如跟著音訊變化），沒給 = 關鍵影格 / 設定值 */
+export function fitScale(d: ParamDef, defs: ParamDef[], values: ParamValues, keys: Record<string, Keyframe[]> | undefined, local: number, at?: (s: ParamDef) => number): number {
   const s = d.fit?.scale ? defs.find((x) => x.name === d.fit!.scale && (x.type === 'float' || x.type === 'int')) : undefined;
-  return s ? Number(paramAt(s, values, keys, local)) : 1;
+  return s ? Number(at ? at(s) : paramAt(s, values, keys, local)) : 1;
 }
 
 /** 數值型（可以打關鍵影格、跟著音訊變化） */

@@ -491,18 +491,26 @@ export class Renderer {
   private setParams(p: Prog, values: ParamValues, keys?: Record<string, Keyframe[]>, local = 0, drive?: Record<string, AudioDrive>, pts?: Record<string, number[]>) {
     const gl = this.gl;
     const v = resolveParams(p.defs, values);
+    // 這一格的值：追蹤 > 音訊反應 > 關鍵影格 / 設定值
+    const valueOf = (d: ParamDef) => {
+      const dr = drive?.[d.name];
+      if (dr && isNumeric(d)) {
+        const sg = this.signalOf(dr.from);
+        return dr.min + (dr.max - dr.min) * (dr.source === 'beat' ? sg.beat : sg.level);
+      }
+      return paramAt(d, v, keys, local);
+    };
     for (const d of p.defs) {
       const l = this.loc(p, d.name);
       if (!l) continue;
-      const dr = drive?.[d.name];
-      const sg = dr ? this.signalOf(dr.from) : this.sig;
-      const x = pts?.[d.name] ?? (dr && isNumeric(d) ? dr.min + (dr.max - dr.min) * (dr.source === 'beat' ? sg.beat : sg.level) : paramAt(d, v, keys, local));
+      const x = pts?.[d.name] ?? valueOf(d);
       if (d.type === 'float') gl.uniform1f(l, Number(x));
       else if (d.type === 'int') gl.uniform1i(l, Math.round(Number(x)));
       else if (d.type === 'bool') gl.uniform1i(l, x ? 1 : 0);
       // point：存的是畫面座標（y 向下），shader 裡是 uv（y 向上）；範圍（@fit）是寬、高，不翻
       else if (d.type === 'point' && d.fit) {
-        const k = fitScale(d, p.defs, v, keys, local);
+        // 倍率參數（例如「大小」）不一定在 shader 裡用到，音訊反應要在這裡套
+        const k = fitScale(d, p.defs, v, keys, local, (s) => Number(valueOf(s)));
         gl.uniform2f(l, (x as number[])[0] * k, (x as number[])[1] * k);
       } else if (d.type === 'point') gl.uniform2f(l, (x as number[])[0], 1 - (x as number[])[1]);
       else if (d.type === 'curve') gl.uniform4f(l, ...(x as [number, number, number, number]));

@@ -2,8 +2,21 @@ import { create } from 'zustand';
 import { afterRelease, pointerHeld } from './pointerHold';
 import { parseKey, useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
 
+/** 輸出尺寸也算專案內容：改比例可以復原 */
+type Format = { w: number; h: number };
+
 /** 復原 / 重做：自動記錄時間軸變更；拖曳中的變更等放開才算一步，其他連續操作（400ms 內）合併成一步 */
-interface Doc { clips: Clip[]; effects: FxItem[]; audios: AudioClip[]; media: Media[]; tracks: Tracks }
+/** aux：專案以外、也要一起復原的狀態（例如自動剪輯面板的設定），見 trackHistory */
+interface Doc { clips: Clip[]; effects: FxItem[]; audios: AudioClip[]; media: Media[]; tracks: Tracks; format: Format; aux: Record<string, Record<string, unknown>> }
+type Proj = Omit<Doc, 'aux'>;
+
+/** pick 回傳要記錄的欄位（每個欄位用參照比較），put 還原 */
+interface Side { key: string; pick: () => Record<string, unknown>; put: (v: Record<string, unknown>) => void }
+const sides: Side[] = [];
+const auxNow = (key?: string, val?: Record<string, unknown>): Doc['aux'] => Object.fromEntries(sides.map((x) => [x.key, x.key === key ? val! : x.pick()]));
+const shallowSame = (a: Record<string, unknown> | undefined, b: Record<string, unknown> | undefined) =>
+  a === b || (!!a && !!b && Object.keys(a).length === Object.keys(b).length && Object.keys(a).every((k) => a[k] === b[k]));
+const sameAux = (a: Doc['aux'], b: Doc['aux']) => sides.every((x) => shallowSame(a[x.key], b[x.key]));
 
 const past: Doc[] = [];
 let future: Doc[] = [];
@@ -37,7 +50,7 @@ export function stepsFrom(saved: number[]): number {
 }
 const sync = () => useHistory.setState({ canUndo: !transaction && (past.length > 0 || !!burstStart), canRedo: !transaction && future.length > 0 });
 
-const docOf = (s: Doc): Doc => ({ clips: s.clips, effects: s.effects, audios: s.audios, media: s.media, tracks: s.tracks });
+const docOf = (s: Proj, aux: Doc['aux'] = auxNow()): Doc => ({ clips: s.clips, effects: s.effects, audios: s.audios, media: s.media, tracks: s.tracks, format: s.format, aux });
 
 function flush() {
   clearTimeout(timer);
@@ -51,9 +64,14 @@ function flush() {
 
 useStore.subscribe((s, prev) => {
   if (applying) return;
-  if (s.clips === prev.clips && s.effects === prev.effects && s.audios === prev.audios && s.media === prev.media && s.tracks === prev.tracks) return;
+  if (sameProj(s, prev)) return;
+  changed(docOf(prev));
+});
+
+/** 有變更：記下這一串變更開始前的狀態，等停下來 / 放開再結算成一步 */
+function changed(before: Doc) {
   if (transaction) return;
-  if (!burstStart) burstStart = docOf(prev);
+  if (!burstStart) burstStart = before;
   future = [];
   clearTimeout(timer);
   const settle = () => {
@@ -64,7 +82,18 @@ useStore.subscribe((s, prev) => {
   if (pointerHeld()) afterRelease(settle);
   else timer = window.setTimeout(settle, 400);
   sync();
-});
+}
+
+/** 讓另一個 store 的部分狀態也能復原（跟時間軸變更排在同一條復原紀錄裡） */
+export function trackHistory<T>(key: string, store: { getState(): T; subscribe(fn: (s: T, prev: T) => void): () => void }, pick: (s: T) => Record<string, unknown>, put: (v: Record<string, unknown>) => void) {
+  sides.push({ key, pick: () => pick(store.getState()), put });
+  store.subscribe((s, prev) => {
+    if (applying) return;
+    const a = pick(prev);
+    if (shallowSame(a, pick(s))) return;
+    changed(docOf(useStore.getState(), auxNow(key, a)));
+  });
+}
 
 /** 存檔前先把還在合併中的一步結算掉（不然存檔記下的步數會少一步） */
 export function settleHistory() {
@@ -90,25 +119,34 @@ function apply(d: Doc) {
   });
   const at = s.activeTrack;
   const activeTrack = at && at.idx < d.tracks[at.kind].length ? at : null;
-  useStore.setState({ ...d, selection: exists ? sel : null, selected: selected.length === s.selected.length ? s.selected : selected, activeTrack });
+  const { aux, ...proj } = d;
+  useStore.setState({ ...proj, selection: exists ? sel : null, selected: selected.length === s.selected.length ? s.selected : selected, activeTrack });
+  for (const x of sides) if (aux[x.key] && !shallowSame(aux[x.key], x.pick())) x.put(aux[x.key]);
   applying = false;
 }
 
 /** Keep live drag previews out of history until the user chooses a drop action. */
+let depth = 0;
 export function beginHistoryTransaction() {
+  // 巢狀：只有最外層記錄開始狀態、結算
+  if (depth++ > 0) return;
   flush();
   transaction = docOf(useStore.getState());
   sync();
 }
 
 export function endHistoryTransaction(commit: boolean) {
+  if (depth > 1) {
+    depth--;
+    return;
+  }
+  depth = 0;
   const before = transaction;
   if (!before) return;
   transaction = null;
   if (!commit) apply(before);
   else {
-    const now = useStore.getState();
-    if (before.clips !== now.clips || before.effects !== now.effects || before.audios !== now.audios || before.media !== now.media || before.tracks !== now.tracks) {
+    if (!sameDoc(before, docOf(useStore.getState()))) {
       past.push(before);
       if (past.length > LIMIT) past.shift();
       future = [];
@@ -121,14 +159,18 @@ export function endHistoryTransaction(commit: boolean) {
 /** 目前的專案狀態（例如打開編輯視窗時記下來，取消時還原） */
 export type HistoryDoc = Doc;
 export const snapshotDoc = (): Doc => docOf(useStore.getState());
-/** 跟記下來的狀態比，專案有沒有變更 */
-export const docChanged = (d: Doc) => !sameDoc(docOf(useStore.getState()), d);
-const sameDoc = (a: Doc, b: Doc) => a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.media === b.media && a.tracks === b.tracks;
+/** 跟記下來的狀態比，專案有沒有變更（只看專案；面板設定之類的不算） */
+export const docChanged = (d: Doc) => !sameProj(docOf(useStore.getState()), d);
+function sameProj(a: Proj, b: Proj) {
+  return a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.media === b.media && a.tracks === b.tracks && a.format === b.format;
+}
+const sameDoc = (a: Doc, b: Doc) => sameProj(a, b) && sameAux(a.aux, b.aux);
 
-/** 還原成某個狀態；還原本身算一步，可以再 Ctrl+Z 拿回來。回傳有沒有變更 */
-export function restoreDoc(d: Doc): boolean {
+/** 還原成某個狀態的專案內容（面板設定之類的保持現在的樣子）；還原本身算一步，可以再 Ctrl+Z 拿回來。回傳有沒有變更 */
+export function restoreDoc(saved: Doc): boolean {
   flush();
   const now = docOf(useStore.getState());
+  const d = { ...saved, aux: now.aux };
   if (sameDoc(now, d)) return false;
   past.push(now);
   if (past.length > LIMIT) past.shift();

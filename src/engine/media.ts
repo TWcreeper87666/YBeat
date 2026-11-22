@@ -75,7 +75,15 @@ export async function importFile(file: Blob, name: string): Promise<Media | null
 export async function addMediaBlob(blob: Blob, name: string) {
   const m = await importFile(blob, name);
   if (!m) return null;
-  await saveMediaBlob(m.id, blob);
+  // 存不進去（例如空間不足）就不加進專案，免得重開後變成遺失素材
+  try {
+    await saveMediaBlob(m.id, blob);
+  } catch (e) {
+    console.warn($t('素材存檔失敗'), name, e);
+    URL.revokeObjectURL(m.url);
+    toast($t('素材存檔失敗：{0}', name), 'error');
+    return null;
+  }
   useStore.getState().addMedia(m);
   return m;
 }

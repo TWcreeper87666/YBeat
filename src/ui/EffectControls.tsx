@@ -17,7 +17,7 @@ import { fps, rulerLabel, rulerSteps, snapFrame, tc } from '../engine/rulerTicks
 import { openMenu, useKeySel, useLayout, useTrimView, type KeyRef, type MenuItem } from './uiStore';
 import { beatHits, HIT_MIN, normalizeHits, overwriteHits, type BeatEvery, type FxTiming, type Hit } from '../engine/trigger';
 import { beatSnapPoints } from './beatGrid';
-import { ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Timer } from 'lucide-react';
+import { AudioLines, ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Timer } from 'lucide-react';
 
 /** 屬性名稱被截斷時，滑鼠移上去立刻浮出完整名稱（屬性面板很窄時用） */
 function installLabelTip() {
@@ -58,6 +58,8 @@ export interface Channel {
   menu?: MenuItem[];
   /** 名稱後面的小圖示（例如跟隨目標） */
   icon?: React.ReactNode;
+  /** 音訊反應：啟用時在參數下方顯示設定列 */
+  drive?: { on: boolean; toggle: () => void; rows: { label: string; node: React.ReactNode }[] };
 }
 
 /** 等比例連動時，partner 的新值：大小跟著比例變、保留原本的正負號 */
@@ -789,6 +791,7 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
       { label: $t('全選關鍵影格'), action: ch.keys.length ? () => selectKeys(host.owner, currentKeys(host.owner, ch.id).map((k) => ({ ch: ch.id, id: k.id }))) : undefined },
       { label: $t('複製關鍵影格'), action: ch.keys.length ? () => copyChannelKeys(host.owner, ch.id) : undefined },
       { label: $t('貼上到播放頭'), action: keyClipboard.length && keyClipboard.every((k) => k.ch === keyClipboard[0].ch) ? () => pasteChannelKeys(host, ch.id) : undefined },
+      ...(ch.drive ? [{ separator: true } as MenuItem, { label: ch.drive.on ? $t('關閉音訊反應') : $t('音訊反應'), action: ch.drive.toggle }] : []),
       ...(ch.menu?.length ? [{ separator: true } as MenuItem, ...ch.menu] : []),
     ]);
   };
@@ -992,7 +995,7 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
                   const isOpen = open[rowKey];
                   return (
                     <React.Fragment key={ch.id}>
-                      <div className={`ec-row ${animated ? 'anim' : ''}`}>
+                      <div className={`ec-row ${animated ? 'anim' : ''} ${ch.drive?.on ? 'driven' : ''}`}>
                         <div className="ec-left ec-ch">
                           <span className="twirl small" onClick={() => setOpen({ ...open, [rowKey]: !isOpen })} title={$t('展開曲線')}>
                             {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
@@ -1000,6 +1003,7 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
                           <button className={`ec-watch ${animated ? 'on' : ''}`} title={animated ? $t('關閉動畫（移除所有關鍵影格）') : $t('開啟動畫（在播放頭加關鍵影格）')} onClick={() => toggleAnim(ch)}>
                             <Timer size={13} />
                           </button>
+                          {ch.drive && <button className={`ec-watch ${ch.drive.on ? 'on' : ''}`} title={$t('音訊反應')} onClick={ch.drive.toggle}><AudioLines size={13} /></button>}
                           <span className="ec-label" title={ch.label} onContextMenu={(e) => channelMenu(e, ch)}>{ch.label}{ch.icon}</span>
                           <DragNumber variant="text" value={ch.value} step={ch.step} min={ch.min} max={ch.max} suffix={ch.suffix} display={ch.display} def={ch.def} menu={ch.menu} onChange={(v) => setValue(ch, v)} />
                           <span className="ec-nav">
@@ -1040,6 +1044,12 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
                           ))}
                         </div>
                       </div>
+                      {ch.drive?.on && ch.drive.rows.map((r, i) => (
+                        <div key={`${i}:${r.label}`} className="ec-row sub">
+                          <div className="ec-left ec-plain"><span className="ec-label" title={r.label}>{r.label}</span><div className="ec-node">{r.node}</div></div>
+                          <div className="ec-right ec-dim" onPointerDown={startMarquee} onContextMenu={(e) => laneMenu(e)} />
+                        </div>
+                      ))}
                       {isOpen && <GraphRow host={host} ch={ch} lc={lc} view={view} selId={primary?.ch === ch.id ? primary.id : undefined} />}
                     </React.Fragment>
                   );

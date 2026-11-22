@@ -5,7 +5,13 @@ import type { TrackKind } from '../store';
 export type Row = { kind: TrackKind; idx: number };
 export const rowKey = (r: Row) => `${r.kind}:${r.idx}`;
 
-export const useTrackSel = create<{ keys: string[]; anchor: string | null }>(() => ({ keys: [], anchor: null }));
+export const parseRowKey = (k: string): Row => {
+  const [kind, idx] = k.split(':');
+  return { kind: kind as TrackKind, idx: Number(idx) };
+};
+
+/** focus：最後點的是軌道標籤（Delete 刪軌道）；點其他地方就變回 false */
+export const useTrackSel = create<{ keys: string[]; anchor: string | null; focus: boolean }>(() => ({ keys: [], anchor: null, focus: false }));
 
 /** 點軌道標籤：一般點 = 只選這條；Ctrl = 加選 / 取消；Shift = 從上次點的軌道選到這條（畫面順序） */
 export function clickTrack(rows: Row[], r: Row, mode: 'single' | 'toggle' | 'range') {
