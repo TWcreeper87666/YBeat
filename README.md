@@ -51,6 +51,19 @@ npm run build    # tsc --noEmit + vite build
 ### 素材庫（特效 / 轉場 / 變速）
 分類、★ 我的最愛、自訂模組；單擊試看（顯示在 Source 分頁）、拖曳套用、右鍵更多套用方式與「編輯程式碼 / 複製為新模組」。
 
+### AI 功能（都在瀏覽器裡跑）
+- **AI 去背**：U²-Netp 逐格算遮罩，結果快取在 IndexedDB。
+- **追蹤**（片段屬性 → 追蹤）：
+  - 臉部：YuNet 偵測最大的那張臉；側臉、低頭、背對鏡頭偵測不到的地方改用 VitTrack 追著頭接起來。
+  - 自訂：在預覽上框任何東西（車、球、遊戲角色…），VitTrack 一格一格往前後追；飄掉時在別的時間點再框一次（多錨點）。
+  - 縮放、旋轉這類有中心的特效 / 轉場會自動跟著目標（`@follow`）；馬賽克、跟隨放大的範圍跟著目標大小（`@fit`）。
+- **AI 助手**（Gemini，自己的 API 金鑰，只存在這個瀏覽器、直接從瀏覽器呼叫）：回答使用問題、寫 / 改特效模組（本機編譯，失敗自動修正）、
+  操作專案（加特效、換轉場、打關鍵影格、設追蹤、校對 / 翻譯字幕…，先列出修改，按「套用」才執行、一步復原）、可以附加預覽畫面給它看。
+
+### 專案檔
+- 專案自動存在瀏覽器（IndexedDB）。
+- 「匯出專案包」= `.ybeat`：專案 + 用到的素材原始檔打包成一個檔案（`src/engine/ybeatPack.ts`），可以搬到別台電腦「匯入專案包」。
+
 ## 快捷鍵（完整列表在 說明 → 快捷鍵一覽 / F1）
 
 | 快捷鍵 | 功能 |
@@ -78,8 +91,14 @@ npm run build    # tsc --noEmit + vite build
 ### 參數註解（三種模組通用）
 ```
 // @param 名稱: 型別 = 預設值 (最小..最大) "顯示名稱"
-// 型別：float | int | bool | color
+// 型別：float | int | bool | color | point（畫面座標 x,y）| curve（cubic-bezier，用 curve(名稱, x) 取值）
 // @duration 0.4      ← 特效拖進時間軸時的預設長度
+
+// 附加標記（寫在 @param 那一行最後）：
+//   @follow             point：片段有追蹤時預設跟著目標
+//   @fit(點, 倍率參數)   point 當寬、高：點跟著目標時 = 目標大小 × 倍率
+//   @box(點)            float：在預覽上以那個點為中心畫出縮放後的畫面框
+//   @none(值)           curve：「無」選項的固定值
 ```
 
 ### 特效（GLSL）
@@ -133,6 +152,14 @@ function remap(t, p, info) { return t * p.speed; }  // 回傳素材時間（秒�
 | `src/ui/EditorWindow.tsx` | 編輯視窗（針對單一片段 / 特效的置中對話框，Enter / 屬性標題按鈕 / 右鍵開啟）：把 inspector 與 preview 的 host 搬進來、Dock 顯示佔位；開著時 `loop` = 項目範圍（關閉還原），播放列用 `useEditorScope` 只顯示項目；自動排版看輸出比例：橫式 → 預覽上 / 屬性下（屬性左欄固定 420px，關鍵影格時間軸變寬），直式 → 屬性左 / 預覽右；預覽的滾輪是檢視縮放（`usePreviewView`，改 canvas 顯示大小，不是縮放物件），拖空白 / 中鍵平移；`editorLayout` / `editorSplit` 記在 useLayout |
 | `src/ui/Preview.tsx` / `MaskEditor.tsx` | 預覽、變換框、遮罩編輯框 |
 | `src/ui/Dock.tsx` / `dockTree.ts` | 可拖曳停駐的版面（有測試） |
+| `src/engine/matte.ts`、`matteWorker.ts` | AI 去背（U²-Netp，Web Worker + onnxruntime-web） |
+| `src/engine/face.ts`、`faceTrack.ts`、`faceWorker.ts` | 臉部偵測（YuNet）、挑臉 / 平滑 / 內插、追丟的空洞用 VitTrack 補 |
+| `src/engine/boxTrack.ts`、`vitTrack.ts`、`trackWorker.ts` | 自訂目標追蹤（VitTrack）、錨點、結果快取 |
+| `src/engine/follow.ts` | 片段追蹤的目標（`Clip.subject`）、point 參數跟隨、素材 ↔ 畫面座標換算 |
+| `src/engine/jobNeed.ts` | 背景運算（去背 / 偵測 / 追蹤）沒有片段需要了就停下 |
+| `src/engine/ybeatPack.ts` | `.ybeat` 專案包容器 |
+| `src/ai/` | AI 助手：`gemini.ts`（API）、`assistant.ts`（流程）、`prompt.ts`、`projectTools.ts`（操作專案）、`frames.ts`（畫面截圖） |
+| `src/ui/helpText.ts` | 說明 → 使用教學（`TUTORIAL`） |
 | `src/ui/uiStore.ts` | UI 狀態（版面設定、選單、確認 / 輸入對話框、拖曳、吸附線、reveal…） |
 | `src/modules/builtin.ts`、`extra.ts`、`categories.ts` | 內建模組原始碼與分類 |
 | `src/i18n.ts`、`i18n.en.ts`、`i18n.ja.ts` | 多語系 |
@@ -148,41 +175,21 @@ function remap(t, p, info) { return t * p.speed; }  // 回傳素材時間（秒�
 
 ### 開發慣例
 - 程式碼註解用中文。UI 不用 emoji，圖示一律用 `lucide-react`。
-- **教學文字不放在介面上**（例如「也可以拖到…」「右鍵有更多…」這種說明）：統一寫進「說明 → 使用教學」（`App.tsx` 的 `TUTORIAL`）。介面上只留空狀態與狀態訊息。
+- **教學文字不放在介面上**（例如「也可以拖到…」「右鍵有更多…」這種說明）：統一寫進「說明 → 使用教學」（`src/ui/helpText.ts` 的 `TUTORIAL`）。介面上只留空狀態與狀態訊息。
 - **多語系**：介面字串寫中文並包 `$t('中文', ...args)`（`{0}` `{1}` 佔位），新增字串時要同步加到 `i18n.en.ts` 與 `i18n.ja.ts`
   （日文缺字會退回英文、再退回中文）。模組名稱用 `displayName()`，`// @param` 的顯示名稱用 `$t(d.label)`。
   語言在載入時決定，模組層級的常數也可以用 `$t`。
 - 新的 store 動作要考慮：同軌不重疊（`fitStart` / `resolveShift`）、連結 / 群組（`expand` 選取擴展、`freshIds`）、分割 / 合併 / 變速時關鍵影格與片段特效要一起處理。
 - 每次改完：`npx tsc --noEmit && npm test && npx vite build`。
 
-### 尚未在瀏覽器驗證的最後一批修改
-（型別、測試、build 都通過，但開發 server 因記憶體不足被停掉，還沒實際操作確認）
-1. 軌道按鈕間距恢復成最小尺寸時的樣子。
-2. 新增軌道一律放在所有軌道最下方（音訊軌 `row` 機制）。
-3. 取消影音連結：影片軌下一條是音訊軌且有空位就放進去，否則在正下方新增音訊軌。
-4. Source 分頁拖曳進度條時：合併 seek（上一個完成才跳下一個）＋ 用快取影格即時顯示。
-5. 取消影音連結後影片本身靜音（`clip.audioSplit`），屬性面板不再顯示「聲音」（之前會跟獨立出的音訊重複播放）。
-6. 點擊片段的播放頭規則、Home / End 不捲動時間軸、時間軸互動時讓搜尋欄等輸入框失焦。
-7. 文字分頁可滾動、屬性名稱被截斷時 hover 浮出完整名稱、Ctrl 黃色把手只在滑到片段邊緣時出現。
-8. 沒有選取時按 Delete：移除選中軌道上播放頭所在的空白（`removeGap`）。
-9. Alt+Delete 所有軌道一起波紋刪除；Dock 拖分頁列空白處整組移動（`moveGroup`，有測試）。
-10. 混合模式（`clip.blend`：一般 / 加亮 / 濾色 / 色彩增值 / 相減 / 變亮，用 GL blend func 實作）。
-11. 新模組：去背 Chroma Key、片段遮罩 Clip Mask（`CLIP_MASK_ID`，渲染時遮罩自動反轉）、縮放推入 / 推出、推移、翻轉、倒帶；縮放模糊加中心 X/Y。
-    內建模組改了程式碼要在 `mk(...)` 加 `rev`，舊存檔裡的同 id 程式碼才會被新版取代（shader 已在瀏覽器編譯通過）。
-12. 影片拖進時間軸用完整長度（原本最多 6 秒）；播放時下一段影片提前 0.4 秒靜音開始播放（`PREROLL`），減少接上時的卡頓。
-13. 軌道自由排序（`reorderTracks` / `tracksFromOrder`）：已在瀏覽器用右鍵選單與模擬拖曳驗證過順序正確。
-14. 時間軸長度：預設 60 秒（`MIN_LEN`），專案更長時 = 專案長度 × 1.1；水平捲軸改成自訂的 `.tl-hbar`（不延伸到軌道名稱欄），Shift+滾輪 / 觸控板左右滑自己處理。
-15. 播放頭被鍵盤移出畫面時自動捲到置中；Home / End 一律把播放頭捲進畫面（`timeline-reveal-playhead` 事件）。
-16. 預覽音訊改用 Web Audio 排程（倍速、切開的片段不再卡頓）；已在瀏覽器確認播放時只排程一次、切開的片段首尾精準相接。
-17. 拖曳特效 / 轉場 / 變速到「屬性」面板 = 套用到目前選取的項目；旋轉把手用自訂旋轉游標；捲軸拖曳中不再是紅色。
-18. 切開後首尾相接、內容連續的片段（同素材、同軌、同速、中間沒轉場）共用同一個 `<video>`（`Renderer.updateChains` / `rootOf`），剪接點不用換解碼器；已在瀏覽器確認跨剪接點只有一個影片元素、播放中沒有硬 seek。
-19. 播放時鐘改成「開始播放的時間 + 真實經過時間」（`Preview.tsx`），掉幀時時間軸不會落後影片 / 聲音；`.tl-scroll` 加 `scrollbar-gutter: stable`。
-20. 縮放：先記錨點（滾輪 = 滑鼠位置；滑桿 / = - / 選單 = 播放頭，不在畫面內就用中間），`useLayoutEffect` 在繪製前設好捲動位置；時間軸最小寬度改用像素算。已在瀏覽器確認滑鼠底下的時間點每一幀都不動。
-21. 屬性面板 `.ec` 加 `overflow-x: clip`（播放頭在最右邊不會撐出水平捲軸）。
-22. 變速保持音調：音訊片段 / 影片原音的 `keepPitch`（沒設定 = 保持），屬性面板「保持音調」開關；預覽與匯出一致。已在瀏覽器確認 2× 片段改播處理過的音訊。
-23. 編輯視窗：屬性 + 預覽的置中對話框（不能移動），Enter、屬性標題旁的按鈕、右鍵選單、遮罩「在預覽中編輯」、新增片段遮罩都會打開；Esc / 完成關閉。已在瀏覽器實際開關、拖遮罩、復原確認。
-24. 編輯視窗改版：預覽只播該片段並循環、播放列以片段為範圍；依視窗比例自動上下 / 左右排，可固定、可拖分隔線。已在瀏覽器確認兩種排版、片段範圍的時間顯示、播到結尾回到開頭、關閉後恢復整個專案。
-25. 編輯視窗：自動排版改看輸出尺寸；預覽滾輪縮放整個輸出畫面（25%~800%，以滑鼠為中心）、拖空白處 / 中鍵平移、右下角百分比點一下回到符合視窗；視窗裡點畫面空白不會取消選取（以免視窗被關掉）。已在瀏覽器確認放大 / 縮小 / 平移時變換框對齊、物件的縮放與位置沒有被改到。
-26. 縮放拆成 `scaleX` / `scaleY`（舊專案的 `scale` 與「水平翻轉」載入時轉換；負數 = 翻轉），屬性「運動」的鎖鏈 = 等比例（`clip.scaleUnlinked`，改一個另一個依比例跟著變、保留各自正負號）；預覽變換框：角 = 等比、邊 = 單軸（拉過中心翻轉），Shift 吸附到線。
-27. 編輯視窗：框與畫面同一幀更新（`flushSync` + `useLayoutEffect`）；上下排時屬性左欄有自己的比例 `ecSplitWide`（可拖）；上下 / 左右分隔線改成精確比例計算，拖曳不會跳。以上都已在瀏覽器量測確認（每一幀位置差 0、分隔線按下位移 0、拖 50px 移動 50px）。
-28. 雙擊片段 / 特效開編輯視窗（屬性標題旁的按鈕拿掉）；點片段不再移動播放頭。屬性表格左欄改成固定像素寬度 `ecLeftPx`（預設 300、最小 240，屬性分頁與編輯視窗共用；面板變窄只縮右邊的關鍵影格時間軸）；編輯視窗兩區塊有最小尺寸（左右排：屬性 = 左欄 + 120px、預覽 200px），外觀與分隔線（4px、平常透明）跟停駐區一致。
+---
+
+## 第三方模型
+
+`public/models/` 裡的模型都在瀏覽器用 [onnxruntime-web](https://github.com/microsoft/onnxruntime) 執行，各自依原本的授權散布：
+
+| 檔案 | 用途 | 來源 | 授權 |
+|---|---|---|---|
+| `u2netp.onnx` | AI 去背 | [U-2-Net](https://github.com/xuebinqin/U-2-Net)（U²-Netp） | Apache 2.0 |
+| `face_detection_yunet_2023mar.onnx` | 臉部偵測 | [OpenCV Zoo – YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) | MIT |
+| `object_tracking_vittrack_2023sep.onnx` | 目標追蹤 | [OpenCV Zoo – VitTrack](https://github.com/opencv/opencv_zoo/tree/main/models/object_tracking_vittrack) | Apache 2.0 |
