@@ -57,5 +57,6 @@
 - [x] icon
 - [ ] .ybeat optimize
 - [x] more effect/transition
-- [ ] clip-fx-timing-plan.md
+- [x] clip-fx-timing-plan.md
 - [ ] ai-roadmap.md
+- [ ] timeline scale should be memorize when f5

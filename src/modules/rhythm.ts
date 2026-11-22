@@ -10,7 +10,7 @@ const shockwave = `// 衝擊波：從中心擴散的一圈折射波紋（drop / 
 // @param width: float = 0.12 (0.02..0.5) "波寬"
 // @param radius: float = 1.2 (0.2..2) "擴散距離"
 // @param rgb: float = 0.4 (0..1) "色差"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 // @param ease: curve = expoOut "曲線"
 vec4 effect(vec2 uv) {
   float r0 = curve(ease, u_progress) * radius;
@@ -33,7 +33,7 @@ const chromaZoom = `// RGB 變焦：放大一下，紅藍通道往外散開再�
 // @hit
 // @param amount: float = 0.08 (0..0.3) "分離量"
 // @param zoom: float = 0.1 (0..0.5) "放大量"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 // @param ease: curve = expoOut "回落曲線"
 vec4 effect(vec2 uv) {
   float k = 1.0 - curve(ease, u_progress);
@@ -52,7 +52,7 @@ const spinKick = `// 旋轉衝擊：打拍時轉一下再回正，帶旋轉模�
 // @param angle: float = 20 (-180..180) "旋轉角度（度）"
 // @param blur: float = 1 (0..2) "旋轉模糊"
 // @param zoom: float = 0.2 (0..1) "放大補邊"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 // @param ease: curve = expoOut "回落曲線"
 vec4 effect(vec2 uv) {
   float k = 1.0 - curve(ease, u_progress);
@@ -75,7 +75,7 @@ const squash = `// 彈跳擠壓：畫面像果凍一樣壓扁再彈回
 // @param bounces: float = 2 (0.5..6) "彈跳次數"
 // @param damping: float = 5 (0..12) "阻尼"
 // @param vertical: bool = false "垂直"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 vec4 effect(vec2 uv) {
   float t = u_progress;
   float s = amount * exp(-damping * t) * cos(t * bounces * 2.0 * PI) * (1.0 - t);
@@ -118,7 +118,7 @@ const tileZoom = `// 鏡像拼貼：拉遠露出鏡像拼貼的畫面再推回�
 // @param amount: float = 1 (0..4) "拉遠量"
 // @param rotation: float = 0 (-180..180) "旋轉（度）"
 // @param blur: float = 0.4 (0..1) "模糊"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 // @param ease: curve = inOut3 "曲線"
 vec4 effect(vec2 uv) {
   float k = sin(curve(ease, u_progress) * PI);
@@ -226,7 +226,7 @@ const zoomEcho = `// 縮放殘影：往外擴散的一層層殘影
 // @param copies: float = 5 (1..10) "殘影數"
 // @param spread: float = 0.15 (0..0.6) "擴散"
 // @param opacity: float = 0.5 (0..1) "殘影強度"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 // @param ease: curve = expoOut "回落曲線"
 vec4 effect(vec2 uv) {
   float k = 1.0 - curve(ease, u_progress);
@@ -357,7 +357,7 @@ const shockwaveTr = `// 衝擊波轉場：一圈折射波紋擴散，波內是�
 // @param width: float = 0.1 (0.02..0.4) "波寬"
 // @param rgb: float = 0.5 (0..1) "色差"
 // @param glow: float = 0.3 (0..1) "光環"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 // @param ease: curve = inOut3 "曲線"
 float m;
 vec4 pick(vec2 q) { return mix(getTo(mirrorUV(q)), getFrom(mirrorUV(q)), m); }
@@ -384,7 +384,7 @@ vec4 transition(vec2 uv) {
 const lensTr = `// 鏡頭扭曲轉場：魚眼鼓起再切到下一段
 // @param amount: float = 1.2 (0..3) "扭曲量"
 // @param zoom: float = 0.3 (0..1) "放大量"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 vec4 transition(vec2 uv) {
   float k = sin(progress * PI);
   vec2 p = uv - center;
@@ -414,7 +414,7 @@ vec4 transition(vec2 uv) {
 const twirlTr = `// 漩渦轉場：捲進漩渦再轉出下一段
 // @param angle: float = 4 (-12..12) "旋轉量"
 // @param radius: float = 0.8 (0.1..2) "範圍"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 vec4 transition(vec2 uv) {
   float k = sin(progress * PI);
   vec2 p = uv - center;
@@ -445,15 +445,15 @@ vec4 transition(vec2 uv) {
 const mk = (id: string, kind: ModuleKind, name: string, code: string, rev?: number): Module => ({ id, kind, name, code, builtin: true, ...(rev ? { rev } : {}) });
 
 export const RHYTHM_MODULES: Module[] = [
-  mk('fx-shockwave', 'effect', '衝擊波 Shockwave', shockwave, 2),
-  mk('fx-chromazoom', 'effect', 'RGB 變焦 Chromatic Zoom', chromaZoom, 2),
-  mk('fx-spinkick', 'effect', '旋轉衝擊 Spin Kick', spinKick, 2),
-  mk('fx-squash', 'effect', '彈跳擠壓 Squash', squash, 2),
+  mk('fx-shockwave', 'effect', '衝擊波 Shockwave', shockwave, 3),
+  mk('fx-chromazoom', 'effect', 'RGB 變焦 Chromatic Zoom', chromaZoom, 3),
+  mk('fx-spinkick', 'effect', '旋轉衝擊 Spin Kick', spinKick, 3),
+  mk('fx-squash', 'effect', '彈跳擠壓 Squash', squash, 3),
   mk('fx-tilt3d', 'effect', '3D 擺動 3D Swing', tilt3d, 2),
-  mk('fx-tilezoom', 'effect', '鏡像拼貼 Tile Zoom', tileZoom, 2),
+  mk('fx-tilezoom', 'effect', '鏡像拼貼 Tile Zoom', tileZoom, 3),
   mk('fx-twitch', 'effect', '抽動 Twitch', twitch, 2),
   mk('fx-blurpulse', 'effect', '模糊脈衝 Blur Pulse', blurPulse, 2),
-  mk('fx-zoomecho', 'effect', '縮放殘影 Zoom Echo', zoomEcho, 2),
+  mk('fx-zoomecho', 'effect', '縮放殘影 Zoom Echo', zoomEcho, 3),
   mk('fx-slice', 'effect', '切片位移 Slice', sliceFx, 2),
   mk('fx-duotone', 'effect', '雙色調 Duotone', duotone),
   mk('tr-luma', 'transition', '亮度溶解 Luma Fade', lumaTr),
@@ -462,9 +462,9 @@ export const RHYTHM_MODULES: Module[] = [
   mk('tr-shake', 'transition', '晃動切換 Shake', shakeTr),
   mk('tr-slice', 'transition', '切片推移 Slice', sliceTr),
   mk('tr-split', 'transition', '中線分開 Split', splitTr),
-  mk('tr-shockwave', 'transition', '衝擊波 Shockwave', shockwaveTr),
-  mk('tr-lens', 'transition', '鏡頭扭曲 Lens Warp', lensTr),
+  mk('tr-shockwave', 'transition', '衝擊波 Shockwave', shockwaveTr, 2),
+  mk('tr-lens', 'transition', '鏡頭扭曲 Lens Warp', lensTr, 2),
   mk('tr-liquid', 'transition', '液化 Liquid', liquidTr),
-  mk('tr-twirl', 'transition', '漩渦 Twirl', twirlTr),
+  mk('tr-twirl', 'transition', '漩渦 Twirl', twirlTr, 2),
   mk('tr-rgbsplit', 'transition', 'RGB 分離 RGB Split', rgbSplitTr),
 ];

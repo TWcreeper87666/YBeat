@@ -67,3 +67,101 @@ export function triggerMarks(pts: number[], start: number, end: number): number[
   for (let i = lowerBound(pts, start + EPS); i < pts.length && pts[i] < end - EPS; i++) out.push(pts[i]);
   return out;
 }
+
+// ───────────── 片段特效的時間範圍 ─────────────
+
+/** 特效的一次播放（片段內時間，秒） */
+export interface Hit { t: number; d: number }
+
+/** 片段特效什麼時候作用（沒有 = 整段） */
+export type FxTiming =
+  | { kind: 'hits'; hits: Hit[] } // 手動：已排序、不重疊
+  | { kind: 'beat'; every: BeatEvery; d: number }; // 自動：片段範圍內每 N 拍播一次
+
+/** Hit 的最短長度 */
+export const HIT_MIN = 1 / 30;
+
+/**
+ * 這一格特效從哪開始、多長（片段內時間）；null = 不作用（整個特效跳過）。
+ * start = 片段在時間軸上的開頭（beat 要把節拍換成片段內時間）。
+ */
+export function fxWindow(timing: FxTiming | undefined, local: number, len: number, start = 0): { t0: number; d: number } | null {
+  if (!timing) return { t0: 0, d: len };
+  if (timing.kind === 'hits') {
+    const h = timing.hits;
+    // 最後一個 t <= local 的 Hit
+    let lo = 0, hi = h.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (h[mid].t <= local + EPS) lo = mid + 1;
+      else hi = mid;
+    }
+    const x = h[lo - 1];
+    return x && local < x.t + x.d ? { t0: x.t, d: Math.max(1e-3, x.d) } : null;
+  }
+  const pts = triggerBeats(timing.every);
+  const i = lowerBound(pts, start + local + EPS) - 1;
+  if (i < 0 || pts[i] < start - EPS) return null;
+  const t0 = pts[i] - start;
+  return local < t0 + timing.d ? { t0, d: Math.max(1e-3, timing.d) } : null;
+}
+
+/** beat 規則展開成片段內的 Hit（轉成手動、屬性面板畫方塊用）；長度不超過下一拍（片段結尾不截：截了最後一次會播得比較快） */
+export function beatHits(every: BeatEvery, d: number, start: number, len: number): Hit[] {
+  const pts = triggerBeats(every);
+  const out: Hit[] = [];
+  for (let i = lowerBound(pts, start - EPS); i < pts.length && pts[i] < start + len - EPS; i++) {
+    const t = Math.max(0, pts[i] - start);
+    const next = i + 1 < pts.length ? pts[i + 1] - start : Infinity;
+    out.push({ t, d: Math.max(HIT_MIN, Math.min(d, next - t)) });
+  }
+  return out;
+}
+
+/** 依 t 排序、去掉片段外的，重疊的把前一個截短到下一個開頭（拖曳、貼上後整理用） */
+export function normalizeHits(hits: Hit[], len: number): Hit[] {
+  const s = hits.map((h) => ({ t: Math.max(0, h.t), d: Math.max(HIT_MIN, h.d) })).filter((h) => h.t < len - EPS).sort((a, b) => a.t - b.t);
+  const out: Hit[] = [];
+  for (const h of s) {
+    const prev = out[out.length - 1];
+    if (prev && h.t < prev.t + HIT_MIN) continue; // 跟前一個同一個位置：丟掉
+    if (prev && prev.t + prev.d > h.t) prev.d = h.t - prev.t;
+    out.push(h);
+  }
+  return out;
+}
+
+/** 在 local 切開：Hit 分到兩段，後段改成從 0 算；跨切點的那個留在前段（長度不變，畫面跟切開前一樣；後段不重播） */
+export function splitTiming(timing: FxTiming | undefined, local: number): [FxTiming | undefined, FxTiming | undefined] {
+  if (!timing || timing.kind === 'beat') return [timing, timing];
+  const a: Hit[] = [], b: Hit[] = [];
+  for (const h of timing.hits) {
+    if (h.t < local - EPS) a.push(h);
+    else b.push({ t: h.t - local, d: h.d });
+  }
+  return [{ kind: 'hits', hits: a }, { kind: 'hits', hits: b }];
+}
+
+/**
+ * 加入新的 Hit，跟現有的重疊就覆蓋（跟時間軸的覆蓋一樣）：
+ * 被整個蓋住的刪掉、蓋到尾巴的截短、蓋到開頭的從新的結尾開始（結尾不變）、整個包住新的那個拆成前後兩段。
+ */
+export function overwriteHits(base: Hit[], add: Hit[], len: number): Hit[] {
+  let cur = base.map((h) => ({ t: h.t, e: h.t + h.d }));
+  const news = add.map((h) => ({ t: Math.max(0, h.t), e: Math.max(0, h.t) + Math.max(HIT_MIN, h.d) })).filter((h) => h.t < len - EPS);
+  for (const n of news) {
+    const next: { t: number; e: number }[] = [];
+    for (const h of cur) {
+      if (h.e <= n.t + EPS || h.t >= n.e - EPS) next.push(h); // 沒碰到
+      else {
+        if (h.t < n.t - EPS) next.push({ t: h.t, e: n.t }); // 前段留下
+        if (h.e > n.e + EPS) next.push({ t: n.e, e: h.e }); // 後段留下
+      }
+    }
+    cur = [...next, n];
+  }
+  return cur
+    .filter((h) => h.e - h.t >= HIT_MIN - EPS)
+    .sort((a, b) => a.t - b.t)
+    .map((h) => ({ t: h.t, d: h.e - h.t }));
+}

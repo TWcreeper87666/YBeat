@@ -3,7 +3,8 @@
  */
 import { $t } from '../i18n';
 import { attachedAudioIds, keyOf, laneOf, parseKey, spansOf, useStore, type AnyItem, type Clip } from '../store';
-import { beatIndexAtOrAfter, layoutOnBeats, subdivideBeats, timelineBeats, type Beat } from '../engine/beats';
+import { beatIndexAtOrAfter, layoutOnBeats, snapBeats, subdivideBeats, timelineBeats, type Beat } from '../engine/beats';
+import { fps, snapFrame } from '../engine/rulerTicks';
 import { spansOverlap, type Span } from '../engine/overlap';
 import { plainSpeed } from '../engine/remap';
 import { makeCtx } from '../engine/renderer';
@@ -12,15 +13,17 @@ import { setBeatSource, type BeatEvery } from '../engine/trigger';
 
 type S = ReturnType<typeof useStore.getState>;
 
-let memo: { audios: S['audios']; clips: S['clips']; media: S['media']; lead: number; division: number; beats: Beat[] } | null = null;
+let memo: { audios: S['audios']; clips: S['clips']; media: S['media']; lead: number; division: number; fps: number; beats: Beat[] } | null = null;
 /** 節拍提前（秒）：設定裡是 1/60 秒為單位 */
 export const beatLead = () => Math.max(0, useLayout.getState().beatLead ?? 4) / 60;
-/** 目前專案的節拍（時間軸秒數，已經往前移「節拍提前」）；音訊 / 素材沒變就用上次算好的 */
+/** 目前專案的節拍（時間軸秒數，已經往前移「節拍提前」、對齊時間軸格線）；音訊 / 素材沒變就用上次算好的 */
 export function getBeats(s: S = useStore.getState(), division = useLayout.getState().beatDivision): Beat[] {
   const lead = beatLead();
-  if (memo && memo.audios === s.audios && memo.clips === s.clips && memo.media === s.media && memo.lead === lead && memo.division === division) return memo.beats;
-  const beats = subdivideBeats(timelineBeats(s, attachedAudioIds(s), lead), division);
-  memo = { audios: s.audios, clips: s.clips, media: s.media, lead, division, beats };
+  const f = fps();
+  if (memo && memo.audios === s.audios && memo.clips === s.clips && memo.media === s.media && memo.lead === lead && memo.division === division && memo.fps === f) return memo.beats;
+  // 細分完再對齊：細分插的點也要落在格線上
+  const beats = snapBeats(subdivideBeats(timelineBeats(s, attachedAudioIds(s), lead), division), snapFrame);
+  memo = { audios: s.audios, clips: s.clips, media: s.media, lead, division, fps: f, beats };
   return beats;
 }
 
@@ -29,6 +32,7 @@ export function useBeats(): Beat[] {
   const on = useLayout((l) => l.beats);
   useLayout((l) => l.beatLead); // 改了節拍提前要重畫
   useLayout((l) => l.beatDivision);
+  useLayout((l) => l.timeGrid);
   const audios = useStore((s) => s.audios);
   const clips = useStore((s) => s.clips);
   const media = useStore((s) => s.media);

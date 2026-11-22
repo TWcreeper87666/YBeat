@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 (globalThis as { requestAnimationFrame?: (f: () => void) => number }).requestAnimationFrame = () => 0;
-import { triggerMarks, triggerWindow } from '../src/engine/trigger';
-import { useStore, type FxItem } from '../src/store';
+import { beatHits, fxWindow, normalizeHits, overwriteHits, setBeatSource, splitTiming, triggerMarks, triggerWindow, type FxTiming } from '../src/engine/trigger';
+import { defaultTiming, makeClip, useStore, type FxItem } from '../src/store';
 import { usePrefs } from '../src/prefs';
 
 // ── 觸發窗口：方塊 [1, 5)，節拍每 1 秒 ──
@@ -72,3 +72,55 @@ assert.equal(clips2[1].transitionIn, null, 'store 裡的片段不動');
 const only1 = applyTransitionBlocks(clips2.filter((c) => c.track === 0), 0, [blk({ trigger: { kind: 'cut', tracks: [1] } })], tracks2);
 assert.equal(only1.find((c) => c.id === 'b')!.transitionIn, null, '沒選的軌道不套用');
 console.log('PASS 轉場方塊');
+
+// ── 片段特效的作用範圍 ──
+{
+  const hits: FxTiming = { kind: 'hits', hits: [{ t: 0, d: 0.5 }, { t: 2, d: 1 }] };
+  assert.deepEqual(fxWindow(undefined, 1.2, 4), { t0: 0, d: 4 }, '沒有 timing = 整段');
+  assert.deepEqual(fxWindow(hits, 0, 4), { t0: 0, d: 0.5 }, 'Hit 開頭本身算');
+  assert.equal(fxWindow(hits, 0.5, 4), null, 'Hit 結尾不算');
+  assert.equal(fxWindow(hits, 1.5, 4), null, '兩個 Hit 中間 = 跳過');
+  assert.deepEqual(fxWindow(hits, 2.9, 4), { t0: 2, d: 1 });
+  assert.equal(fxWindow(hits, 3.5, 4), null);
+  assert.equal(fxWindow({ kind: 'hits', hits: [] }, 1, 4), null, '沒有 Hit = 完全不作用');
+
+  // 節拍每 1 秒；片段從 1.5 開始、長 3 秒
+  setBeatSource((every) => [0, 1, 2, 3, 4, 5, 6].filter((_, i) => i % every === 0));
+  const beat: FxTiming = { kind: 'beat', every: 1, d: 0.25 };
+  assert.equal(fxWindow(beat, 0.2, 3, 1.5), null, '片段開頭在兩拍中間：還沒到第一拍');
+  assert.deepEqual(fxWindow(beat, 0.6, 3, 1.5), { t0: 0.5, d: 0.25 }, '第一拍（時間軸 2 秒）');
+  assert.equal(fxWindow(beat, 0.8, 3, 1.5), null, '這一拍播完了');
+  assert.deepEqual(fxWindow(beat, 2.5, 3, 1.5), { t0: 2.5, d: 0.25 }, '時間軸 4 秒那拍');
+  assert.deepEqual(fxWindow(beat, 0.1, 3, 1), { t0: 0, d: 0.25 }, '片段開頭剛好在拍上');
+  assert.deepEqual(beatHits(1, 0.25, 1.5, 3), [{ t: 0.5, d: 0.25 }, { t: 1.5, d: 0.25 }, { t: 2.5, d: 0.25 }], '轉成手動');
+  assert.deepEqual(beatHits(1, 5, 1.5, 3).map((h) => h.d), [1, 1, 1], '長度不超過下一拍；片段結尾不截（畫面跟每拍模式一樣）');
+  setBeatSource(() => []);
+  assert.equal(fxWindow(beat, 1, 3, 1.5), null, '沒有節拍 = 不作用');
+
+  assert.deepEqual(normalizeHits([{ t: 2, d: 1 }, { t: 0.5, d: 3 }, { t: 9, d: 1 }], 4), [{ t: 0.5, d: 1.5 }, { t: 2, d: 1 }], '排序、重疊截短、片段外丟掉');
+
+  const ow = (base: [number, number][], add: [number, number][]) => overwriteHits(base.map(([t, d]) => ({ t, d })), add.map(([t, d]) => ({ t, d })), 4).map((h) => [+h.t.toFixed(3), +h.d.toFixed(3)]);
+  assert.deepEqual(ow([[0, 0.5], [0.8, 0.5]], [[0.5, 0.5]]), [[0, 0.5], [0.5, 0.5], [1, 0.3]], 'Ctrl+D：接在後面、蓋到下一個的開頭 → 下一個從新的結尾開始');
+  assert.deepEqual(ow([[0, 0.5], [1, 0.2]], [[0.9, 0.5]]), [[0, 0.5], [0.9, 0.5]], '整個蓋住的刪掉');
+  assert.deepEqual(ow([[0, 2]], [[0.5, 0.5]]), [[0, 0.5], [0.5, 0.5], [1, 1]], '包住新的那個：拆成前後兩段');
+  assert.deepEqual(ow([[0, 1]], [[5, 1]]), [[0, 1]], '片段外的丟掉');
+
+  const [a, b] = splitTiming({ kind: 'hits', hits: [{ t: 0, d: 0.5 }, { t: 1.8, d: 0.5 }, { t: 3, d: 0.5 }] }, 2);
+  assert.deepEqual(a, { kind: 'hits', hits: [{ t: 0, d: 0.5 }, { t: 1.8, d: 0.5 }] }, '跨切點的留在前段、長度不變');
+  assert.deepEqual(b, { kind: 'hits', hits: [{ t: 1, d: 0.5 }] }, '後段從 0 算');
+  assert.deepEqual(splitTiming(beat, 2), [beat, beat], 'beat 兩段都保留規則');
+  assert.deepEqual(splitTiming(undefined, 2), [undefined, undefined]);
+
+  assert.deepEqual(defaultTiming({ kind: 'effect', code: '// @duration 0.3\n// @hit\n' }), { kind: 'hits', hits: [{ t: 0, d: 0.3 }] }, '衝擊特效 = 開頭打一下');
+  assert.equal(defaultTiming({ kind: 'effect', code: '// @duration 0.5\n' }), undefined, '持續特效 = 整段');
+
+  // 切割片段：片段特效的 timing 分到兩段
+  const clip = makeClip({ id: 'c', mediaId: 'm', start: 0, duration: 4, effects: [{ id: 'e', moduleId: 'blur', params: {}, timing: { kind: 'hits', hits: [{ t: 0.5, d: 0.5 }, { t: 3, d: 0.5 }] } }] });
+  useStore.setState({ clips: [clip], effects: [], media: [], selected: ['clip:c'], selection: { type: 'clip', id: 'c' }, time: 2 });
+  useStore.getState().split();
+  const cs = useStore.getState().clips.sort((x, y) => x.start - y.start);
+  assert.equal(cs.length, 2);
+  assert.deepEqual(cs[0].effects![0].timing, { kind: 'hits', hits: [{ t: 0.5, d: 0.5 }] });
+  assert.deepEqual(cs[1].effects![0].timing, { kind: 'hits', hits: [{ t: 1, d: 0.5 }] });
+  console.log('PASS 片段特效作用範圍');
+}

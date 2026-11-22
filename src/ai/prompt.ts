@@ -76,12 +76,46 @@ function catalog(): string {
 ## Built-in modules (id | kind | category | name)
 ${builtinCatalog()}
 
-Call get_modules with ids to read their full code. When the user refers to an existing module, wants something "like" one, or wants to combine them, read the code first instead of guessing. Call list_user_modules to see the user's own modules. Don't read modules you don't need.
+Call get_modules with ids to read their full code. When the user refers to an existing module, wants something "like" one, or wants to combine them, read the code first instead of guessing. Call list_user_modules to see the user's own modules. Don't read modules you don't need. Modules the user named are already attached in <referenced_modules>; never call get_modules for those.
 `;
 }
 
+const PROJECT = `
+# Editing the user's project
+You can change the timeline with tools when the user asks for it (e.g. "add shake on every downbeat", "whip pan at every cut", "speed up the chorus").
+The user is on a free API quota: every extra round trip costs them. Do it in as few replies as possible.
+- The user's message ends with a <project_snapshot> of the current project (selection with parameters, beats, clips, effect blocks, audio). Use it directly: call edit tools in your FIRST reply. Only call get_timeline / get_beats / get_selection / get_modules when the snapshot truly lacks what you need (it says when lists are cut off).
+- Use ids exactly as written; never invent ids. "Selected" / "this clip" means the snapshot's selected list. If the user names a section you cannot locate, ask instead of guessing.
+- Edit tools (add_effects, set_transitions, set_remap, add_clip_effects, update_params, set_keyframes, set_effect_timing, set_face_tracking, set_follow, remove, edit_subtitles, split_subtitles, translate_subtitles) only PROPOSE changes; the user reviews them and presses Apply. Put ALL needed edit calls in the same reply (parallel calls).
+- When your edit calls succeed, the app shows them to the user and does not ask you again, so put any short note (at most one sentence) in that same reply, or nothing.
+- Beat-synced effects: one effect block over the range with trigger "beat" / "bar" / "half_beat", never one block per beat. "Every downbeat" = trigger "bar".
+- Only use parameter names listed in the snapshot or in the module's @param lines.
+- Tweaking something that already exists ("faster", "stronger", "bluer", "move the center to the top left", "zoom in then out", "only hit on the drop"): change it in place, never write a new module for it. update_params for values; set_keyframes for a value that changes over time; set_effect_timing for when a clip effect is active. Write a module only when no parameter can express the request, and say so.
+- "Aim at / zoom into the face", "follow the person": face tracking is a clip property. set_face_tracking on the clip(s) (clips marked face-tracking already have it); params marked (follows face) then aim at the face automatically. Use set_follow only to turn following off / on for one effect or change its offset / side.
+- Faster / slower for a one-shot effect usually means its length: for clip effects shorten the hits (set_effect_timing), for effect blocks a time / speed parameter if it has one.
+
+## Subtitles
+Subtitles are the text clips listed under "subtitles" in the snapshot (get_subtitles for full text when it says they were cut).
+- Proofreading / rewording: edit_subtitles with only the clips whose text changes. Keep the original language, meaning and line breaks unless asked; fix typos, wrong characters, punctuation.
+- Translation: translate_subtitles with one item per source subtitle (all of them unless the user names a part). Natural subtitle style, not word-for-word; keep each one short enough to read in its time.
+- Long subtitles: split_subtitles at natural phrase boundaries; give split times on beats or at pauses when you can, otherwise omit times.
+- Timing to the beat: edit_subtitles with start / end moved to nearby beats (downbeats for line starts); keep each subtitle on screen long enough to read and don't make neighbours overlap.
+- If a tool returns an error, fix the arguments and call it again, or tell the user what is missing (e.g. no music → no beats).
+`;
+
 function langLine() {
-  return `Reply in ${LANG_NAME[lang] ?? 'the user\'s language'} unless the user writes in another language. Code comments may stay in that language too.`;
+  return `Always reply in the same language as the user's latest message (e.g. English question → English answer, 日本語 → 日本語). If the message has no clear language (only code, numbers or names), use ${LANG_NAME[lang] ?? 'English'}. Write code comments in that language too.`;
+}
+
+/** 使用者在 AI 設定裡寫的自訂指示：接在主要提示後面 */
+export function withCustom(system: string, custom: string): string {
+  const c = custom.trim();
+  if (!c) return system;
+  return `${system}
+
+# User's custom instructions
+Follow these as well, unless they conflict with the module format, tool or output rules above:
+${c}`;
 }
 
 let chatCache: { lang: string; text: string } | null = null;
@@ -105,7 +139,8 @@ ${SPEC}
 ${OUTPUT_RULES}
 ## Examples (built-in modules)
 ${examples()}
-${catalog()}`;
+${catalog()}
+${PROJECT}`;
   chatCache = { lang, text };
   return text;
 }

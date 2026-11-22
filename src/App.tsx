@@ -16,7 +16,8 @@ import { closeSource, sourceHotkey } from './ui/SourcePanel';
 import { FloatingWindow, PreviewPanel, Slot } from './ui/PreviewPanel';
 import { DockRoot, PANELS, layoutMenuItems, panelMenuItems, useDock, type PanelId } from './ui/Dock';
 import { ConfirmHost, DragGhost, MenuBar, MenuHost, Toasts } from './ui/Menu';
-import { copyKeys, deleteSelectedKey, keysFocused, nudgeKeys, pasteKeys, selectAllKeys } from './ui/EffectControls';
+import { fps } from './engine/rulerTicks';
+import { copyHits, copyKeys, cutHits, deleteSelectedHit, deleteSelectedKey, duplicateHits, hitEdge, hitsFocused, keysFocused, navHit, navHitEdge, nudgeHits, nudgeKeys, pasteHits, pasteKeys, selectAllHits, selectAllKeys, splitHit, trimHit } from './ui/EffectControls';
 import { ShapeDrawerHost } from './ui/ShapeDrawer';
 import { SHORTCUTS, TUTORIAL } from './ui/helpText';
 import { useLayout, toast, stopPreviewFx, confirmDialog, openMenu, useConfirm, type MenuItem } from './ui/uiStore';
@@ -25,7 +26,7 @@ import { usePrefs } from './prefs';
 import { Globe, Settings } from 'lucide-react';
 import { downloadBlob, exportMp4 } from './engine/exporter';
 import { loadDemo } from './engine/demo';
-import { undo, redo, useHistory } from './engine/history';
+import { stepsFrom, undo, redo, useHistory } from './engine/history';
 import { newProject, saveNow, useSaveState, exportProjectPack, importProjectPack } from './engine/project';
 import { importFiles, pickFiles } from './engine/media';
 import { LyricsPanel } from './ui/SubtitlesDialog';
@@ -33,7 +34,6 @@ import { ColorPanel } from './ui/ColorPanel';
 import { EditorWindow, openEditorWindow, useEditorWindow } from './ui/EditorWindow';
 import { snapToDevicePixels } from './ui/pixelSnap';
 
-const FPS = 60;
 
 // ───────────── 對話框 ─────────────
 
@@ -211,8 +211,8 @@ function SettingsDialog({ close }: { close: () => void }) {
   const [orig] = useState(() => {
     const l = useLayout.getState(), p = usePrefs.getState();
     return {
-      layout: { previewScale: l.previewScale, upperLayerAt: l.upperLayerAt, wheelScroll: l.wheelScroll, trackSize: l.trackSize, beatLead: l.beatLead },
-      prefs: { stillDur: p.stillDur, transDur: p.transDur },
+      layout: { previewScale: l.previewScale, upperLayerAt: l.upperLayerAt, wheelScroll: l.wheelScroll, trackSize: l.trackSize, beatLead: l.beatLead, timeGrid: l.timeGrid },
+      prefs: { stillDur: p.stillDur, transDur: p.transDur, autosave: p.autosave },
       format: useStore.getState().format,
     };
   });
@@ -241,6 +241,12 @@ function SettingsDialog({ close }: { close: () => void }) {
                 {f.label}
               </button>
             ))}
+          </div>
+        </SetRow>
+        <SetRow label={$t('自動儲存')} desc={$t('關閉後按 Ctrl+S 存檔')}>
+          <div className="seg">
+            <button className={P.autosave ? 'on' : ''} onClick={() => P.set({ autosave: true })}>{$t('開')}</button>
+            <button className={!P.autosave ? 'on' : ''} onClick={() => P.set({ autosave: false })}>{$t('關')}</button>
           </div>
         </SetRow>
         <div className="set-sec">{$t('預覽')}</div>
@@ -278,6 +284,13 @@ function SettingsDialog({ close }: { close: () => void }) {
         </SetRow>
         <SetRow label={$t('轉場預設長度')} desc={$t('新加入轉場時的長度')} inline>
           <DragNumber value={P.transDur} min={0.05} max={5} step={0.05} def={0.4} suffix=" s" onChange={(v) => P.set({ transDur: Math.round(v * 100) / 100 })} />
+        </SetRow>
+        <SetRow label={$t('時間軸格線')} desc={$t('拖曳、吸附、節拍的最小單位')}>
+          <div className="seg">
+            {([30, 60] as const).map((n) => (
+              <button key={n} className={L.timeGrid === n ? 'on' : ''} onClick={() => L.set({ timeGrid: n })}>1/{n} s</button>
+            ))}
+          </div>
         </SetRow>
         <SetRow label={$t('節拍提前')} desc={$t('節拍格線比聲音早一點，看起來才會對拍')} inline>
           <span className="set-hint">≈ {Math.round((L.beatLead / 60) * 1000)} ms</span>
@@ -461,7 +474,10 @@ function menus(): { label: string; items: () => MenuItem[] }[] {
 
 function SaveIndicator() {
   const st = useSaveState((s) => s.state);
-  return <span className={`save-ind ${st}`}>{st === 'saved' ? <><Check size={12} /> {$t('已自動儲存')}</> : st === 'saving' ? <><LoaderCircle size={12} className="spin" /> {$t('儲存中…')}</> : <><CircleDot size={12} /> {$t('未儲存')}</>}</span>;
+  const auto = usePrefs((s) => s.autosave);
+  useHistory((s) => s.ver);
+  const unsaved = stepsFrom(useSaveState((s) => s.savedPath));
+  return <span className={`save-ind ${st}`}>{st === 'saved' ? <><Check size={12} /> {auto ? $t('已自動儲存') : $t('已儲存')}</> : st === 'saving' ? <><LoaderCircle size={12} className="spin" /> {$t('儲存中…')}</> : <><CircleDot size={12} /> {!auto && unsaved > 0 ? $t('未儲存（{0}）', unsaved) : $t('未儲存')}</>}</span>;
 }
 
 // ───────────── 快捷鍵 ─────────────
@@ -512,9 +528,26 @@ function onKey(e: KeyboardEvent) {
     return;
   }
   const k = e.key.toLowerCase();
-  const frame = 1 / FPS;
+  const frame = 1 / fps();
   // 滑鼠在素材預覽上：Space / I / O 給素材預覽
   if (sourceHotkey(e)) return;
+  // 最後點的是屬性面板的「作用」列：快捷鍵作用在 Hit 上
+  if (hitsFocused()) {
+    if (mod && k === 'c') return void (copyHits() && e.preventDefault());
+    if (mod && k === 'x') return void (cutHits() && e.preventDefault());
+    if (mod && k === 'v') return void (e.preventDefault(), pasteHits());
+    if (mod && k === 'd') return void (e.preventDefault(), duplicateHits());
+    if ((mod && k === 'b') || (!mod && !e.altKey && k === 's')) return void (e.preventDefault(), splitHit());
+    if (mod && k === 'a') return void (e.preventDefault(), selectAllHits());
+    if (e.key === 'Delete' || e.key === 'Backspace') return void (e.preventDefault(), deleteSelectedHit());
+    // 跟時間軸一樣：Ctrl+← / → 換一個、Ctrl+Home / End 頭尾、Alt+← / → 移動、Home / End 跳到頭尾、Q / W 修剪
+    const arrow = e.key === 'ArrowLeft' ? -1 : e.key === 'ArrowRight' ? 1 : 0;
+    if (mod && arrow) return void (e.preventDefault(), navHit(arrow, e.shiftKey));
+    if (mod && (e.key === 'Home' || e.key === 'End')) return void (e.preventDefault(), navHitEdge(e.key === 'Home' ? 'first' : 'last', e.shiftKey));
+    if (e.altKey && arrow && nudgeHits(arrow * frame * (e.shiftKey ? 10 : 1))) return void e.preventDefault();
+    if (!mod && (e.key === 'Home' || e.key === 'End') && hitEdge(e.key === 'Home' ? 'start' : 'end')) return void e.preventDefault();
+    if (!mod && !e.altKey && (k === 'q' || k === 'w') && trimHit(k === 'q' ? 'start' : 'end')) return;
+  }
   // 最後點的是屬性面板的關鍵影格區：快捷鍵作用在關鍵影格
   if (keysFocused()) {
     if (mod && k === 'c') return void (copyKeys() && toast($t('已複製關鍵影格')));
@@ -610,6 +643,8 @@ export default function App() {
     window.addEventListener('keydown', onKey);
     const warn = (e: BeforeUnloadEvent) => {
       if (useStore.getState().exporting) e.preventDefault();
+      // 關掉自動儲存時，有沒存的變更就提醒
+      else if (!usePrefs.getState().autosave && useSaveState.getState().state === 'dirty') e.preventDefault();
     };
     window.addEventListener('beforeunload', warn);
     return () => {

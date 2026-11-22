@@ -2,12 +2,12 @@ import { $t } from './i18n';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { BUILTIN_MODULES, NEW_MODULE_TEMPLATES, type Module, type ModuleKind } from './modules/builtin';
-import { parseDuration, type ParamValues } from './engine/params';
+import { isHitFx, parseDuration, type ParamValues } from './engine/params';
 import { clipSource, plainSpeed } from './engine/remap';
 import { DEFAULT_TRANSFORM, EASES, normalizeScale, type EaseName, type Fit, type Transform } from './engine/transform';
 import { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualRows, type TrackKind, type TrackState, type Tracks } from './engine/tracks';
 export { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualRows, type TrackKind, type TrackState, type Tracks };
-import type { FxTrigger } from './engine/trigger';
+import { splitTiming, type FxTiming, type FxTrigger } from './engine/trigger';
 import { ANIM_PROPS, newKey, scaleKeyList, scaleKeyMap, splitKeys, type Ease, type Keyframe, type Keys } from './engine/keyframes';
 import { CURVE_ID, curveToKeys, parseCurve } from './engine/remapCurve';
 import { fitStart, groupFits, resolveShift, overwriteParts, insertParts, type Span } from './engine/overlap';
@@ -15,6 +15,7 @@ import { fxCombo, stillDur, transDur, userTextStyle, type FxCombo } from './pref
 import { PPS_MAX, PPS_MIN } from './engine/rulerTicks';
 import { DEFAULT_TEXT, TEXT_PRESETS, type TextStyle } from './engine/text';
 import type { Mask } from './engine/mask';
+import type { FollowMap } from './engine/follow';
 
 export type { Module, ModuleKind };
 
@@ -40,6 +41,8 @@ export interface TransitionRef {
   moduleId: string;
   params: ParamValues;
   duration: number;
+  /** point 參數跟著臉（沒有 = 照模組的 @follow 預設；null = 關掉） */
+  follow?: FollowMap;
 }
 
 /** 所有時間軸項目共用的欄位 */
@@ -72,6 +75,10 @@ export interface ClipFx {
   enabled?: boolean;
   /** 片段本身的遮罩（每個片段最多一個，屬性面板的「遮罩」區塊；渲染時排在所有片段特效之後） */
   base?: boolean;
+  /** 什麼時候作用（片段內時間）；沒有 = 整段 */
+  timing?: FxTiming;
+  /** point 參數跟著臉（沒有 = 照模組的 @follow 預設；null = 關掉） */
+  follow?: FollowMap;
 }
 
 export interface Clip extends ItemBase {
@@ -110,6 +117,8 @@ export interface Clip extends ItemBase {
   audioSplit?: boolean;
   /** AI 去背（U²-Netp，遮罩預先逐格算好） */
   aiMatte?: boolean;
+  /** 臉部追蹤：開了才偵測；套在這個片段上（或看這個片段）的特效 / 轉場的中心會跟著臉 */
+  faceTrack?: boolean;
   /** 舊版欄位，載入時會轉成 keys */
   transformEnd?: Transform | null;
   ease?: EaseName;
@@ -127,6 +136,10 @@ export interface FxItem extends ItemBase {
   params: ParamValues;
   /** 參數跟著音量 / 節拍變化 */
   audio?: Record<string, AudioDrive>;
+  /** point 參數跟著臉（沒有 = 照模組的 @follow 預設；null = 關掉） */
+  follow?: FollowMap;
+  /** 跟隨臉部時看哪一條影片軌的片段（沒有 = 自動：底下最上層有開臉部追蹤的片段） */
+  faceFrom?: number;
   /** 數值參數的關鍵影格（特效內時間）；遮罩的 key 叫 `mask.x` 之類 */
   keys?: Record<string, Keyframe[]>;
   /** 遮罩：只在這個區域套用特效 */
@@ -353,13 +366,18 @@ export function makeTextClip(presetId: string, modules: Module[], p: Partial<Cli
 /** 轉場方塊放上時間軸的預設長度（秒） */
 export const TR_BLOCK_DUR = 4;
 
+/** 片段特效的預設作用範圍：衝擊特效（// @hit）= 片段開頭打一下（長度 = @duration）；持續特效 = 整段 */
+export function defaultTiming(m: { kind: string; code: string } | undefined): FxTiming | undefined {
+  return m && isHitFx(m) ? { kind: 'hits', hits: [{ t: 0, d: parseDuration(m.code, 0.5) }] } : undefined;
+}
+
 /** 我的組合 → 特效方塊的內容（疊加的特效換新 id） */
 function comboItem(combo: FxCombo) {
   const c = structuredClone(combo.fx);
   return { ...c, stack: c.stack?.map((x) => ({ ...x, id: uid() })) };
 }
 /** 加片段特效：一般模組 = 一個；我的組合 = 主特效 + 疊加的特效 */
-function comboClipFx(moduleId: string): ClipFx[] {
+export function comboClipFx(moduleId: string): ClipFx[] {
   const combo = fxCombo(moduleId);
   if (!combo) return [{ id: uid(), moduleId, params: {} }];
   const c = comboItem(combo);
@@ -564,8 +582,9 @@ export const useStore = create<State>()(
               if (x.x) a[p] = x.x;
               if (y.x) b[p] = y.x;
             }
-            fxA.push({ ...f, keys: a });
-            fxB.push({ ...f, id: uid(), keys: b });
+            const [ta, tb] = splitTiming(f.timing, local);
+            fxA.push({ ...f, keys: a, timing: ta });
+            fxB.push({ ...f, id: uid(), keys: b, timing: tb });
           }
           if (c.effects) {
             return [
@@ -1518,7 +1537,11 @@ export const useStore = create<State>()(
         addClipFx: (clipId, moduleId) =>
           set((s) => ({
             // 我的組合：主特效與疊加的特效依序變成片段特效（觸發不適用）
-            clips: s.clips.map((c) => (c.id === clipId ? { ...c, effects: [...(c.effects ?? []), ...comboClipFx(moduleId)] } : c)),
+            clips: s.clips.map((c) => {
+              if (c.id !== clipId) return c;
+              const add = comboClipFx(moduleId).map((f) => ({ ...f, timing: defaultTiming(s.modules.find((m) => m.id === f.moduleId)) }));
+              return { ...c, effects: [...(c.effects ?? []), ...add] };
+            }),
             selection: { type: 'clip', id: clipId },
             leftTab: 'editor',
           })),

@@ -5,6 +5,7 @@
 //       // @param center: point = 0.5,0.5 "中心"        → uniform vec2（uv 座標）
 //       // @param ease: curve = inOut "曲線"             → uniform vec4（cubic-bezier），用 curve(ease, x) 取值
 //       // @param to: float = 0.2 (0..1) "大小" @box(center) → 預覽畫面上以 center 為中心畫出縮放後的畫面框
+//       // @param center: point = 0.5,0.5 "中心" @follow(face) → 預設跟著畫面裡的臉（素材有偵測結果時）
 
 import { EASE_PRESETS, evalKeys, type Bez, type Keyframe } from './keyframes';
 
@@ -24,10 +25,12 @@ export interface ParamDef {
   box?: string;
   /** curve 參數：「無」選項的固定值（`@none(1)`，例如不淡入 = 一直是 1） */
   none?: number;
+  /** point 參數：預設跟著畫面裡的臉（`@follow(face)`） */
+  follow?: 'face';
 }
 
 const RE =
-  /\/\/\s*@param\s+(\w+)\s*:\s*(float|int|bool|color|point|curve)\s*=\s*(\S+?)(?:\s*\(\s*(-?[\d.]+)\s*\.\.\s*(-?[\d.]+)\s*\))?(?:\s*"([^"]*)")?(?:\s*@box\(\s*(\w+)\s*\))?(?:\s*@none\(\s*(-?[\d.]+)\s*\))?[ \t\r]*$/gm;
+  /\/\/\s*@param\s+(\w+)\s*:\s*(float|int|bool|color|point|curve)\s*=\s*(\S+?)(?:\s*\(\s*(-?[\d.]+)\s*\.\.\s*(-?[\d.]+)\s*\))?(?:\s*"([^"]*)")?(?:\s*@box\(\s*(\w+)\s*\))?(?:\s*@none\(\s*(-?[\d.]+)\s*\))?(?:\s*@follow\(\s*(face)\s*\))?[ \t\r]*$/gm;
 
 const cache = new Map<string, ParamDef[]>();
 
@@ -48,7 +51,7 @@ export function parseParams(code: string): ParamDef[] {
   RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = RE.exec(code))) {
-    const [, name, type, raw, mn, mx, label, box, none] = m;
+    const [, name, type, raw, mn, mx, label, box, none, follow] = m;
     let def: ParamValue;
     if (type === 'bool') def = raw === 'true' || raw === '1';
     else if (type === 'color') def = /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toLowerCase() : '#ffffff';
@@ -67,6 +70,7 @@ export function parseParams(code: string): ParamDef[] {
       label: label || name,
       ...(box && type === 'float' ? { box } : {}),
       ...(none !== undefined && type === 'curve' ? { none: parseFloat(none) } : {}),
+      ...(follow && type === 'point' ? { follow: 'face' as const } : {}),
     });
   }
   if (cache.size > 300) cache.clear();
@@ -130,6 +134,11 @@ export function hexToRgb(h: string): [number, number, number] {
 export function parseDuration(code: string, fallback: number): number {
   const m = /\/\/\s*@duration\s+([\d.]+)/.exec(code);
   return m ? parseFloat(m[1]) || fallback : fallback;
+}
+
+/** 可以跟隨臉部的模組：有 point 參數標了 @follow(face)（縮放、旋轉、扭曲這類有中心的） */
+export function isFaceAware(m: { kind: string; code: string }): boolean {
+  return (m.kind === 'effect' || m.kind === 'transition') && parseParams(m.code).some((d) => !!d.follow);
 }
 
 /**

@@ -1,8 +1,8 @@
-import { FPS } from '../engine/rulerTicks';
+import { snapFrame } from '../engine/rulerTicks';
 import { stopLibraryPreview } from './SourcePanel';
 import { $t, displayName } from '../i18n';
 import type React from 'react';
-import { TR_BLOCK_DUR, attachedAudioIds, keyOf, useStore, mediaUsable, parseKey, spansOf, type Clip, type FxItem, type PlacementGhost, type TimelineDropMode, type TrackKind } from '../store';
+import { TR_BLOCK_DUR, attachedAudioIds, comboClipFx, keyOf, useStore, mediaUsable, parseKey, spansOf, type Clip, type FxItem, type PlacementGhost, type TimelineDropMode, type TrackKind } from '../store';
 import { beginHistoryTransaction, endHistoryTransaction } from '../engine/history';
 import { showPendingPlacement } from './Timeline';
 import { parseDuration } from '../engine/params';
@@ -97,7 +97,12 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
       const m = s.media.find((x) => x.id === c.mediaId);
       const action = payload.moduleKind === 'effect' ? 'effect' : payload.moduleKind === 'transition' ? 'transition' : 'remap';
       t = { kind: 'clip', clipId: c.id, action, valid: action !== 'remap' || m?.kind === 'video' };
-    } else if (sel?.type === 'effect' && payload.moduleKind === 'effect') t = { kind: 'effect', fxId: sel.id };
+    } else if (sel?.type === 'effect' && payload.moduleKind === 'effect') {
+      // 特效方塊：預設疊加，按住 Alt = 取代（轉場方塊只能取代）
+      const fx = s.effects.find((f) => f.id === sel.id);
+      const trBlock = !!fx && s.modules.find((m) => m.id === fx.moduleId)?.kind === 'transition';
+      t = { kind: 'effect', fxId: sel.id, ...(!alt && !trBlock ? { stack: true } : {}) };
+    }
     insp.classList.toggle('drop-here', !!t);
     return t;
   }
@@ -179,7 +184,7 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
   // Ghost placement snaps to visible timeline items across every track.
   const pps = s.pps;
   // 時間軸最小單位是一格（1/60 秒）
-  let time = Math.max(0, Math.round(((x - laneEl.getBoundingClientRect().left) / pps) * FPS) / FPS);
+  let time = Math.max(0, snapFrame((x - laneEl.getBoundingClientRect().left) / pps));
   if (payload.kind === 'mediaBatch') {
     const items = planMediaBatch(payload.ids, time, { kind: lane, track: idx });
     if (!items?.length) return null;
@@ -259,7 +264,13 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
     return;
   }
   if (target.kind === 'effect') {
-    if (payload.kind === 'module') await replaceFx(target.fxId, payload.id);
+    if (payload.kind !== 'module') return;
+    if (target.stack) {
+      const f = s.effects.find((e) => e.id === target.fxId);
+      if (!f) return;
+      s.updateEffect(f.id, { stack: [...(f.stack ?? []), ...comboClipFx(payload.id)] });
+      toast($t('已疊加到特效'));
+    } else await replaceFx(target.fxId, payload.id);
     return;
   }
   if (target.kind === 'clip') {
@@ -314,15 +325,20 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
       const id = await mediaId();
       if (!id) return;
       beginHistoryTransaction();
-      const st = useStore.getState();
-      const known = new Set([...st.clips, ...st.audios].map((x) => x.id));
-      place(id, target.time);
-      const after = useStore.getState();
-      const keys = after.selected.filter((k) => !known.has(parseKey(k).id));
-      if (!keys.length) return endHistoryTransaction(false);
-      after.patchItems(Object.fromEntries(keys.map((k) => [k, { start: target.time }])));
-      useStore.getState().resolveTimelineDrop(keys, mode);
-      endHistoryTransaction(true);
+      let ok = false;
+      try {
+        const st = useStore.getState();
+        const known = new Set([...st.clips, ...st.audios].map((x) => x.id));
+        place(id, target.time);
+        const after = useStore.getState();
+        const keys = after.selected.filter((k) => !known.has(parseKey(k).id));
+        if (!keys.length) return;
+        after.patchItems(Object.fromEntries(keys.map((k) => [k, { start: target.time }])));
+        useStore.getState().resolveTimelineDrop(keys, mode);
+        ok = true;
+      } finally {
+        endHistoryTransaction(ok); // 出錯也要結束，不然之後的變更都不會進復原紀錄
+      }
     };
     const replaceId = overlap.replaceId;
     const replace = replaceId ? async () => {
@@ -338,13 +354,18 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
     const overlap = target.overlap;
     const choose = (mode: TimelineDropMode) => {
       beginHistoryTransaction();
-      const known = new Set(useStore.getState().effects.map((x) => x.id));
-      useStore.getState().addEffect(payload.id, target.time, target.idx);
-      const added = useStore.getState().effects.filter((x) => !known.has(x.id)).map((x) => keyOf('effect', x.id));
-      if (!added.length) return endHistoryTransaction(false);
-      useStore.getState().patchItems(Object.fromEntries(added.map((k) => [k, { start: target.time }])));
-      useStore.getState().resolveTimelineDrop(added, mode);
-      endHistoryTransaction(true);
+      let ok = false;
+      try {
+        const known = new Set(useStore.getState().effects.map((x) => x.id));
+        useStore.getState().addEffect(payload.id, target.time, target.idx);
+        const added = useStore.getState().effects.filter((x) => !known.has(x.id)).map((x) => keyOf('effect', x.id));
+        if (!added.length) return;
+        useStore.getState().patchItems(Object.fromEntries(added.map((k) => [k, { start: target.time }])));
+        useStore.getState().resolveTimelineDrop(added, mode);
+        ok = true;
+      } finally {
+        endHistoryTransaction(ok);
+      }
     };
     const replaceId = overlap.replaceId;
     const replace = replaceId ? () => void replaceFx(replaceId, payload.id) : undefined;

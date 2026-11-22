@@ -2,7 +2,7 @@ import { $t, displayName } from '../i18n';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { BookOpen, Check, CircleAlert, Copy, ExternalLink, Eye, EyeOff, Info, LoaderCircle, Paperclip, Plus, RefreshCw, Send, Settings, Sparkles, Square, Trash2, Wand2 } from 'lucide-react';
 import {
-  MAX_FIXES, aiErrorText, clearChat, refreshModels, sendChat, stopChat, useAiChat, useAiModels, useAiSettings,
+  MAX_FIXES, aiErrorText, applyChatProposals, clearChat, refreshModels, sendChat, stopChat, useAiChat, useAiModels, useAiSettings,
   type ChatMsg,
 } from '../ai/assistant';
 import { codeBlocks, detectKind, guessName, validateModule } from '../ai/validate';
@@ -74,7 +74,26 @@ function AiSetup({ onDone }: { onDone?: () => void }) {
           <button className="btn small-h" onClick={() => { set({ key: '', model: '' }); setDraft(''); setMsg(null); useAiModels.setState({ list: [] }); }}>{$t('移除金鑰')}</button>
         </div>
       )}
+      {key && <CustomPrompt />}
       {model && !models.list.length && models.error && <div className="err-line" title={models.error}><CircleAlert size={12} /> {$t('讀不到模型清單')}</div>}
+    </div>
+  );
+}
+
+function CustomPrompt() {
+  const custom = useAiSettings((s) => s.custom);
+  const set = useAiSettings((s) => s.set);
+  return (
+    <div className="ai-setup-col">
+      <span className="ai-setup-label" title={$t('每次送出都會附在系統提示後面')}>{$t('自訂指示')}</span>
+      <textarea
+        className="ai-key ai-custom"
+        rows={3}
+        maxLength={2000}
+        value={custom}
+        spellCheck={false}
+        onChange={(e) => set({ custom: e.target.value })}
+      />
     </div>
   );
 }
@@ -166,6 +185,28 @@ function CodeCard({ code, lang, live, msg }: { code: string; lang: string; live:
   );
 }
 
+function ProposalCard({ msg }: { msg: ChatMsg }) {
+  const list = msg.proposals!;
+  const apply = () => {
+    const r = applyChatProposals(msg.id);
+    if (r) toast(r.skipped ? $t('已套用 {0} 項，{1} 項已不存在', r.done, r.skipped) : $t('已套用 {0} 項', r.done));
+  };
+  return (
+    <div className="ai-code">
+      <div className="ai-code-head">
+        <span className="ai-code-lang">{$t('修改')}</span>
+        <span className="spacer" />
+        {msg.applied ? (
+          <span className="ok-line"><Check size={12} /> {$t('已套用')}</span>
+        ) : (
+          <button className="btn small-h" disabled={!!msg.streaming} onClick={apply}><Wand2 size={12} /> {$t('套用')}</button>
+        )}
+      </div>
+      <ul className="ai-ops">{list.map((p, i) => <li key={i}>{p.summary}</li>)}</ul>
+    </div>
+  );
+}
+
 function MsgBody({ msg }: { msg: ChatMsg }) {
   const live = !!msg.streaming;
   const blocks = codeBlocks(msg.text);
@@ -195,6 +236,7 @@ function Message({ msg }: { msg: ChatMsg }) {
     <div className="ai-msg model">
       {!!msg.refs?.length && <span className="ai-status muted"><BookOpen size={11} /> {$t('參考：{0}', msg.refs.map(displayName).join('、'))}</span>}
       {msg.text && <MsgBody msg={msg} />}
+      {!!msg.proposals?.length && <ProposalCard msg={msg} />}
       {msg.streaming && !msg.text && <span className="muted small"><LoaderCircle size={12} className="spin" /> {$t('思考中')}</span>}
       {msg.fixing ? <span className="ai-status"><LoaderCircle size={12} className="spin" /> {$t('修正中 {0}/{1}', msg.fixing, MAX_FIXES)}</span> : null}
       {!msg.streaming && !!msg.fixes && <span className="ai-status muted">{$t('已自動修正 {0} 次', msg.fixes)}</span>}
@@ -249,7 +291,7 @@ export function AiPanel() {
     );
   }
 
-  const SUGGEST = [$t('寫一個跟著節拍閃爍的特效'), $t('寫一個向左推的轉場'), $t('怎麼加關鍵影格？')];
+  const SUGGEST = [$t('在每個重拍加震動'), $t('寫一個跟著節拍閃爍的特效'), $t('寫一個向左推的轉場'), $t('怎麼加關鍵影格？')];
 
   return (
     <div className="ai-panel">

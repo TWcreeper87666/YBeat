@@ -7,7 +7,7 @@ import { axisAligned, gridSnapLines, rotatedHalf, snapMoveAxis, snapScaleAxis } 
 import { makeTextClip, projectDuration, remapFor, srcAvail, useStore, type Clip, type FxItem, type Media } from '../store';
 import { fxCombo, stillDur, usePrefs } from '../prefs';
 import { getRenderer, Renderer, computeFrame, makeCtx, setRenderer } from '../engine/renderer';
-import { setRemapErrorReporter } from '../engine/remap';
+import { clipSource, setRemapErrorReporter } from '../engine/remap';
 import { syncAudioPreview, stopAudioPreview } from '../engine/audio';
 import { parseDuration } from '../engine/params';
 import { trialTransitionAt, withClip } from '../engine/trialTransition';
@@ -17,8 +17,10 @@ import { MaskGizmos, cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { GridOverlay } from './GridOverlay';
 import { ParamGizmos } from './ParamGizmos';
 import { TextInlineEdit } from './TextInlineEdit';
-import { stopPreviewFx, toast, useColorPick, useLayout, usePreviewFx } from './uiStore';
+import { stopPreviewFx, toast, useColorPick, useLayout, usePreviewFx, useTrimView } from './uiStore';
 import { useEditorWindow } from './EditorWindow';
+import { fps } from '../engine/rulerTicks';
+import { faceAt, requestFaces, useFaces } from '../engine/face';
 
 const frameAspect = () => useStore.getState().format.w / useStore.getState().format.h;
 
@@ -74,7 +76,7 @@ export function Preview() {
           const editorScope = useEditorWindow.getState().open;
           if (st.loop && t >= st.loop.b) {
             if (editorScope && !repeat) {
-              t = Math.max(st.loop.a, st.loop.b - 1 / 60);
+              t = Math.max(st.loop.a, st.loop.b - 1 / fps());
               useStore.setState({ playing: false });
             } else {
               t = st.loop.a;
@@ -120,7 +122,9 @@ export function Preview() {
         } else trialCombo = null;
         // 素材庫點選的特效 / 轉場：循環預覽
         let extra;
-        let rt = t, rPlaying = st.playing;
+        // 修剪片段時：預覽暫時顯示邊緣那一格（播放頭不動）
+        const trimT = st.playing ? null : useTrimView.getState().t;
+        let rt = trimT ?? t, rPlaying = st.playing;
         const fx = usePreviewFx.getState().fx;
         const m = fx && ctx.modules.get(fx.moduleId);
         const trial = !fx || !m || st.playing
@@ -313,6 +317,60 @@ function boxOf(clip: Clip, media: Media | undefined, local: number, W: number, H
   return { xf, cx: (0.5 + xf.x) * W, cy: (0.5 + xf.y) * H, w: sw * Math.abs(xf.scaleX) * H, h: sh * Math.abs(xf.scaleY) * H, rot: xf.rotation };
 }
 
+/** 臉部偵測框：選取的片段開了臉部追蹤時顯示（框跟著片段的縮放、位置、旋轉、翻轉走） */
+function FaceOverlay({ W, H }: { W: number; H: number }) {
+  const sel = useStore((s) => s.selection);
+  const time = useStore((s) => s.time);
+  const clips = useStore((s) => s.clips);
+  const mediaList = useStore((s) => s.media);
+  const tracks = useStore((s) => s.tracks);
+  const modulesList = useStore((s) => s.modules);
+  useFaces((f) => f.ver);
+  const jobs = useFaces((f) => f.jobs);
+  const errors = useFaces((f) => f.errors);
+  if (!W || !H || sel?.type !== 'clip') return null;
+  const media = new Map(mediaList.map((m) => [m.id, m]));
+  const modules = new Map(modulesList.map((m) => [m.id, m]));
+  const shown = clips.filter((c) => {
+    const m = media.get(c.mediaId);
+    return c.id === sel.id && c.faceTrack && !c.text && m && !m.missing && (m.kind === 'video' || m.kind === 'image') && !tracks.video[c.track]?.hidden && time >= c.start && time < c.start + c.duration;
+  });
+  const boxes: { key: string; cx: number; cy: number; w: number; h: number; rot: number }[] = [];
+  let busy: { done: number; total: number } | null = null;
+  let err: string | null = null;
+  for (const c of shown) {
+    const m = media.get(c.mediaId)!;
+    requestFaces(c, m, modules);
+    if (jobs[m.id]) busy = jobs[m.id];
+    if (errors[m.id]) err = errors[m.id];
+    const local = time - c.start;
+    const f = faceAt(m, m.kind === 'image' ? local : clipSource(c, local, m, modules).src);
+    if (!f) continue;
+    const b = boxOf(c, m, local, W, H);
+    const sx = Math.sign(b.xf.scaleX) || 1, sy = Math.sign(b.xf.scaleY) || 1;
+    const dx = (f.x - 0.5) * b.w * sx, dy = (f.y - 0.5) * b.h * sy;
+    const a = (b.rot * Math.PI) / 180;
+    boxes.push({ key: c.id, cx: b.cx + dx * Math.cos(a) - dy * Math.sin(a), cy: b.cy + dx * Math.sin(a) + dy * Math.cos(a), w: f.w * b.w, h: f.h * b.h, rot: b.rot });
+  }
+  return (
+    <>
+      <svg className="face-overlay" width={W} height={H}>
+        {boxes.map((b) => (
+          <g key={b.key} transform={`translate(${b.cx} ${b.cy}) rotate(${b.rot})`}>
+            <rect x={-b.w / 2} y={-b.h / 2} width={b.w} height={b.h} rx={4} />
+            <circle r={3} />
+          </g>
+        ))}
+      </svg>
+      {(busy || err) && (
+        <div className={`face-status ${err ? 'error' : ''}`} title={err ?? undefined}>
+          {err ? $t('臉部偵測失敗') : $t('臉部偵測 {0}%', Math.round((busy!.done / Math.max(1, busy!.total)) * 100))}
+        </div>
+      )}
+    </>
+  );
+}
+
 function hit(b: Box, x: number, y: number) {
   const a = (-b.rot * Math.PI) / 180;
   const dx = x - b.cx, dy = y - b.cy;
@@ -470,10 +528,19 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
               // 這個方向在畫面上是水平還是垂直（旋轉 90° 時對調）
               const screenX = (mode === 'scaleX') !== al.swapped;
               const half = (mode === 'scaleX' ? b.w : b.h) / 2;
-              const s = snapScaleAxis(screenX ? b.cx : b.cy, half, Math.abs(f), screenX ? lines.x : lines.y, SNAP_PX);
-              if (s.line !== null) {
-                f = Math.sign(f) * s.f;
-                g = screenX ? { x: s.line / W, y: null } : { x: null, y: s.line / H };
+              const ownSnap = (k: number, tol: number) => snapScaleAxis(screenX ? b.cx : b.cy, half, k, screenX ? lines.x : lines.y, tol);
+              // 等比例：另一個方向也跟著變大小，它的邊碰到線也要吸
+              const otherHalf = (mode === 'scaleX' ? b.h : b.w) / 2;
+              const otherSnap = (k: number, tol: number) =>
+                c.scaleUnlinked ? { f: k, line: null, dist: Infinity } : snapScaleAxis(screenX ? b.cy : b.cx, otherHalf, k, screenX ? lines.y : lines.x, tol);
+              const s1 = ownSnap(Math.abs(f), SNAP_PX), s2 = otherSnap(Math.abs(f), SNAP_PX);
+              const pick = s1.line !== null && (s2.line === null || s1.dist <= s2.dist) ? s1 : s2.line !== null ? s2 : null;
+              if (pick) {
+                f = Math.sign(f) * pick.f;
+                // 兩個方向剛好都碰到線，都畫出來
+                const on1 = ownSnap(pick.f, 1), on2 = otherSnap(pick.f, 1);
+                const lx = screenX ? on1.line : on2.line, ly = screenX ? on2.line : on1.line;
+                g = { x: lx !== null ? lx / W : null, y: ly !== null ? ly / H : null };
               }
             }
             const own = mode === 'scaleX' ? 'scaleX' : 'scaleY';
@@ -531,6 +598,7 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
   return (
     <div ref={layerRef} className="gizmo-layer" style={{ left: rect.left, top: rect.top, width: W, height: H }} onPointerDown={onLayerDown}>
       <GridOverlay W={W} H={H} />
+      <FaceOverlay W={W} H={H} />
       {(guides.x !== null || guides.y !== null) && (
         <svg className="snap-guides" width={W} height={H}>
           {guides.x !== null && <line x1={guides.x * W} y1={0} x2={guides.x * W} y2={H} />}

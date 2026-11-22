@@ -97,6 +97,8 @@ export async function decodeRange(o: {
   from: number;
   to: number;
   size: number;
+  /** 不拉成正方形：畫布 w × h，影格畫在左上角 dw × dh（臉部偵測要保持比例）；沒有 = size × size 拉滿 */
+  box?: { w: number; h: number; dw: number; dh: number };
   skip: (pts: number) => boolean;
   onInfo: (info: DecodeInfo) => void;
   onFrame: (pts: number, rgba: Uint8ClampedArray) => Promise<void>;
@@ -126,7 +128,9 @@ export async function decodeRange(o: {
   let end = samples.length - 1;
   for (let i = first; i < samples.length; i++) if (ptsOf(samples[i]) > hi + fd * 8) { end = i; break; }
 
-  const canvas = new OffscreenCanvas(o.size, o.size);
+  const bw = o.box?.w ?? o.size, bh = o.box?.h ?? o.size;
+  const dw = o.box?.dw ?? o.size, dh = o.box?.dh ?? o.size;
+  const canvas = new OffscreenCanvas(bw, bh);
   const g = canvas.getContext('2d', { willReadFrequently: true })!;
   const queue: { pts: number; rgba: Uint8ClampedArray }[] = [];
   let decodeError: Error | null = null;
@@ -135,9 +139,10 @@ export async function decodeRange(o: {
       const pts = frame.timestamp / 1e6;
       if (wanted(pts)) {
         // 跟 rembg 一樣直接拉成正方形（不保持比例），遮罩畫回去時再拉回原比例
-        g.clearRect(0, 0, o.size, o.size);
-        g.drawImage(frame, 0, 0, o.size, o.size);
-        queue.push({ pts, rgba: g.getImageData(0, 0, o.size, o.size).data });
+        g.fillStyle = '#000';
+        g.fillRect(0, 0, bw, bh);
+        g.drawImage(frame, 0, 0, dw, dh);
+        queue.push({ pts, rgba: g.getImageData(0, 0, bw, bh).data });
       }
       frame.close();
     },

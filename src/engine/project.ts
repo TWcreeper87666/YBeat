@@ -3,9 +3,10 @@ import { afterRelease, pointerHeld } from './pointerHold';
 import { create } from 'zustand';
 import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, mergeModules, makeClip, useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
 import type { Module } from '../modules/builtin';
-import { resetHistory } from './history';
+import { historyPath, resetHistory, settleHistory } from './history';
 import { clearDetachedMedia } from './detachedMedia';
 import { colorBlob } from './colorBlob';
+import { usePrefs } from '../prefs';
 
 /** 專案自動存檔：素材檔案（Blob）與時間軸存在 IndexedDB，重新整理不會遺失 */
 
@@ -49,14 +50,25 @@ interface Saved {
 }
 
 /** 存檔狀態（顯示在標題列） */
-export const useSaveState = create<{ state: 'saved' | 'dirty' | 'saving'; at: number }>(() => ({ state: 'saved', at: Date.now() }));
+/** savedPath：上次存檔時的復原紀錄路徑（跟目前比 = 還沒存的步數） */
+export const useSaveState = create<{ state: 'saved' | 'dirty' | 'saving'; at: number; savedPath: number[] }>(() => ({ state: 'saved', at: Date.now(), savedPath: historyPath() }));
 
 let saveTimer = 0;
 let started = false;
 
+/** 上次存檔時的專案內容（物件參照）：復原回這個狀態 = 跟存檔一樣，不用再存 */
+type SavedRefs = Pick<ReturnType<typeof useStore.getState>, 'media' | 'clips' | 'effects' | 'audios' | 'tracks' | 'format'>;
+let savedRefs: SavedRefs | null = null;
+const refsOf = (s: SavedRefs): SavedRefs => ({ media: s.media, clips: s.clips, effects: s.effects, audios: s.audios, tracks: s.tracks, format: s.format });
+const sameRefs = (a: SavedRefs, b: SavedRefs) =>
+  a.media === b.media && a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.tracks === b.tracks && a.format.w === b.format.w && a.format.h === b.format.h; // 比例每次都是新物件，比數值
+
 async function save() {
   useSaveState.setState({ state: 'saving' });
+  settleHistory();
+  const savedPath = historyPath();
   const s = useStore.getState();
+  const refs = refsOf(s);
   const data: Saved = {
     // 圖片的 thumb 就是 blob URL，重新載入時再產生
     media: s.media.map((m) => ({ ...m, url: '', thumb: m.kind === 'image' ? '' : m.thumb })),
@@ -69,7 +81,10 @@ async function save() {
   };
   try {
     await run('project', 'readwrite', (os) => os.put(data, 'current'));
-    useSaveState.setState({ state: 'saved', at: Date.now() });
+    savedRefs = refs;
+    // 存檔中又有變更：還是未儲存
+    const changed = !sameRefs(refsOf(useStore.getState()), refs);
+    useSaveState.setState({ state: changed ? 'dirty' : 'saved', at: Date.now(), savedPath });
   } catch (e) {
     console.warn($t('專案存檔失敗'), e);
     useSaveState.setState({ state: 'dirty' });
@@ -91,12 +106,19 @@ function startAutosave() {
   if (started) return;
   started = true;
   useStore.subscribe((s, p) => {
-    if (s.media === p.media && s.clips === p.clips && s.effects === p.effects && s.audios === p.audios && s.tracks === p.tracks && s.format === p.format) return;
-    useSaveState.setState({ state: 'dirty' });
+    if (sameRefs(s, p)) return;
     clearTimeout(saveTimer);
+    // 復原回存檔時的狀態 = 已儲存
+    if (savedRefs && sameRefs(s, savedRefs)) return useSaveState.setState({ state: 'saved' });
+    useSaveState.setState({ state: 'dirty' });
+    if (!usePrefs.getState().autosave) return;
     // 拖曳中不存，放開才存
     if (pointerHeld()) afterRelease(saveSoon);
     else saveTimer = window.setTimeout(save, 600);
+  });
+  // 重新打開自動儲存：有沒存的變更就馬上存
+  usePrefs.subscribe((s, p) => {
+    if (s.autosave && !p.autosave && useSaveState.getState().state === 'dirty') saveSoon();
   });
 }
 
@@ -152,6 +174,8 @@ export async function restoreProject() {
     console.warn($t('讀取專案失敗'), e);
   }
   resetHistory();
+  savedRefs = refsOf(useStore.getState());
+  useSaveState.setState({ state: 'saved', savedPath: historyPath() });
   startAutosave();
 }
 

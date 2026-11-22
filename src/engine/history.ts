@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { afterRelease, pointerHeld } from './pointerHold';
-import { useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
+import { parseKey, useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
 
 /** 復原 / 重做：自動記錄時間軸變更；拖曳中的變更等放開才算一步，其他連續操作（400ms 內）合併成一步 */
 interface Doc { clips: Clip[]; effects: FxItem[]; audios: AudioClip[]; media: Media[]; tracks: Tracks }
@@ -13,8 +13,29 @@ let applying = false;
 let transaction: Doc | null = null;
 const LIMIT = 200;
 
-export const useHistory = create(() => ({ canUndo: false, canRedo: false }));
-const sync = () => useHistory.setState({ canUndo: past.length > 0 || !!burstStart, canRedo: future.length > 0 });
+/**
+ * 每一步都有編號：path = 從開頭走到目前狀態經過的步驟（復原 = 退一步、重做 = 再走回去）。
+ * 存檔時記下 path，跟目前的 path 比 = 還沒存的步數（復原回存檔的狀態就是 0）。
+ * ver：path 有變就加一，讓畫面重畫
+ */
+export const useHistory = create(() => ({ canUndo: false, canRedo: false, ver: 0 }));
+let nextId = 1;
+let path: number[] = [0];
+let futureIds: number[] = [];
+const touch = () => useHistory.setState((s) => ({ ver: s.ver + 1 }));
+const bump = () => {
+  path.push(nextId++);
+  futureIds = [];
+  touch();
+};
+export const historyPath = () => [...path];
+/** 從 saved（存檔時的 path）走到目前狀態要幾步 */
+export function stepsFrom(saved: number[]): number {
+  let common = 0;
+  while (common < saved.length && common < path.length && saved[common] === path[common]) common++;
+  return saved.length - common + (path.length - common);
+}
+const sync = () => useHistory.setState({ canUndo: !transaction && (past.length > 0 || !!burstStart), canRedo: !transaction && future.length > 0 });
 
 const docOf = (s: Doc): Doc => ({ clips: s.clips, effects: s.effects, audios: s.audios, media: s.media, tracks: s.tracks });
 
@@ -24,6 +45,7 @@ function flush() {
     past.push(burstStart);
     if (past.length > LIMIT) past.shift();
     burstStart = null;
+    bump(); // 結算（拖曳放開 / 停 400ms）才算一步
   }
 }
 
@@ -44,16 +66,31 @@ useStore.subscribe((s, prev) => {
   sync();
 });
 
+/** 存檔前先把還在合併中的一步結算掉（不然存檔記下的步數會少一步） */
+export function settleHistory() {
+  flush();
+  sync();
+}
+
 function apply(d: Doc) {
   applying = true;
-  const sel = useStore.getState().selection;
+  const s = useStore.getState();
+  const sel = s.selection;
   const exists =
     !sel ||
     sel.type === 'module' ||
     d.clips.some((c) => c.id === sel.id || `out:${c.id}` === sel.id) ||
     d.effects.some((c) => c.id === sel.id) ||
     d.audios.some((c) => c.id === sel.id);
-  useStore.setState({ ...d, selection: exists ? sel : null });
+  // 多選裡被復原掉的項目、已經不存在的軌道也要清掉
+  const ids = { clip: new Set(d.clips.map((x) => x.id)), effect: new Set(d.effects.map((x) => x.id)), audio: new Set(d.audios.map((x) => x.id)) };
+  const selected = s.selected.filter((k) => {
+    const { type, id } = parseKey(k);
+    return ids[type]?.has(id);
+  });
+  const at = s.activeTrack;
+  const activeTrack = at && at.idx < d.tracks[at.kind].length ? at : null;
+  useStore.setState({ ...d, selection: exists ? sel : null, selected: selected.length === s.selected.length ? s.selected : selected, activeTrack });
   applying = false;
 }
 
@@ -75,6 +112,7 @@ export function endHistoryTransaction(commit: boolean) {
       past.push(before);
       if (past.length > LIMIT) past.shift();
       future = [];
+      bump();
     }
   }
   sync();
@@ -96,25 +134,34 @@ export function restoreDoc(d: Doc): boolean {
   if (past.length > LIMIT) past.shift();
   future = [];
   apply(d);
+  bump();
   sync();
   return true;
 }
 
 export function undo() {
+  // 拖曳到一半 / 放置選單還開著：先不要復原（不然放開時會把復原前的狀態又記一次）
+  if (transaction) return;
   flush();
   const d = past.pop();
   if (!d) return;
   future.push(docOf(useStore.getState()));
   apply(d);
+  if (path.length > 1) futureIds.push(path.pop()!);
+  touch();
   sync();
 }
 
 export function redo() {
+  if (transaction) return;
   flush();
   const d = future.pop();
   if (!d) return;
   past.push(docOf(useStore.getState()));
   apply(d);
+  const id = futureIds.pop();
+  if (id !== undefined) path.push(id);
+  touch();
   sync();
 }
 
@@ -124,5 +171,8 @@ export function resetHistory() {
   future = [];
   burstStart = null;
   transaction = null;
+  path = [nextId++];
+  futureIds = [];
+  touch();
   sync();
 }

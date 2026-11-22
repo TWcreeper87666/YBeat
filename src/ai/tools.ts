@@ -54,6 +54,44 @@ export function runTool(name: string, args: Record<string, unknown>, modules: Mo
   return { error: `unknown tool: ${name}` };
 }
 
+/** 模組名稱裡可以拿來比對的詞：連續的中日文（≥2 字）、英文片語（≥3 個字母） */
+function nameTerms(name: string): string[] {
+  const out: string[] = [];
+  for (const m of name.matchAll(/[぀-ヿ㐀-鿿]{2,}|[A-Za-z][A-Za-z0-9 '-]*[A-Za-z0-9]/g)) {
+    const t = m[0].trim();
+    if (/[぀-鿿]/.test(t) || t.replace(/[^A-Za-z]/g, '').length >= 3) out.push(t.toLowerCase());
+  }
+  return out;
+}
+
+/**
+ * 使用者在問題裡提到的模組（名稱或 id 完全出現在文字裡），先把程式碼附上，AI 就不用再花一個請求去讀。
+ * 長的名稱先比（「Shake Blur」優先於「Shake」），最多 max 個。
+ */
+export function mentionedModules(text: string, modules: Module[], max = 2): Module[] {
+  const low = text.toLowerCase();
+  const hits: { m: Module; len: number; at: number }[] = [];
+  for (const m of modules) {
+    let best: { len: number; at: number } | null = null;
+    for (const t of [m.id.toLowerCase(), ...nameTerms(m.name)]) {
+      const at = low.indexOf(t);
+      if (at >= 0 && (!best || t.length > best.len)) best = { len: t.length, at };
+    }
+    if (best) hits.push({ m, ...best });
+  }
+  // 被更長的名稱涵蓋的就不算（「Shake」落在已經比到的「Shake Blur」裡）
+  hits.sort((a, b) => b.len - a.len);
+  const taken: [number, number][] = [];
+  const out: Module[] = [];
+  for (const h of hits) {
+    if (taken.some(([a, b]) => h.at >= a && h.at + h.len <= b)) continue;
+    taken.push([h.at, h.at + h.len]);
+    out.push(h.m);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 /** 工具呼叫讀了哪些模組（顯示用的名稱） */
 export function toolRefs(name: string, args: Record<string, unknown>, modules: Module[]): string[] {
   if (name !== 'get_modules') return [];

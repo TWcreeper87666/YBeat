@@ -14,6 +14,12 @@ import { useLayout } from './uiStore';
  * - float 參數加了 @box(點)：以該點為中心、縮放後的畫面框，拖角落改大小
  */
 
+import { faceInFrame, followOf, withOffset, type Follow, type FollowMap } from '../engine/follow';
+import { faceClipUnder, makeCtx } from '../engine/renderer';
+import { fxLevel } from '../engine/tracks';
+import { FollowIcon } from './followUi';
+import { useFaces } from '../engine/face';
+
 const SNAP_PX = 8;
 
 interface Target {
@@ -24,6 +30,24 @@ interface Target {
   values: ParamValues;
   /** 寫入一個參數（point 傳 [x, y]） */
   set(name: string, v: number | number[]): void;
+  /** 跟隨臉部的 point 參數：這一格臉的位置（沒偵測到 = 不在裡面）與設定；拖曳時改偏移 */
+  follow?: Record<string, { face: [number, number]; f: Follow }>;
+  setFollow?(name: string, f: Follow): void;
+}
+
+/** 跟隨臉部：每個跟隨中的 point 參數，這一格臉在畫面上的位置 */
+function followInfo(defs: ParamDef[], map: FollowMap | undefined, src: (f: Follow) => { clip: Clip; local: number } | null | undefined) {
+  const s = useStore.getState();
+  const media = new Map(s.media.map((m) => [m.id, m]));
+  const modules = new Map(s.modules.map((m) => [m.id, m]));
+  const out: Record<string, { face: [number, number]; f: Follow }> = {};
+  for (const d of defs) {
+    const f = followOf(d, map);
+    const c = f && src(f);
+    const face = c && faceInFrame(c.clip, media.get(c.clip.mediaId), c.local, modules, s.format.w / s.format.h);
+    if (f && face) out[d.name] = { face, f };
+  }
+  return out;
 }
 
 /** 特效（特效軌 / 片段特效）：有關鍵影格的在目前時間打 key，沒有就改固定值 */
@@ -42,6 +66,7 @@ function fxWriter(host: Host, ch: (c: string) => string, keysOf: () => Record<st
 const hasGizmo = (defs: ParamDef[]) => defs.some((d) => d.type === 'point');
 
 function useTargets(): Target[] {
+  useFaces((f) => f.ver); // 臉部偵測有新結果：把手位置要更新
   const sel = useStore((s) => s.selection);
   const time = useStore((s) => s.time);
   const effects = useStore((s) => s.effects);
@@ -69,6 +94,11 @@ function useTargets(): Target[] {
           defs,
           values: at(defs, fx.params, fx.keys, local),
           set: fxWriter(host, (c) => c, () => useStore.getState().effects.find((f) => f.id === fx.id)?.keys, local),
+          follow: followInfo(defs, fx.follow, () => faceClipUnder(makeCtx(useStore.getState()), fxLevel(useStore.getState().tracks, fx.track), time, fx.faceFrom)),
+          setFollow: (name, f) => {
+            const cur = useStore.getState().effects.find((x) => x.id === fx.id);
+            if (cur) useStore.getState().updateEffect(fx.id, { follow: { ...(cur.follow ?? {}), [name]: f } });
+          },
         });
     }
   }
@@ -83,7 +113,18 @@ function useTargets(): Target[] {
         const defs = parseParams(m.code);
         if (!hasGizmo(defs)) continue;
         const keysOf = () => useStore.getState().clips.find((x) => x.id === c.id)?.effects?.find((x) => x.id === f.id)?.keys;
-        out.push({ key: `cfx:${f.id}`, label: displayName(m.name), defs, values: at(defs, f.params, f.keys, local), set: fxWriter(host, (ch) => cfxCh(f.id, ch), keysOf, local) });
+        out.push({
+          key: `cfx:${f.id}`,
+          label: displayName(m.name),
+          defs,
+          values: at(defs, f.params, f.keys, local),
+          set: fxWriter(host, (ch) => cfxCh(f.id, ch), keysOf, local),
+          follow: followInfo(defs, f.follow, () => ({ clip: c, local })),
+          setFollow: (name, fo) => {
+            const cur = useStore.getState().clips.find((x) => x.id === c.id)?.effects?.find((x) => x.id === f.id);
+            if (cur) useStore.getState().updateClipFx(c.id, f.id, { follow: { ...(cur.follow ?? {}), [name]: fo } });
+          },
+        });
       }
     }
   }
@@ -104,6 +145,19 @@ function useTargets(): Target[] {
             const cur = useStore.getState().clips.find((x) => x.id === clipId);
             const t = side === 'out' ? cur?.transitionOut : cur?.transitionIn;
             if (t) useStore.getState().updateTransition(clipId, { params: { ...t.params, [name]: v } }, side);
+          },
+          // 轉入：前一段 = 同軌前一個片段、後一段 = 這個片段；轉出：前一段 = 這個片段（後面沒有片段）
+          follow: followInfo(defs, tr.follow, (f) => {
+            const sorted = sortClips(clips.filter((x) => x.track === c.track));
+            const i = sorted.findIndex((x) => x.id === c.id);
+            const from = side === 'out' ? c : sorted[i - 1] ?? c;
+            const pick = f.side === 'to' ? c : from;
+            return { clip: pick, local: time - pick.start };
+          }),
+          setFollow: (name, f) => {
+            const cur = useStore.getState().clips.find((x) => x.id === clipId);
+            const t = side === 'out' ? cur?.transitionOut : cur?.transitionIn;
+            if (t) useStore.getState().updateTransition(clipId, { follow: { ...(t.follow ?? {}), [name]: f } }, side);
           },
         });
     }
@@ -169,7 +223,9 @@ function TargetGizmos({ t, W, H, setGuides }: { t: Target; W: number; H: number;
           );
         }
         if (d.type === 'point') {
-          const [x, y] = t.values[d.name] as number[];
+          // 跟隨臉部：把手在「臉 + 偏移」，拖曳改偏移
+          const fol = t.follow?.[d.name];
+          const [x, y] = fol ? withOffset(fol.face, fol.f) : (t.values[d.name] as number[]);
           const onDown = (e: React.PointerEvent) =>
             drag(e, (p, ev) => {
               let nx = p.x, ny = p.y;
@@ -182,11 +238,16 @@ function TargetGizmos({ t, W, H, setGuides }: { t: Target; W: number; H: number;
                 g = { x: sx.line, y: sy.line };
               }
               setGuides(g);
-              t.set(d.name, [Math.round((nx / W) * 10000) / 10000, Math.round((ny / H) * 10000) / 10000]);
+              const pt = [Math.round((nx / W) * 10000) / 10000, Math.round((ny / H) * 10000) / 10000];
+              if (fol && t.setFollow) {
+                const r4 = (v: number) => Math.round(v * 10000) / 10000;
+                const off: [number, number] = [r4(pt[0] - fol.face[0]), r4(pt[1] - fol.face[1])];
+                t.setFollow(d.name, { ...fol.f, offset: off[0] || off[1] ? off : undefined });
+              } else t.set(d.name, pt);
             }, () => setGuides({ x: null, y: null }));
           return (
-            <div key={d.name} className="param-pt" style={{ left: x * W, top: y * H }} onPointerDown={onDown} title={`${t.label} · ${$t(d.label)}`}>
-              <span className="mask-tag">{$t(d.label)}</span>
+            <div key={d.name} className={`param-pt ${fol ? 'follow' : ''}`} style={{ left: x * W, top: y * H }} onPointerDown={onDown} title={`${t.label} · ${$t(d.label)}`}>
+              <span className="mask-tag">{$t(d.label)}{fol && <FollowIcon />}</span>
             </div>
           );
         }

@@ -1,6 +1,7 @@
 import { $t } from '../i18n';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
+import { setFps, type TimeGrid } from '../engine/rulerTicks';
 import type { DropFit, TrackKind } from '../store';
 import type { MediaPlacement } from '../engine/mediaBatch';
 
@@ -37,6 +38,8 @@ interface Layout {
   scrubAudio: boolean;
   /** 節拍提前（1/60 秒）：節拍格線 / 吸附 / 節拍分割都往前移這麼多，畫面先切、聲音後到，看起來才對拍 */
   beatLead: number;
+  /** 時間軸格線：一格 1/30 或 1/60 秒 */
+  timeGrid: TimeGrid;
   /** 時間軸滾輪：horizontal = 直接滾左右捲、Shift 上下捲；vertical = 直接滾上下捲、Shift 左右捲 */
   wheelScroll: 'horizontal' | 'vertical';
   /** 時間軸上，上層（蓋在上面的）軌道顯示在下方還是上方 */
@@ -61,7 +64,7 @@ interface Layout {
   set(p: Partial<Omit<Layout, 'set' | 'reset'>>): void;
   reset(): void;
 }
-const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, beatDivision: 1 as const, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], previewScale: 1, repeat: false, scrubAudio: true, beatLead: 4, wheelScroll: 'horizontal' as Layout['wheelScroll'], upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300, libCard: 84, libRow: 30, previewBg: '', trackSize: 'm' as Layout['trackSize'] };
+const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, beatDivision: 1 as const, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], previewScale: 1, repeat: false, scrubAudio: true, beatLead: 4, timeGrid: 60 as TimeGrid, wheelScroll: 'horizontal' as Layout['wheelScroll'], upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300, libCard: 84, libRow: 30, previewBg: '', trackSize: 'm' as Layout['trackSize'] };
 
 export const useLayout = create<Layout>()(
   persist(
@@ -77,6 +80,11 @@ export const useLayout = create<Layout>()(
     },
   ),
 );
+// 時間軸格線：引擎不碰 UI 設定，由這裡同步過去
+setFps(useLayout.getState().timeGrid);
+useLayout.subscribe((s, p) => {
+  if (s.timeGrid !== p.timeGrid) setFps(s.timeGrid);
+});
 
 // ───────────── 提示訊息 ─────────────
 
@@ -135,7 +143,8 @@ export type DragPayload =
 export type DropTarget =
   | { kind: 'lane'; lane: TrackKind; idx: number; time: number; duration: number; label: string; items?: MediaPlacement[]; overlap?: { fit: DropFit | null; replaceId?: string } }
   | { kind: 'clip'; clipId: string; action: 'transition' | 'transitionOut' | 'remap' | 'relink' | 'replace' | 'effect' | 'mask'; valid: boolean }
-  | { kind: 'effect'; fxId: string }
+  /** stack = 疊加到這個特效方塊上（沒有 = 取代） */
+  | { kind: 'effect'; fxId: string; stack?: boolean }
   | null;
 
 export interface DragState {
@@ -199,3 +208,6 @@ export function useEditorMode(landscape: boolean): 'stacked' | 'side' | null {
   if (!open) return null;
   return pref === 'auto' ? (landscape ? 'stacked' : 'side') : pref;
 }
+
+/** 修剪片段時預覽暫時顯示的時間（拖結尾 = 最後一格、拖開頭 = 第一格）；null = 照播放頭。播放頭本身不動 */
+export const useTrimView = create<{ t: number | null }>(() => ({ t: null }));

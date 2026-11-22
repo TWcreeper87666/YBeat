@@ -11,7 +11,7 @@ import { getRenderer, makeCtx } from '../engine/renderer';
 import { addMediaBlob } from '../engine/media';
 import { GridButton } from './GridOverlay';
 import { setScrubbing } from '../engine/audio';
-import { snapFrame, tc } from '../engine/rulerTicks';
+import { fps, snapFrame, tc } from '../engine/rulerTicks';
 import { SourceOverlay, useSource } from './SourcePanel';
 
 const fmt = (t: number) => tc(t);
@@ -59,7 +59,7 @@ function Transport() {
   /** 播放列上的位置 → 片段內 / 專案時間（回傳的是播放列上的時間，0 ~ total） */
   const tAt = (x: number) => {
     const r = barRef.current!.getBoundingClientRect();
-    return Math.min(total - (scope ? 1 / 60 : 0), Math.max(0, ((x - r.left) / r.width) * total));
+    return Math.min(total - (scope ? 1 / fps() : 0), Math.max(0, ((x - r.left) / r.width) * total));
   };
 
   const scrub = (e: React.PointerEvent) => {
@@ -81,7 +81,7 @@ function Transport() {
     window.addEventListener('pointerup', up);
   };
 
-  const step = (d: number) => () => S.setTime(scope ? Math.min(scope.b - 1 / 60, Math.max(scope.a, S.time + d)) : Math.max(0, S.time + d));
+  const step = (d: number) => () => S.setTime(scope ? Math.min(scope.b - 1 / fps(), Math.max(scope.a, S.time + d)) : Math.max(0, S.time + d));
 
   return (
     <div className={`transport ${ex ? 'exporting' : ''}`}>
@@ -102,10 +102,10 @@ function Transport() {
       </div>
       <div className="transport-row">
         <button className="tp skip" title={$t('回到開頭 (Home)')} onClick={() => S.setTime(t0)}><SkipBack size={15} /></button>
-        <button className="tp step" title={$t('上一格 (←)')} onClick={step(-1 / 60)}><StepBack size={15} /></button>
+        <button className="tp step" title={$t('上一格 (←)')} onClick={step(-1 / fps())}><StepBack size={15} /></button>
         <button className="tp play" title={$t('播放 / 暫停 (Space)')} onClick={S.togglePlay}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
-        <button className="tp step" title={$t('下一格 (→)')} onClick={step(1 / 60)}><StepForward size={15} /></button>
-        <button className="tp skip" title={$t('到結尾 (End)')} onClick={() => S.setTime(scope ? scope.b - 1 / 60 : dur)}><SkipForward size={15} /></button>
+        <button className="tp step" title={$t('下一格 (→)')} onClick={step(1 / fps())}><StepForward size={15} /></button>
+        <button className="tp skip" title={$t('到結尾 (End)')} onClick={() => S.setTime(scope ? scope.b - 1 / fps() : dur)}><SkipForward size={15} /></button>
         <span className="tp-time">{fmt(scope ? local : ex ? ex.t : time)} <span className="muted tp-total">/ {fmt(total)}</span></span>
         <span className="spacer" />
         {loop && !scope && <button className="tp on" title={$t('停止循環 (Esc)')} onClick={() => S.setLoop(null)}><Repeat1 size={15} /></button>}

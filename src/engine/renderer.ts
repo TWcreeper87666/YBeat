@@ -11,7 +11,9 @@ import { clipSource, plainSpeed } from './remap';
 import { MATTE_SIZE, matteAt, requestMatte } from './matte';
 import { clipTransformAt } from './transform';
 import { evalKeys, type Keyframe } from './keyframes';
-import { cutPoints, cutTracks, triggerBeats, triggerWindow } from './trigger';
+import { faceInFrame, followOf, withOffset, type Follow, type FollowMap } from './follow';
+import { animFrameAt, animImage, animImageReady } from './animImage';
+import { cutPoints, cutTracks, fxWindow, triggerBeats, triggerWindow } from './trigger';
 
 export interface RenderCtx {
   clips: Clip[];
@@ -67,6 +69,25 @@ export function sortClips(clips: Clip[]) {
 }
 
 /** 單一軌道在時間 t 的狀態（clips 需已排序） */
+/**
+ * 特效軌方塊（調整圖層，level = 它下面有幾條影片軌）跟隨臉部時看的片段：
+ * track 有指定 → 那條影片軌這一刻的片段；沒有 → 底下由上往下第一個有開臉部追蹤的片段。
+ */
+export function faceClipUnder(ctx: Pick<RenderCtx, 'videoTracks' | 'tracks'>, level: number, t: number, track?: number): { clip: Clip; local: number } | null {
+  const at = (i: number) => {
+    if (ctx.tracks.video[i]?.hidden || !ctx.videoTracks[i]) return null;
+    const fr = computeFrame(ctx.videoTracks[i], t);
+    const c = fr.kind === 'clip' ? fr.clip : fr.kind === 'transition' ? (fr.progress < 0.5 ? fr.A ?? fr.B : fr.B ?? fr.A) : null;
+    return c && !c.text && c.faceTrack ? { clip: c, local: t - c.start } : null;
+  };
+  if (track != null) return at(track);
+  for (let i = Math.min(level, ctx.videoTracks.length) - 1; i >= 0; i--) {
+    const r = at(i);
+    if (r) return r;
+  }
+  return null;
+}
+
 export function computeFrame(sorted: Clip[], t: number): FrameInfo {
   for (let i = 0; i < sorted.length; i++) {
     const c = sorted[i];
@@ -457,14 +478,14 @@ export class Renderer {
   /** 這一格的音訊訊號（render 開頭算一次） */
   private sig: AudioSignal = { level: 0, beat: 0 };
 
-  private setParams(p: Prog, values: ParamValues, keys?: Record<string, Keyframe[]>, local = 0, drive?: Record<string, AudioDrive>) {
+  private setParams(p: Prog, values: ParamValues, keys?: Record<string, Keyframe[]>, local = 0, drive?: Record<string, AudioDrive>, pts?: Record<string, number[]>) {
     const gl = this.gl;
     const v = resolveParams(p.defs, values);
     for (const d of p.defs) {
       const l = this.loc(p, d.name);
       if (!l) continue;
       const dr = drive?.[d.name];
-      const x = dr && isNumeric(d) ? dr.min + (dr.max - dr.min) * (dr.source === 'beat' ? this.sig.beat : this.sig.level) : paramAt(d, v, keys, local);
+      const x = pts?.[d.name] ?? (dr && isNumeric(d) ? dr.min + (dr.max - dr.min) * (dr.source === 'beat' ? this.sig.beat : this.sig.level) : paramAt(d, v, keys, local));
       if (d.type === 'float') gl.uniform1f(l, Number(x));
       else if (d.type === 'int') gl.uniform1i(l, Math.round(Number(x)));
       else if (d.type === 'bool') gl.uniform1i(l, x ? 1 : 0);
@@ -473,6 +494,23 @@ export class Renderer {
       else if (d.type === 'curve') gl.uniform4f(l, ...(x as [number, number, number, number]));
       else gl.uniform3f(l, ...hexToRgb(String(x)));
     }
+  }
+
+  /**
+   * 跟著臉的 point 參數：這一格的位置（畫面座標 + 偏移）。pick = 要看哪個片段的臉（轉場依 side 選前 / 後一段）。
+   * 沒有臉 / 還沒偵測好的參數不會出現在結果裡（照原本的值）。
+   */
+  private followed(g: Prog, map: FollowMap | undefined, pick: (f: Follow) => { clip: Clip; local: number } | null | undefined, ctx: RenderCtx) {
+    let out: Record<string, number[]> | undefined;
+    for (const d of g.defs) {
+      const f = followOf(d, map);
+      if (!f) continue;
+      const s = pick(f);
+      if (!s) continue;
+      const pt = faceInFrame(s.clip, ctx.media.get(s.clip.mediaId), s.local, ctx.modules, this.w / this.h);
+      if (pt) (out ??= {})[d.name] = withOffset(pt, f);
+    }
+    return out;
   }
 
   private clear(target: Target, opaque: boolean) {
@@ -509,7 +547,31 @@ export class Renderer {
     return img;
   }
 
-  private imageTex(media: Media): WebGLTexture | null {
+  /** 動態圖片目前上傳到貼圖的是第幾格（同一個素材共用一張貼圖：畫之前才換成這個片段要的那一格） */
+  private animShown = new Map<string, number>();
+  private animCanvas: OffscreenCanvas | null = null;
+
+  /** 圖片的貼圖；動態圖片（GIF…）依片段內時間 local 換格、循環播放 */
+  private imageTex(media: Media, local = 0): WebGLTexture | null {
+    const a = animImage(media);
+    if (a) {
+      const key = 'anim:' + media.id;
+      const { index, image } = animFrameAt(a, local);
+      if (this.animShown.get(key) !== index || !this.textures.has(key)) {
+        // WebGL 上傳 ImageBitmap 時不理 UNPACK_FLIP_Y（會上下顛倒）：先畫到 canvas 再上傳，跟一般圖片一樣翻
+        const c = (this.animCanvas ??= new OffscreenCanvas(1, 1));
+        if (c.width !== image.width || c.height !== image.height) {
+          c.width = image.width;
+          c.height = image.height;
+        }
+        const g = c.getContext('2d')!;
+        g.clearRect(0, 0, c.width, c.height);
+        g.drawImage(image, 0, 0);
+        this.upload(key, c);
+        this.animShown.set(key, index);
+      }
+      return this.textures.get(key)!;
+    }
     const key = 'img:' + media.id;
     const img = this.image(media);
     if (this.uploaded.has(key)) return this.textures.get(key)!;
@@ -694,7 +756,15 @@ export class Renderer {
 
   /** 把片段畫到 target；blend=true 時疊在現有內容上 */
   private drawClip(target: Target, clip: Clip, t: number, ctx: RenderCtx, mode: 'preview' | 'export', playing: boolean, blend: Blend) {
-    const on = (clip.effects ?? []).filter((f) => f.enabled !== false);
+    const local = t - clip.start;
+    // 不在作用範圍裡的特效整個跳過（不跑 shader）
+    const wins = new Map<string, { t0: number; d: number }>();
+    const on = (clip.effects ?? []).filter((f) => {
+      if (f.enabled === false) return false;
+      const w = fxWindow(f.timing, local, clip.duration, clip.start);
+      if (w) wins.set(f.id, w);
+      return !!w;
+    });
     // 片段本身的遮罩一律最後套用（切出片段的形狀）
     const fxs = [...on.filter((f) => !f.base), ...on.filter((f) => f.base)];
     const progs = fxs.map((f) => {
@@ -706,13 +776,14 @@ export class Renderer {
     const [, , , , CA, CB, CM] = this.targets;
     this.clear(CA, false);
     this.drawClipRaw(CA, clip, t, ctx, mode, playing, false);
-    const local = t - clip.start;
     let cur = CA;
     fxs.forEach((f, i) => {
       const g = progs[i];
       if (!g) return;
       const out = cur === CA ? CB : CA;
-      this.runEffect(cur, out, CM, f, g, t, local, clip.duration);
+      // 特效內時間從這次播放開始算；參數 / 遮罩的關鍵影格仍然用片段內時間
+      const w = wins.get(f.id)!;
+      this.runEffect(cur, out, CM, f, g, t, local - w.t0, w.d, local, this.followed(g, f.follow, () => ({ clip, local }), ctx));
       cur = out;
     });
     this.pass(target, this.blit, (p) => this.bindTex(p, 'u_tex', cur.tex, 0), blend);
@@ -732,7 +803,7 @@ export class Renderer {
       return this.drawTex(target, clip, local, this.missingTex(), fake, blend);
     }
     let matteSrc = 0;
-    if (media.kind === 'image') tex = this.imageTex(media);
+    if (media.kind === 'image') tex = this.imageTex(media, local);
     else if (media?.kind === 'video') {
       const { src, rate } = clipSource(clip, local, media, ctx.modules);
       matteSrc = src;
@@ -889,10 +960,10 @@ export class Renderer {
   }
 
   /** 套用一個特效（有遮罩時只作用在遮罩範圍），回傳新的目前畫面 */
-  private applyFx(cur: Target, fx: Parameters<Renderer['runEffect']>[3], g: Prog, t: number, local: number, duration: number): Target {
+  private applyFx(cur: Target, fx: Parameters<Renderer['runEffect']>[3], g: Prog, t: number, local: number, duration: number, pts?: Record<string, number[]>): Target {
     const [TA, , P0, P1] = this.targets;
     const out = cur === P0 ? P1 : P0;
-    this.runEffect(cur, out, TA, fx, g, t, local, duration);
+    this.runEffect(cur, out, TA, fx, g, t, local, duration, local, pts);
     return out;
   }
 
@@ -901,13 +972,17 @@ export class Renderer {
     src: Target,
     out: Target,
     tmp: Target,
-    fx: { moduleId?: string; params: ParamValues; keys?: Record<string, Keyframe[]>; mask?: Mask; audio?: Record<string, AudioDrive> },
+    fx: { moduleId?: string; params: ParamValues; keys?: Record<string, Keyframe[]>; mask?: Mask; audio?: Record<string, AudioDrive>; follow?: FollowMap },
     g: Prog,
     t: number,
     local: number,
     duration: number,
+    /** 關鍵影格 / 遮罩用的時間（片段特效有作用範圍時跟 local 不同） */
+    keyLocal = local,
+    /** 跟著臉的 point 參數（算好的位置） */
+    pts?: Record<string, number[]>,
   ) {
-    let mask = maskAt(fx.mask, fx.keys, local);
+    let mask = maskAt(fx.mask, fx.keys, keyLocal);
     if (fx.moduleId === CLIP_MASK_ID) {
       // 片段遮罩：沒設形狀 = 不動；有形狀 = 反轉後套用（遮罩內保留原畫面、遮罩外變透明）
       if (!mask) return this.pass(out, this.blit, (p) => this.bindTex(p, 'u_tex', src.tex, 0));
@@ -917,7 +992,7 @@ export class Renderer {
     this.pass(dst, g, (p) => {
       this.bindTex(p, 'u_tex', src.tex, 0);
       this.setCommon(p, t, local, duration, local / duration);
-      this.setParams(p, fx.params, fx.keys, local, fx.audio);
+      this.setParams(p, fx.params, fx.keys, keyLocal, fx.audio, pts);
     });
     if (mask) this.maskPass(out, src, tmp, mask);
   }
@@ -1003,7 +1078,7 @@ export class Renderer {
         for (const f of [fx, ...(fx.stack ?? []).filter((x) => x.enabled !== false)]) {
           const m = ctx.modules.get(f.moduleId);
           const g = m ? this.moduleProg(m) : null;
-          if (g) cur = this.applyFx(cur, f, g, t, t - w.t0, w.d);
+          if (g) cur = this.applyFx(cur, f, g, t, t - w.t0, w.d, this.followed(g, f.follow, () => faceClipUnder(ctx, lv, t, fx.faceFrom), ctx));
         }
       }
     };
@@ -1038,7 +1113,11 @@ export class Renderer {
             this.bindTex(p, 'u_from', TA.tex, 0);
             this.bindTex(p, 'u_to', TB.tex, 1);
             this.setCommon(p, t, fr.progress * fr.d, fr.d, fr.progress);
-            this.setParams(p, tr.params);
+            const side = (f: Follow) => {
+              const c = f.side === 'to' ? fr.B ?? fr.A : fr.A ?? fr.B;
+              return c ? { clip: c, local: t - c.start } : null;
+            };
+            this.setParams(p, tr.params, undefined, 0, undefined, this.followed(g, tr.follow, side, ctx));
           }, trBlend);
         } else {
           this.pass(P0, this.blit, (p) => this.bindTex(p, 'u_tex', fr.progress < 0.5 ? TA.tex : TB.tex, 0), trBlend);
@@ -1185,6 +1264,7 @@ export class Renderer {
       if (media.kind === 'image') {
         const img = this.image(media);
         if (!img.complete) await img.decode().catch(() => {});
+        await animImageReady(media); // 動態圖片：匯出前要解完，不然前幾格會是靜態的
         continue;
       }
       if (media.kind !== 'video') continue;
@@ -1230,7 +1310,7 @@ export function applyTransitionBlocks(clips: Clip[], track: number, blocks: FxIt
   return clips.map((c, i) => {
     if (i === 0 || c.transitionIn || !adjacent(clips[i - 1], c)) return c;
     const b = mine.find((x) => c.start >= x.start - ADJ_EPS && c.start <= x.start + x.duration + ADJ_EPS);
-    return b ? { ...c, transitionIn: { moduleId: b.moduleId, params: b.params, duration: b.trDur ?? 0.4 } } : c;
+    return b ? { ...c, transitionIn: { moduleId: b.moduleId, params: b.params, duration: b.trDur ?? 0.4, ...(b.follow ? { follow: b.follow } : {}) } } : c;
   });
 }
 

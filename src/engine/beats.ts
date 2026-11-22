@@ -201,6 +201,19 @@ export function timelineBeats(s: { audios: AudioClip[]; clips: Clip[]; media: Me
   return dedup;
 }
 
+/** 節拍對齊到時間軸格線（snap = 取最近一格）；落在同一格的只留比較強的（重拍標記保留） */
+export function snapBeats(beats: Beat[], snap: (t: number) => number): Beat[] {
+  const out: Beat[] = [];
+  for (const b of beats) {
+    const t = snap(b.t);
+    const prev = out[out.length - 1];
+    if (prev && Math.abs(prev.t - t) < 1e-6) {
+      out[out.length - 1] = { ...(b.s > prev.s ? b : prev), t, down: b.down || prev.down };
+    } else out.push({ ...b, t });
+  }
+  return out;
+}
+
 /** 第一個 ≥ t 的節拍索引（全部都比較早 = beats.length） */
 export function beatIndexAtOrAfter(beats: { t: number }[], t: number): number {
   let lo = 0, hi = beats.length;

@@ -74,7 +74,7 @@ const zoomPulse = `// 縮放脈衝（Zoom Bounce）：鼓點上彈一下
 // @param amount: float = 0.15 (0..1) "放大量"
 // @param blur: float = 0.4 (0..1) "放射模糊"
 // @param bounce: bool = true "回彈"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 // @param ease: curve = inOut3 "回落曲線"
 vec4 effect(vec2 uv) {
   float p = u_progress;
@@ -202,7 +202,7 @@ const twirl = `// 漩渦 Twirl
 // @param angle: float = 3 (-10..10) "旋轉量"
 // @param radius: float = 0.6 (0.1..1.5) "範圍"
 // @param decay: float = 2 (0..6) "衰減"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 vec4 effect(vec2 uv) {
   vec2 p = uv - center;
   p.x *= ASPECT;
@@ -435,7 +435,7 @@ vec4 transition(vec2 uv) {
 const zoomBlurTr = `// 縮放模糊轉場（拉遠 → 推近）
 // @param strength: float = 0.6 (0..2) "縮放量"
 // @param blur: float = 0.5 (0..1) "模糊"
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 vec4 radialS(sampler2D s, vec2 uv, float z, float b) {
   vec2 c = center;
   vec2 base = zoomUV(uv, z, c);
@@ -472,7 +472,7 @@ vec4 effect(vec2 uv) {
 `;
 
 const scaleIn = `// 縮放推入：新畫面從小放大蓋上來
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 // @param from: float = 0.3 (0..1) "起始大小" @box(center)
 // @param ease: curve = back "曲線"
 // @param fadeIn: curve = 0.3,1,0,1 "淡入" @none(1)
@@ -489,7 +489,7 @@ vec4 transition(vec2 uv) {
 `;
 
 const scaleOut = `// 縮放推出：舊畫面縮小飛走，露出新畫面
-// @param center: point = 0.5,0.5 "中心"
+// @param center: point = 0.5,0.5 "中心" @follow(face)
 // @param to: float = 0.2 (0..1) "結束大小" @box(center)
 // @param spin: float = 0 (-2..2) "旋轉圈數"
 // @param ease: curve = inOut3 "曲線"
@@ -576,14 +576,14 @@ export const EXTRA_MODULES: Module[] = [
   mk('fx-shakeblur', 'effect', '模糊晃動 Shake Blur', shakeBlur, 2),
   mk('fx-handheld', 'effect', '手持晃動 Handheld', handheld, 2),
   mk('fx-motionblur', 'effect', '動態模糊 Motion Blur', motionBlur, 2),
-  mk('fx-zoompulse', 'effect', '縮放脈衝 Zoom Bounce', zoomPulse, 3),
+  mk('fx-zoompulse', 'effect', '縮放脈衝 Zoom Bounce', zoomPulse, 4),
   mk('fx-glitch', 'effect', '故障 Glitch', glitch, 2),
   mk('fx-strobe', 'effect', '頻閃 Strobe', strobe),
   mk('fx-invert', 'effect', '反相閃 Invert', invert, 2),
   mk('fx-hue', 'effect', '色相偏移 Hue Shift', hueShift),
   mk('fx-glow', 'effect', '光暈 Glow', glow),
   mk('fx-wave', 'effect', '波浪扭曲 Wave Warp', wave),
-  mk('fx-twirl', 'effect', '漩渦 Twirl', twirl, 3),
+  mk('fx-twirl', 'effect', '漩渦 Twirl', twirl, 4),
   mk('fx-mirror', 'effect', '鏡像 Mirror', mirror),
   mk('fx-split', 'effect', '分割畫面 Split Screen', split),
   mk('fx-kaleido', 'effect', '萬花筒 Kaleidoscope', kaleido, 2),
@@ -600,9 +600,9 @@ export const EXTRA_MODULES: Module[] = [
   mk('tr-glitch', 'transition', '故障 Glitch', glitchTr),
   mk('tr-stretch', 'transition', '拉伸 Stretch', stretch, 2),
   mk('tr-clock', 'transition', '時鐘擦除 Radial', clockWipe),
-  mk('tr-zoomblur', 'transition', '縮放模糊 Zoom Blur', zoomBlurTr, 3),
-  mk('tr-scalein', 'transition', '縮放推入 Scale In', scaleIn, 3),
-  mk('tr-scaleout', 'transition', '縮放推出 Scale Out', scaleOut, 4),
+  mk('tr-zoomblur', 'transition', '縮放模糊 Zoom Blur', zoomBlurTr, 4),
+  mk('tr-scalein', 'transition', '縮放推入 Scale In', scaleIn, 4),
+  mk('tr-scaleout', 'transition', '縮放推出 Scale Out', scaleOut, 5),
   mk('tr-push', 'transition', '推移 Push', pushTr, 2),
   mk('tr-flip', 'transition', '翻轉 Flip', flipTr, 2),
   mk('tr-rewind', 'transition', '倒帶 Rewind', rewindTr),

@@ -30,15 +30,17 @@ interface Prefs {
   stillDur: number;
   /** 轉場的預設長度（秒） */
   transDur: number;
+  /** 專案有變更就自動存檔（關掉 = 只有 Ctrl+S 才存） */
+  autosave: boolean;
   textStyles: UserTextStyle[];
   fxCombos: FxCombo[];
   set(p: Partial<Omit<Prefs, 'set'>>): void;
 }
 
 export const usePrefs = create<Prefs>()(
-  persist((set) => ({ stillDur: 2, transDur: 0.4, textStyles: [], fxCombos: [], set: (p) => set(p) }), {
+  persist((set) => ({ stillDur: 2, transDur: 0.4, autosave: true, textStyles: [], fxCombos: [], set: (p) => set(p) }), {
     name: 'ybeat-prefs',
-    partialize: (s) => ({ stillDur: s.stillDur, transDur: s.transDur, textStyles: s.textStyles, fxCombos: s.fxCombos }),
+    partialize: (s) => ({ stillDur: s.stillDur, transDur: s.transDur, autosave: s.autosave, textStyles: s.textStyles, fxCombos: s.fxCombos }),
   }),
 );
 

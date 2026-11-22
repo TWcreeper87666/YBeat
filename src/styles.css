@@ -445,6 +445,12 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 
 /* 預覽 */
 .grid-overlay, .snap-guides { position: absolute; left: 0; top: 0; pointer-events: none; }
+.follow-ico { display: inline-flex; vertical-align: -1px; margin-left: 4px; color: #ffd23f; }
+.face-overlay { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+.face-overlay rect { fill: none; stroke: #ffd23f; stroke-width: 2; }
+.face-overlay circle { fill: #ffd23f; }
+.face-status { position: absolute; left: 6px; top: 6px; padding: 2px 6px; border-radius: 4px; background: #000a; color: #ffd23f; font-size: 11px; pointer-events: none; }
+.face-status.error { color: #ff7d93; pointer-events: auto; }
 .grid-overlay line { stroke: #ffffff55; stroke-width: 1; vector-effect: non-scaling-stroke; }
 .grid-overlay line.center { stroke: #ffffffaa; }
 .grid-overlay rect.safe { fill: none; stroke: #29d3c288; stroke-dasharray: 5 4; vector-effect: non-scaling-stroke; }
@@ -653,6 +659,10 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .lib-thumb .fx-short { position: absolute; right: 3px; bottom: 3px; z-index: 2; display: flex; padding: 2px; border-radius: 3px; background: #000b; color: #ffd27a; pointer-events: none; }
 .lib-list .lib-thumb .fx-short { right: 1px; bottom: 1px; padding: 1px; }
 .lib-list .lib-thumb .fx-short svg { width: 8px; height: 8px; }
+.lib-thumb .fx-face { position: absolute; left: 3px; bottom: 3px; z-index: 2; display: flex; padding: 2px; border-radius: 3px; background: #000b; color: #ffd23f; pointer-events: none; }
+.lib-list .lib-thumb .fx-face { left: 1px; bottom: 1px; padding: 1px; }
+.lib-list .lib-thumb .fx-face svg { width: 8px; height: 8px; }
+.badge.face { color: #ffd23f; }
 
 /* ───────────── 效果控制（屬性） ───────────── */
 .inspector-panel { min-height: 100%; }
@@ -724,6 +734,21 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .ec-dim { background: #00000018; }
 .ec-lane { cursor: ew-resize; }
 .ec-span { position: absolute; top: 50%; height: 2px; margin-top: -1px; background: #ffb02e44; pointer-events: none; }
+.ec-hits { cursor: default; }
+.ec-hit { position: absolute; top: 4px; bottom: 4px; min-width: 3px; border-radius: 3px; background: #29d3c255; border: 1px solid #29d3c2aa; box-sizing: border-box; cursor: grab; z-index: 1; }
+.ec-hit:active { cursor: grabbing; }
+.ec-hit.sel { background: #29d3c2aa; border-color: #fff; }
+.ec-hit.all { left: 0; right: 0; background: #29d3c222; border-style: dashed; cursor: default; }
+.ec-hit.auto { cursor: default; background: #29d3c233; }
+.ec-hit i { position: absolute; top: -2px; bottom: -2px; width: 6px; cursor: ew-resize; }
+.ec-hit i.l { left: -3px; }
+.ec-hit i.r { right: -3px; }
+/* 跟時間軸的把手一樣：只有滑過的那一端亮；拖曳中、按住 Ctrl / Shift（多選）時不亮、游標照片段本身 */
+.ec-hit i:hover { background: #ffffff40; }
+body.hit-dragging .ec-hit i:hover, body.key-ctrl .ec-hit i:hover, body.key-shift .ec-hit i:hover { background: none; }
+body.key-ctrl .ec-hit i, body.key-shift .ec-hit i { cursor: inherit; }
+body.hit-dragging, body.hit-dragging * { cursor: grabbing !important; }
+body.hit-dragging.hit-resizing, body.hit-dragging.hit-resizing * { cursor: ew-resize !important; }
 .ec-key { position: absolute; top: 50%; width: 9px; height: 9px; margin: -4.5px 0 0 -4.5px; background: var(--tr); border: 1px solid #000; transform: rotate(45deg); cursor: grab; z-index: 2; }
 .ec-key.hold { background: #ff7d93; }
 .ec-key.sel { background: #fff; box-shadow: 0 0 0 2px var(--accent2); }
@@ -980,8 +1005,8 @@ svg.lucide { flex: none; }
 .drive-row .dragnum { width: 56px; flex: none; }
 .drive-hint { margin: 4px 10px 8px; line-height: 1.5; }
 /* 節拍格線：尺規上的刻度（重拍比較長）＋跨軌道的細線，顏色跟主題的青色一致 */
-.beat-mark { position: absolute; bottom: 0; height: 5px; border-left: 1px solid #ffffff45; pointer-events: none; }
-.beat-mark.down { height: 10px; border-left-color: var(--accent2); }
+.audio-beat { position: absolute; bottom: 0; height: 5px; border-left: 1px solid #ffffff70; pointer-events: none; }
+.audio-beat.down { height: 10px; border-left-color: var(--accent2); }
 .beat-line { position: absolute; top: 0; bottom: 0; left: 0; width: 0; border-left: 1px solid #ffffff10; pointer-events: none; }
 .beat-line.down { border-left-color: #29d3c238; }
 .snap-line { position: absolute; top: 0; bottom: 0; left: 0; width: 0; border-left: 1px dashed #ffd27a; box-shadow: 0 0 6px #ffd27a88; pointer-events: none; z-index: 7; }
@@ -1256,6 +1281,8 @@ body.panning, body.panning * { cursor: grabbing !important; }
 .ai-info { color: var(--muted); display: inline-flex; cursor: help; }
 .ai-key { flex: 1; min-width: 0; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; color: inherit; font: 12px ui-monospace, Consolas, monospace; }
 .ai-key:focus { outline: none; border-color: var(--accent2); }
+.ai-setup-col { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ai-custom { flex: none; resize: vertical; min-height: 48px; max-height: 200px; font-family: inherit; line-height: 1.5; }
 .ai-empty-setup { margin: auto 0; display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 16px; }
 .ai-empty-setup .ai-setup { width: 100%; max-width: 380px; border: 1px solid var(--line); border-radius: 10px; }
 .ai-logo { color: var(--accent2); }
@@ -1282,6 +1309,7 @@ body.panning, body.panning * { cursor: grabbing !important; }
 .ai-code { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #0b0c10; }
 .ai-code-head { display: flex; align-items: center; gap: 6px; padding: 4px 6px 4px 10px; background: #15171d; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 .ai-code-head .btn.small-h { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; }
+.ai-ops { margin: 0; padding: 6px 10px 6px 26px; font-size: 12px; }
 .ai-code-head .ec-icon { width: 22px; height: 22px; color: var(--muted); }
 .ai-code-head .ec-icon:hover { color: #fff; }
 .ai-code-lang { font: 11px ui-monospace, Consolas, monospace; color: var(--muted); text-transform: uppercase; }

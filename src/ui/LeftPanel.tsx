@@ -1,8 +1,9 @@
 import { $t, displayName } from '../i18n';
-import { AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2, Zap } from 'lucide-react';
+import { AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2, Zap, ScanFace } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { cutTracks, type FxTrigger } from '../engine/trigger';
-import { attachedAudioIds, keyOf, uid, type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
+import { attachedAudioIds, keyOf, uid, type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, type TrSide, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
+import { fxLevel } from '../engine/tracks';
 import type { Module } from '../modules/builtin';
 import { CATEGORIES, categoryOf } from '../modules/categories';
 import { importFiles, pickFiles, relinkWithPicker, removeMedia, removeMediaEverywhere } from '../engine/media';
@@ -17,7 +18,7 @@ import { CLIP_MASK_ID } from '../modules/extra';
 import { mediaBeats } from '../engine/beats';
 import { shapeName } from '../engine/maskShapes';
 import type { AnimProp, Bez, Keyframe } from '../engine/keyframes';
-import { isNumeric, isHitFx, paramAt, parseDuration, parseParams, parsePointCh, resolveParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
+import { isNumeric, isFaceAware, isHitFx, paramAt, parseDuration, parseParams, parsePointCh, resolveParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
 import { CurveEdit } from './CurveEdit';
 import { updateText } from '../engine/textAnchor';
 import { computeFrame, transitionWindow, sortClips, makeCtx } from '../engine/renderer';
@@ -51,6 +52,9 @@ import { newModule, openModuleEditor } from './CodePanel';
 import { FavButton, LibFilter, LibToolbar, byFavOrder, favSortOpts, match, onBlank, openPicker } from './Library';
 import { MaskLibrary, ShapeThumb, addClipMask, ensureClipBaseMask, setMaskShape } from './MaskPanel';
 import { openShapeDrawer } from './ShapeDrawer';
+import { followMenu } from './followUi';
+import { followOf, type Follow, type FollowMap } from '../engine/follow';
+import { requestFaces, useFaces } from '../engine/face';
 import { EffectControls, curveChannel, focusSection, cfxCh, clipChannels, clipHost, fxChannels, fxHost, maskChannels, updateStackFx, type Channel, type Section } from './EffectControls';
 
 // ───────────────────────── 素材 ─────────────────────────
@@ -367,6 +371,7 @@ function ModuleThumb({ m }: { m: Module }) {
     <div className="lib-thumb mod" style={url ? { backgroundImage: `url(${url})` } : undefined}>
       {!url && <span className="loading" />}
       {isHitFx(m) && <span className="fx-short" title={$t('衝擊特效')}><Zap size={10} fill="currentColor" /></span>}
+      {isFaceAware(m) && <span className="fx-face" title={$t('跟隨臉部')}><ScanFace size={10} /></span>}
     </div>
   );
 }
@@ -390,7 +395,7 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
   const favSet = new Set(favorites);
   const ofKind = all.filter((m) => m.kind === kind);
   const inCat = (m: Module, c: string) =>
-    c === 'all' || (c === 'fav' ? favSet.has(m.id) : c === 'hit' ? isHitFx(m) : c === 'hold' ? !isHitFx(m) : categoryOf(m) === c);
+    c === 'all' || (c === 'fav' ? favSet.has(m.id) : c === 'hit' ? isHitFx(m) : c === 'hold' ? !isHitFx(m) : c === 'face' ? isFaceAware(m) : categoryOf(m) === c);
   const filtered = ofKind.filter((m) => match(m.name, q) && inCat(m, cat));
   const modules = cat === 'fav' ? byFavOrder(filtered, (m) => m.id, favorites) : filtered;
   // 我的組合（只有特效分頁；挑選視窗不顯示）
@@ -408,6 +413,7 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
     { id: 'fav', label: $t('我的最愛') },
     ...(combos.length ? [{ id: 'combo', label: $t('我的組合') }] : []),
     ...(kind === 'effect' ? [{ id: 'hit', label: $t('衝擊'), icon: <Zap size={11} fill="currentColor" /> }, { id: 'hold', label: $t('持續') }] : []),
+    ...(kind === 'effect' || kind === 'transition' ? [{ id: 'face', label: $t('臉部'), icon: <ScanFace size={11} /> }] : []),
     ...CATEGORIES[kind],
     { id: 'custom', label: $t('自訂') },
   ].filter((c) => c.id === 'all' || c.id === 'fav' || c.id === 'combo' || ofKind.some((m) => inCat(m, c.id)));
@@ -762,6 +768,33 @@ const Switch = ({ v, on }: { v: boolean; on: (v: boolean) => void }) => (
   <label className="switch"><input type="checkbox" checked={v} onChange={(e) => on(e.target.checked)} /><span /></label>
 );
 
+/** 臉部追蹤的偵測進度 / 失敗重試（打開時就開始在背景偵測） */
+function FaceStatus({ clip, media }: { clip: Clip; media: Media }) {
+  useFaces((s) => s.ver);
+  const job = useFaces((s) => s.jobs[media.id]);
+  const err = useFaces((s) => s.errors[media.id]);
+  const modules = useStore((s) => s.modules);
+  const map = useMemo(() => new Map(modules.map((m) => [m.id, m])), [modules]);
+  useEffect(() => requestFaces(clip, media, map), [clip, media, map]);
+  const retry = () => {
+    const e = { ...useFaces.getState().errors };
+    delete e[media.id];
+    useFaces.setState({ errors: e });
+    requestFaces(clip, media, map);
+  };
+  if (job) {
+    const pct = Math.round((job.done / Math.max(1, job.total)) * 100);
+    return (
+      <span className="matte-status">
+        <span className="matte-bar"><i style={{ width: `${pct}%` }} /></span>
+        <span className="muted small">{pct}%</span>
+      </span>
+    );
+  }
+  if (err) return <button className="btn small" title={err} onClick={retry}><TriangleAlert size={12} /> {$t('重試')}</button>;
+  return <span className="muted small"><CircleCheck size={12} /> {$t('完成')}</span>;
+}
+
 /** AI 去背的計算進度 / 失敗重試 */
 function MatteStatus({ clip, media }: { clip: Clip; media: Media }) {
   useMatte((s) => s.ver);
@@ -1007,6 +1040,15 @@ function ClipInspector({ id }: { id: string }) {
     ],
     onReset: () => updateClip(clip.id, { aiMatte: undefined }),
   });
+  if (!isText && media && (media.kind === 'video' || media.kind === 'image')) sections.push({
+    id: 'face',
+    title: $t('臉部追蹤'),
+    rows: [
+      { label: $t('啟用'), node: <Switch v={!!clip.faceTrack} on={(v) => updateClip(clip.id, { faceTrack: v || undefined })} /> },
+      ...(clip.faceTrack ? [{ label: $t('狀態'), node: <FaceStatus clip={clip} media={media} /> }] : []),
+    ],
+    onReset: () => updateClip(clip.id, { faceTrack: undefined }),
+  });
 
   if (isVideo && remapMod && clip.remap.moduleId === CURVE_ID) {
     // 曲線模式：素材時間本身是一條關鍵影格曲線（往上正播、往下倒播、平的定格）
@@ -1097,7 +1139,7 @@ function ClipInspector({ id }: { id: string }) {
   );
 }
 
-type FxLike = { moduleId: string; params: ParamValues; keys?: Record<string, Keyframe[]>; mask?: Mask; audio?: Record<string, AudioDrive> };
+type FxLike = { moduleId: string; params: ParamValues; keys?: Record<string, Keyframe[]>; mask?: Mask; audio?: Record<string, AudioDrive>; follow?: FollowMap };
 
 /** 遮罩的屬性列：形狀（＋繪製）、在預覽中編輯、反轉，以及位置 / 大小等可打關鍵影格的屬性 */
 function maskBlock(
@@ -1180,7 +1222,7 @@ function effectSections(
   mod: Module | undefined,
   local: number,
   update: (p: Partial<FxLike>) => void,
-  o: { idBase: string; /** 從 store 拿最新的（挑選視窗開著時資料會變） */ fresh: () => FxLike | undefined; maskKey?: string; drawKey?: string; ch?: (id: string) => string; compact?: boolean; /** 這個特效是誰（右鍵「套用到相同特效」用） */ owner?: FxOwner; title?: string; actions?: React.ReactNode; badge?: React.ReactNode; dim?: boolean; onFork?: (id: string) => void; sampleColor?: boolean },
+  o: { idBase: string; /** 從 store 拿最新的（挑選視窗開著時資料會變） */ fresh: () => FxLike | undefined; maskKey?: string; drawKey?: string; ch?: (id: string) => string; compact?: boolean; /** 這個特效是誰（右鍵「套用到相同特效」用） */ owner?: FxOwner; title?: string; actions?: React.ReactNode; badge?: React.ReactNode; dim?: boolean; onFork?: (id: string) => void; sampleColor?: boolean; /** 看的片段有開臉部追蹤：point 參數可以跟隨臉部 */ faceTracking?: boolean; /** 加在主區塊最上面的列（特效軌方塊的追蹤軌道） */ topRows?: { label: string; node: React.ReactNode }[] },
 ): Section[] {
   const ch = o.ch ?? ((x: string) => x);
   const mapCh = (l: Channel[]) => l.map((c) => ({ ...c, id: ch(c.id) }));
@@ -1198,7 +1240,23 @@ function effectSections(
       return paramAt(d, resolveParams(defs, cur.params), cur.keys, local);
     });
   };
-  const withMenu = (l: Channel[]) => l.map((c) => ({ ...c, menu: menuFor(parsePointCh(c.id)?.name ?? c.id) }));
+  // 跟隨臉部（看的片段有開臉部追蹤時）：模組標了 @follow 的 point 參數有開關，打開時不顯示 X / Y（位置跟著臉，拖預覽上的點調偏移）；
+  // 沒標的 point 參數可以從右鍵打開
+  const followable = o.faceTracking ? defs.filter((d) => d.type === 'point' && (d.follow || f.follow?.[d.name])) : [];
+  const following = new Set(followable.filter((d) => followOf(d, f.follow)).map((d) => d.name));
+  const followRows = followable.map((d) => ({
+    label: followable.length > 1 ? `${$t('跟隨臉部')} · ${$t(d.label)}` : $t('跟隨臉部'),
+    node: <Switch v={following.has(d.name)} on={(v) => update({ follow: { ...(f.follow ?? {}), [d.name]: v ? { ...(f.follow?.[d.name] ?? {}), target: 'face' } : null } })} />,
+  }));
+  const withMenu = (l: Channel[]) =>
+    l
+      .filter((c) => !following.has(parsePointCh(c.id)?.name ?? ''))
+      .map((c) => {
+        const name = parsePointCh(c.id)?.name ?? c.id;
+        const d = defs.find((x) => x.name === name);
+        const fm = d && o.faceTracking ? followMenu(d, f.follow, (m) => update({ follow: m })) : [];
+        return { ...c, menu: [...fm, ...(menuFor(name) ?? [])] };
+      });
 
   const sections: Section[] = [
     {
@@ -1208,7 +1266,7 @@ function effectSections(
       actions: o.actions,
       dim: o.dim,
       menu: owner ? () => fxTitleMenu(owner) : undefined,
-      rows: [...paramRows(other, f.params, (p) => update({ params: p }), o.sampleColor, (d) => menuFor(d.name) ?? []), ...(o.compact ? maskRows : [])],
+      rows: [...(o.topRows ?? []), ...followRows, ...paramRows(other, f.params, (p) => update({ params: p }), o.sampleColor, (d) => menuFor(d.name) ?? []), ...(o.compact ? maskRows : [])],
       channels: [...(mod ? mapCh(withMenu(fxChannels(f as FxItem, mod.code, local))) : []), ...(o.compact ? maskChs : [])],
       onReset: () => update({ params: {}, keys: {}, ...(o.compact ? { mask: undefined } : {}) }),
       footer: (
@@ -1301,13 +1359,15 @@ function clipFxSections(clip: Clip, modules: Module[], local: number): Section[]
   return list.flatMap((f, i) => {
     const mod = modules.find((m) => m.id === f.moduleId);
     const off = f.enabled === false;
-    return effectSections(f, mod, local, (p) => S.updateClipFx(clip.id, f.id, p as Partial<ClipFx>), {
+    const fresh = () => useStore.getState().clips.find((c) => c.id === clip.id)?.effects?.find((x) => x.id === f.id);
+    const secs = effectSections(f, mod, local, (p) => S.updateClipFx(clip.id, f.id, p as Partial<ClipFx>), {
       idBase: `cfx.${f.id}`,
       fresh: () => useStore.getState().clips.find((c) => c.id === clip.id)?.effects?.find((x) => x.id === f.id),
       maskKey: cfxMaskKey(f.id),
       drawKey: cfxMaskKey(f.id),
       ch: (c) => cfxCh(f.id, c),
       compact: true,
+      faceTracking: !!clip.faceTrack,
       owner: { kind: 'cfx', clipId: clip.id, id: f.id },
       sampleColor: mod?.id === 'fx-chromakey',
       dim: off,
@@ -1323,6 +1383,15 @@ function clipFxSections(clip: Clip, modules: Module[], local: number): Section[]
         </>
       ),
     });
+    secs[0].timing = {
+      id: `${clip.id}:${f.id}`,
+      get: () => fresh()?.timing,
+      set: (v) => useStore.getState().updateClipFx(clip.id, f.id, { timing: v }),
+      start: clip.start,
+      defD: mod ? parseDuration(mod.code, 0.5) : 0.5,
+      len: clip.duration,
+    };
+    return secs;
   });
 }
 
@@ -1382,6 +1451,7 @@ function stackSections(fx: FxItem, modules: Module[], local: number): Section[] 
     const mod = modules.find((m) => m.id === f.moduleId);
     const off = f.enabled === false;
     return effectSections(f, mod, local, (p) => updateStackFx(fx.id, f.id, p as Partial<ClipFx>), {
+      faceTracking: true,
       idBase: `sfx.${f.id}`,
       fresh: () => cur().find((x) => x.id === f.id),
       ch: (c) => cfxCh(f.id, c),
@@ -1425,6 +1495,35 @@ function AddStackFx({ fxId }: { fxId: string }) {
       <div className="ec-right ec-dim" />
     </div>
   );
+}
+
+/** 特效軌方塊（含疊加的特效）有沒有可以跟隨臉部的 point 參數 */
+function blockFollowable(fx: FxItem): boolean {
+  const mods = useStore.getState().modules;
+  return [fx, ...(fx.stack ?? [])].some((f) => {
+    const m = mods.find((x) => x.id === f.moduleId);
+    return !!m && parseParams(m.code).some((d) => d.type === 'point' && (d.follow || f.follow?.[d.name]));
+  });
+}
+
+/**
+ * 特效軌方塊：跟隨臉部要看哪一條影片軌（自動 = 下面最上層有開臉部追蹤的片段）。
+ * 有可以跟隨的參數就一直顯示（不管底下現在有沒有開了追蹤的片段，沒有就只是沒效果）。
+ */
+function faceFromRows(fx: FxItem): { label: string; node: React.ReactNode }[] {
+  if (!blockFollowable(fx)) return [];
+  const s = useStore.getState();
+  const lv = fxLevel(s.tracks, fx.track);
+  const set = (v: string) => useStore.getState().updateEffect(fx.id, { faceFrom: v === '' ? undefined : Number(v) });
+  return [{
+    label: $t('追蹤軌道'),
+    node: (
+      <select className="select" value={fx.faceFrom ?? ''} onChange={(e) => set(e.target.value)}>
+        <option value="">{$t('自動')}</option>
+        {s.tracks.video.slice(0, lv).map((_, i) => <option key={i} value={i}>{$t('影片 {0}', i + 1)}</option>).reverse()}
+      </select>
+    ),
+  }];
 }
 
 /** 「每個剪接點」看哪幾條影片軌：沒設定 = 這條特效軌下面的全部 */
@@ -1506,7 +1605,7 @@ function EffectInspector({ id }: { id: string }) {
       ],
       onReset: () => updateEffect(id, { trigger: undefined }),
     },
-    ...effectSections(fx, mod, local, (p) => updateEffect(id, p as Partial<FxItem>), { idBase: 'fx', drawKey: `fx:${fx.id}`, fresh: () => useStore.getState().effects.find((e) => e.id === id), owner }),
+    ...effectSections(fx, mod, local, (p) => updateEffect(id, p as Partial<FxItem>), { idBase: 'fx', drawKey: `fx:${fx.id}`, fresh: () => useStore.getState().effects.find((e) => e.id === id), owner, faceTracking: true, topRows: faceFromRows(fx) }),
     ...stackSections(fx, modules, local),
   ];
   return (
@@ -1542,6 +1641,33 @@ function PlainControls({ title, rows, footer, titleMenu }: { title: React.ReactN
   );
 }
 
+/** 轉場的跟隨臉部：開關（跟隨中不顯示位置）、跟前一段或後一段 */
+function trFollowRows(defs: ParamDef[], tr: TransitionRef, upd: (p: Partial<TransitionRef>) => void, prev: Clip | undefined, clip: Clip, side: TrSide) {
+  if (!(clip.faceTrack || prev?.faceTrack)) return [];
+  const followable = defs.filter((d) => d.type === 'point' && (d.follow || tr.follow?.[d.name]));
+  return followable.flatMap((d) => {
+    const cur = followOf(d, tr.follow);
+    const put = (f: Follow | null) => upd({ follow: { ...(tr.follow ?? {}), [d.name]: f } });
+    const rows: { label: string; node: React.ReactNode }[] = [{
+      label: followable.length > 1 ? `${$t('跟隨臉部')} · ${$t(d.label)}` : $t('跟隨臉部'),
+      node: <Switch v={!!cur} on={(v) => put(v ? { ...(tr.follow?.[d.name] ?? {}), target: 'face' } : null)} />,
+    }];
+    // 轉入才有前後兩段可以選
+    if (cur && side === 'in' && prev) {
+      rows.push({
+        label: $t('跟隨'),
+        node: (
+          <select className="select" value={cur.side ?? 'from'} onChange={(e) => put({ ...cur, side: e.target.value as 'from' | 'to' })}>
+            <option value="from">{$t('前一段')}</option>
+            <option value="to">{$t('後一段')}</option>
+          </select>
+        ),
+      });
+    }
+    return rows;
+  });
+}
+
 function TransitionInspector({ selId }: { selId: string }) {
   const { clipId, side } = parseTrSel(selId);
   const clip = useStore((s) => s.clips.find((c) => c.id === clipId));
@@ -1555,6 +1681,9 @@ function TransitionInspector({ selId }: { selId: string }) {
   const w = transitionWindow(sorted[i - 1], clip, side, sorted[i + 1]);
   const maxD = w?.max ?? clip.duration;
   const defs = mod ? parseParams(mod.code) : [];
+  // 跟隨臉部：轉入的前一段 = 同軌前一個片段、後一段 = 這個片段；轉出只有這個片段
+  const prevClip = side === 'out' ? undefined : sorted[i - 1];
+  const trTracking = !!(clip.faceTrack || prevClip?.faceTrack);
   const upd = (p: Partial<TransitionRef>) => updateTransition(clipId, p, side);
   const apply = (scope: TrScope) => toast($t('已套用到 {0} 個位置', applyTransitions(clip.track, scope, tr)));
   /** 同一條軌道上已經有的轉場，全部改成跟這個一樣 */
@@ -1580,7 +1709,10 @@ function TransitionInspector({ selId }: { selId: string }) {
         rows={[
           { label: $t('轉場'), node: <ModuleSelect kind="transition" value={tr.moduleId} onChange={(m) => setTransition(clipId, m, side)} /> },
           { label: $t('長度'), menu: trPropMenu(clipId, side, 'duration'), node: <DragNumber variant="text" value={Math.min(tr.duration, maxD)} min={0.05} max={maxD} step={0.01} suffix="s" def={0.4} menu={trPropMenu(clipId, side, 'duration')} onChange={(v) => upd({ duration: v })} /> },
-          ...paramRows(defs, tr.params, (p) => upd({ params: p }), false, (d) => trPropMenu(clipId, side, { param: d.name })),
+          ...trFollowRows(defs, tr, upd, prevClip, clip, side),
+          ...paramRows(defs, tr.params, (p) => upd({ params: p }), false, (d) => [...(trTracking ? followMenu(d, tr.follow, (m) => upd({ follow: m })) : []), ...trPropMenu(clipId, side, { param: d.name })]).filter((_, k) =>
+            !(trTracking && followOf(defs[k], tr.follow)),
+          ),
         ]}
         titleMenu={() => [
           { label: $t('複製轉場'), action: () => copyTransition(selId) },

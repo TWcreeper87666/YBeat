@@ -12,8 +12,10 @@ import { isNumeric, parseParams, parsePointCh, pointCh, resolveParams } from '..
 import { DEFAULT_MASK, MASK_PROPS, maskKey } from '../engine/mask';
 import { DragNumber } from './DragNumber';
 import { setScrubbing } from '../engine/audio';
-import { frameTicks, tc } from '../engine/rulerTicks';
-import { openMenu, useKeySel, useLayout, type KeyRef, type MenuItem } from './uiStore';
+import { fps, rulerLabel, rulerSteps, snapFrame, tc } from '../engine/rulerTicks';
+import { openMenu, useKeySel, useLayout, useTrimView, type KeyRef, type MenuItem } from './uiStore';
+import { beatHits, HIT_MIN, normalizeHits, overwriteHits, type BeatEvery, type FxTiming, type Hit } from '../engine/trigger';
+import { beatSnapPoints } from './beatGrid';
 import { ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Timer } from 'lucide-react';
 
 /** 屬性名稱被截斷時，滑鼠移上去立刻浮出完整名稱（屬性面板很窄時用） */
@@ -53,6 +55,8 @@ export interface Channel {
   partner?: { id: string; value: number; keys: Keyframe[] };
   /** 右鍵選單最後多加的項目（名稱與數值欄位都適用，例如「套用到相同特效」） */
   menu?: MenuItem[];
+  /** 名稱後面的小圖示（例如跟隨臉部） */
+  icon?: React.ReactNode;
 }
 
 /** 等比例連動時，partner 的新值：大小跟著比例變、保留原本的正負號 */
@@ -513,6 +517,32 @@ export interface Section {
   menu?: () => MenuItem[];
   /** 使用者還沒展開 / 收合過時的預設狀態 */
   defaultCollapsed?: boolean;
+  /** 「作用」列（片段特效的時間範圍） */
+  timing?: TimingLane;
+}
+
+/** 片段特效什麼時候作用：屬性面板的「作用」列 */
+export interface TimingLane {
+  /** 選取用的識別（片段 id + 特效 id） */
+  id: string;
+  /** 從 store 拿最新的（拖曳中 props 會舊） */
+  get(): FxTiming | undefined;
+  set(v: FxTiming | undefined): void;
+  /** 片段在時間軸上的開頭（節拍換算用） */
+  start: number;
+  /** 新的一次播放預設多長（秒） */
+  defD: number;
+  /** 片段長度（秒） */
+  len: number;
+}
+
+/** 最近一層可以上下捲的容器（屬性面板 / 編輯視窗） */
+function scrollParent(el: HTMLElement): HTMLElement | null {
+  for (let p = el.parentElement; p; p = p.parentElement) {
+    const oy = getComputedStyle(p).overflowY;
+    if ((oy === 'auto' || oy === 'scroll') && p.scrollHeight > p.clientHeight) return p;
+  }
+  return null;
 }
 
 /** 屬性表格左欄寬度範圍（px） */
@@ -612,7 +642,9 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
   const viewRef = useRef({ view, dur, setView });
   viewRef.current = { view, dur, setView };
 
-  const seek = (l: number) => S.setTime(host.start + Math.min(dur, Math.max(0, l)));
+  const seek = (l: number) => S.setTime(snapFrame(host.start + Math.min(dur, Math.max(0, l))));
+  /** 片段內時間對齊時間軸格線（關鍵影格、雙擊加入都用） */
+  const qt = (l: number) => Math.min(dur, Math.max(0, snapFrame(host.start + l) - host.start));
   const localAt = (clientX: number) => {
     const r = rulerRef.current!.getBoundingClientRect();
     return Math.min(dur, Math.max(0, view.a + ((clientX - r.left) / r.width) * span));
@@ -632,12 +664,19 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
         e.preventDefault();
         const anchor = v.a + Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * sp;
         sv(zoomView(v, anchor, Math.exp(e.deltaY * 0.0025), d));
-      } else if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
-        if (sp >= d - 1e-6) return;
-        e.preventDefault();
-        const dx = e.deltaX || e.deltaY;
-        sv({ a: v.a + (dx / r.width) * sp, b: v.b + (dx / r.width) * sp });
+        return;
       }
+      // 跟時間軸一樣：設定「水平」= 直接滾左右捲、Shift / Alt 上下捲；「垂直」相反；觸控板左右滑一律水平
+      const swap = e.shiftKey || e.altKey;
+      const horizontalFirst = useLayout.getState().wheelScroll !== 'vertical';
+      const swipeX = Math.abs(e.deltaX) > Math.abs(e.deltaY) && !swap;
+      const wantX = swipeX || (horizontalFirst ? !swap : swap);
+      const dd = swap ? e.deltaY || e.deltaX : swipeX ? e.deltaX : e.deltaY;
+      if (!dd) return;
+      e.preventDefault();
+      if (wantX) {
+        if (sp < d - 1e-6) sv({ a: v.a + (dd / r.width) * sp, b: v.b + (dd / r.width) * sp });
+      } else scrollParent(el)?.scrollBy({ top: dd });
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
@@ -698,7 +737,7 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
 
   /** 雙擊屬性的時間軸：在那裡加關鍵影格（數值 = 那個時間點目前的值） */
   const addKeyAt = (e: React.MouseEvent, ch: Channel) => {
-    const t = localAt(e.clientX);
+    const t = qt(localAt(e.clientX));
     const list = currentKeys(host.owner, ch.id);
     const v = list.length ? evalKeys(list, t) : ch.value;
     const next = upsertKey(list, t, v);
@@ -787,8 +826,9 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
       (ev) => {
         if (!moved && Math.abs(ev.clientX - x0) < 3) return;
         moved = true;
-        let t = k.t + (ev.clientX - x0) / pxPerSec;
-        for (const p of pts) if (Math.abs(p - t) * pxPerSec < 6) { t = p; break; }
+        const raw = k.t + (ev.clientX - x0) / pxPerSec;
+        let t = qt(raw);
+        for (const p of pts) if (Math.abs(p - raw) * pxPerSec < 6) { t = p; break; }
         const dt = Math.max(-min, Math.min(dur - max, t - k.t));
         moveKeys(host.owner, group, orig, dt);
         seek(k.t + dt);
@@ -843,7 +883,17 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
   const isCollapsed = (sec: Section) => collapsed[sec.id] ?? !!sec.defaultCollapsed;
   const toggleSection = (sec: Section) => useLayout.getState().set({ ecCollapsed: { ...collapsed, [sec.id]: !isCollapsed(sec) } });
   // 刻度文字是 mm:ss:ff（比較寬）：依尺規寬度決定最多幾個，每個至少 64px
-  const { ticks, step: tickStep } = frameTicks(view.a, view.b, Math.floor(rulerW / 64));
+  // 尺規跟時間軸的一樣：大刻度（有數字）+ 小刻度，放大到最後小刻度是一格
+  useLayout((l) => l.timeGrid);
+  const rpps = rulerW / span;
+  const { major, minor } = rulerSteps(rpps);
+  const ticks: number[] = [];
+  {
+    const n = Math.max(1, Math.round(major * fps()));
+    for (let f = Math.ceil((view.a * fps() - 1e-6) / n) * n; f / fps() <= view.b + 1e-6; f += n) ticks.push(f / fps());
+  }
+  const minorPx = minor * rpps;
+  const minorOff = ((Math.ceil(view.a / minor - 1e-6) * minor - view.a) * rpps) % (minorPx || 1);
   const frac = (t: number) => (t - view.a) / span;
   const pct = (t: number) => `${frac(t) * 100}%`;
   /** 範圍外的關鍵影格不畫（留一點邊，邊上的菱形還看得到一半） */
@@ -888,8 +938,14 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
           <span className="ec-time">{inside ? tc(lc) : '—'}</span>
           <div className="ec-split" onPointerDown={dragSplit} title={$t('拖曳調整左右寬度')} />
         </div>
-        <div className="ec-right ec-ruler" ref={rulerRef} onPointerDown={scrub} title={$t('拖曳移動播放頭')}>
-          {ticks.map((t) => <span key={t} className={`ec-tick ${frac(t) < 0.01 ? 'first' : ''}`} style={{ left: pct(t) }}>{tc(t, tickStep < 1 - 1e-9)}</span>)}
+        <div
+          className="ec-right ec-ruler"
+          ref={rulerRef}
+          onPointerDown={scrub}
+          title={$t('拖曳移動播放頭')}
+          style={{ backgroundImage: `repeating-linear-gradient(90deg, #ffffff12 0 1px, transparent 1px ${minorPx}px)`, backgroundPosition: `${minorOff}px 0` }}
+        >
+          {ticks.map((t) => <div key={t} className="tick" style={{ left: pct(t) }}>{rulerLabel(t, major)}</div>)}
           <div
             className={`ec-zoombar ${zoomed ? 'zoomed' : ''}`}
             onPointerDown={(e) => dragZoom(e, 'bar')}
@@ -920,6 +976,7 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
             </div>
             {!isCol && (
               <>
+                {sec.timing && <TimingRow tm={sec.timing} dur={dur} lc={lc} view={view} localAt={localAt} seek={seek} />}
                 {sec.rows?.map((r) => (
                   <div key={r.label} className="ec-row">
                     <div className="ec-left ec-plain" onContextMenu={(e) => sectionResetMenu(e, sec)}><span className="ec-label" title={typeof r.label === 'string' ? r.label : undefined}>{r.label}</span><div className="ec-node">{r.node}</div></div>
@@ -941,7 +998,7 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
                           <button className={`ec-watch ${animated ? 'on' : ''}`} title={animated ? $t('關閉動畫（移除所有關鍵影格）') : $t('開啟動畫（在播放頭加關鍵影格）')} onClick={() => toggleAnim(ch)}>
                             <Timer size={13} />
                           </button>
-                          <span className="ec-label" title={ch.label} onContextMenu={(e) => channelMenu(e, ch)}>{ch.label}</span>
+                          <span className="ec-label" title={ch.label} onContextMenu={(e) => channelMenu(e, ch)}>{ch.label}{ch.icon}</span>
                           <DragNumber variant="text" value={ch.value} step={ch.step} min={ch.min} max={ch.max} suffix={ch.suffix} display={ch.display} def={ch.def} menu={ch.menu} onChange={(v) => setValue(ch, v)} />
                           <span className="ec-nav">
                             {animated && (
@@ -1221,6 +1278,379 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
             })}
           </g>
         </svg>
+      </div>
+    </div>
+  );
+}
+
+// ───────────────────────── 作用列（片段特效的時間範圍） ─────────────────────────
+
+/**
+ * 作用列的焦點與選取：id = 最後點的那一列（貼上的目標），is = 選取的 Hit。
+ * 點作用列以外的地方就取消（快捷鍵回到關鍵影格 / 時間軸）。
+ */
+const useHitSel = create<{ id: string | null; is: number[] }>(() => ({ id: null, is: [] }));
+if (typeof window !== 'undefined') {
+  window.addEventListener(
+    'pointerdown',
+    (e) => {
+      if (!(e.target as HTMLElement).closest?.('.ec-hits')) useHitSel.setState({ id: null, is: [] });
+    },
+    true,
+  );
+}
+const hitLanes = new Map<string, TimingLane>();
+/** 複製的 Hit（相對第一個的時間） */
+let hitClipboard: Hit[] = [];
+
+/** 目前焦點的作用列與它的 Hit 清單（每拍 / 整段先展開成手動的樣子，貼上時才真的轉換） */
+function focusedLane() {
+  const { id, is } = useHitSel.getState();
+  const tm = id ? hitLanes.get(id) : undefined;
+  if (!tm) return null;
+  const cur = tm.get();
+  const hits = !cur ? [] : cur.kind === 'hits' ? cur.hits : beatHits(cur.every, cur.d, tm.start, tm.len);
+  return { tm, cur, hits, is: is.filter((i) => cur?.kind === 'hits' && i < hits.length) };
+}
+export const hitsFocused = () => !!focusedLane();
+
+/** 片段內時間對齊時間軸格線（格線是以時間軸時間算的） */
+const qLocal = (tm: TimingLane, t: number) => Math.max(0, snapFrame(tm.start + t) - tm.start);
+const seekHit = (tm: TimingLane, t: number) => useStore.getState().setTime(snapFrame(tm.start + Math.max(0, t)));
+
+/** 加進去（重疊就覆蓋，跟時間軸一樣），選取加進去的那幾個 */
+function addHits(tm: TimingLane, base: Hit[], add: Hit[]) {
+  const q = add.map((h) => ({ t: qLocal(tm, h.t), d: h.d }));
+  const next = overwriteHits(base, q, tm.len);
+  tm.set({ kind: 'hits', hits: next });
+  const is = next.map((h, i) => (q.some((a) => Math.abs(a.t - h.t) < 1e-4) ? i : -1)).filter((i) => i >= 0);
+  useHitSel.setState({ id: tm.id, is });
+  if (is.length) seekHit(tm, next[is[0]].t);
+}
+
+/** Delete：刪除選取的 Hit */
+export function deleteSelectedHit(): boolean {
+  const f = focusedLane();
+  if (!f || f.cur?.kind !== 'hits' || !f.is.length) return false;
+  f.tm.set({ kind: 'hits', hits: f.hits.filter((_, j) => !f.is.includes(j)) });
+  useHitSel.setState({ is: [] });
+  return true;
+}
+
+/** Ctrl+C：複製選取的 Hit */
+export function copyHits(): boolean {
+  const f = focusedLane();
+  const sel = f?.is.map((i) => f.hits[i]).sort((a, b) => a.t - b.t) ?? [];
+  if (!sel.length) return false;
+  hitClipboard = sel.map((h) => ({ t: h.t - sel[0].t, d: h.d }));
+  return true;
+}
+
+/** Ctrl+X：剪下 */
+export const cutHits = () => copyHits() && deleteSelectedHit();
+
+/** Ctrl+V：貼到播放頭（整段 / 每拍會先轉成手動）；跟現有的重疊就覆蓋 */
+export function pasteHits(): boolean {
+  const f = focusedLane();
+  if (!f || !hitClipboard.length) return false;
+  const at = Math.min(f.tm.len, Math.max(0, useStore.getState().time - f.tm.start));
+  addHits(f.tm, f.hits, hitClipboard.map((h) => ({ t: at + h.t, d: h.d })));
+  return true;
+}
+
+/** Ctrl+D：選取的 Hit 再製一份，緊接在後面、一樣長；跟後面的重疊就覆蓋 */
+export function duplicateHits(): boolean {
+  const f = focusedLane();
+  const sel = f?.is.map((i) => f.hits[i]).sort((a, b) => a.t - b.t) ?? [];
+  if (!f || !sel.length) return false;
+  const off = Math.max(...sel.map((h) => h.t + h.d)) - sel[0].t;
+  addHits(f.tm, f.hits, sel.map((h) => ({ t: h.t + off, d: h.d })));
+  return true;
+}
+
+/** Ctrl+A：選取這一列全部的 Hit */
+export function selectAllHits(): boolean {
+  const f = focusedLane();
+  if (!f || f.cur?.kind !== 'hits') return false;
+  useHitSel.setState({ is: f.hits.map((_, i) => i) });
+  return true;
+}
+
+/** Home / End：播放頭跳到選取的 Hit 的開頭 / 結尾（多選 = 整組的頭尾） */
+export function hitEdge(edge: 'start' | 'end'): boolean {
+  const f = focusedLane();
+  const sel = f?.is.map((i) => f.hits[i]) ?? [];
+  if (!f || !sel.length) return false;
+  seekHit(f.tm, edge === 'start' ? Math.min(...sel.map((h) => h.t)) : Math.max(...sel.map((h) => h.t + h.d)));
+  return true;
+}
+
+/** Ctrl+← / →：選上 / 下一個 Hit（Shift = 延伸選取）；播放頭跳到它的開頭 */
+export function navHit(dir: -1 | 1, extend: boolean): boolean {
+  const f = focusedLane();
+  if (!f || f.cur?.kind !== 'hits' || !f.hits.length) return false;
+  const lt = useStore.getState().time - f.tm.start;
+  let j: number;
+  if (f.is.length) j = dir > 0 ? Math.max(...f.is) + 1 : Math.min(...f.is) - 1;
+  else j = dir > 0 ? f.hits.findIndex((h) => h.t > lt + 1e-4) : f.hits.map((h) => h.t < lt - 1e-4).lastIndexOf(true);
+  if (j < 0 || j >= f.hits.length) return true;
+  useHitSel.setState({ is: extend ? [...new Set([...f.is, j])] : [j] });
+  seekHit(f.tm, f.hits[j].t);
+  return true;
+}
+
+/** Ctrl+Home / End：選第一個 / 最後一個 Hit（Shift = 一路選到頭 / 尾） */
+export function navHitEdge(which: 'first' | 'last', extend: boolean): boolean {
+  const f = focusedLane();
+  if (!f || f.cur?.kind !== 'hits' || !f.hits.length) return false;
+  const j = which === 'first' ? 0 : f.hits.length - 1;
+  const from = f.is.length ? (which === 'first' ? Math.max(...f.is) : Math.min(...f.is)) : j;
+  const range = Array.from({ length: Math.abs(from - j) + 1 }, (_, k) => Math.min(from, j) + k);
+  useHitSel.setState({ is: extend ? range : [j] });
+  seekHit(f.tm, f.hits[j].t);
+  return true;
+}
+
+/** Alt+← / →：選取的 Hit 移動 dt 秒（不會蓋到旁邊沒選的、不會跑出片段開頭） */
+export function nudgeHits(dt: number): boolean {
+  const f = focusedLane();
+  if (!f || f.cur?.kind !== 'hits' || !f.is.length) return false;
+  const sel = new Set(f.is);
+  let d = dt;
+  f.hits.forEach((h, i) => {
+    if (!sel.has(i)) return;
+    if (d < 0) {
+      const prev = f.hits.slice(0, i).reverse().find((_, k) => !sel.has(i - 1 - k));
+      d = Math.max(d, (prev ? prev.t + prev.d : 0) - h.t);
+    } else {
+      const next = f.hits.slice(i + 1).find((_, k) => !sel.has(i + 1 + k));
+      d = Math.min(d, (next ? next.t : f.tm.len) - (h.t + h.d));
+    }
+  });
+  if (Math.abs(d) < 1e-6) return true;
+  f.tm.set({ kind: 'hits', hits: f.hits.map((h, i) => (sel.has(i) ? { t: h.t + d, d: h.d } : h)) });
+  const first = Math.min(...f.is);
+  seekHit(f.tm, f.hits[first].t + d);
+  return true;
+}
+
+/** Ctrl+B：在播放頭把 Hit 切成兩個（選取的優先，沒選就切播放頭底下那個）；後段從切點重新播一次 */
+export function splitHit(): boolean {
+  const f = focusedLane();
+  if (!f || f.cur?.kind !== 'hits') return false;
+  const lt = useStore.getState().time - f.tm.start;
+  const inside = (h: Hit) => lt > h.t + 1e-4 && lt < h.t + h.d - 1e-4;
+  const i = [...f.is, ...f.hits.map((_, j) => j)].find((j) => f.hits[j] && inside(f.hits[j]));
+  if (i === undefined) return true;
+  const h = f.hits[i];
+  const next = [...f.hits.slice(0, i), { t: h.t, d: lt - h.t }, { t: lt, d: h.t + h.d - lt }, ...f.hits.slice(i + 1)];
+  f.tm.set({ kind: 'hits', hits: next });
+  useHitSel.setState({ is: [i + 1] });
+  return true;
+}
+
+/** Q / W：選取的 Hit 開頭 / 結尾修剪到播放頭 */
+export function trimHit(side: 'start' | 'end'): boolean {
+  const f = focusedLane();
+  if (!f || f.cur?.kind !== 'hits' || f.is.length !== 1) return false;
+  const i = f.is[0], h = f.hits[i];
+  const lt = useStore.getState().time - f.tm.start;
+  if (lt <= h.t + 1e-4 || lt >= h.t + h.d - 1e-4) return true;
+  const n = side === 'start' ? { t: lt, d: h.t + h.d - lt } : { t: h.t, d: lt - h.t };
+  f.tm.set({ kind: 'hits', hits: f.hits.map((x, j) => (j === i ? n : x)) });
+  return true;
+}
+
+const BEATS: { every: BeatEvery; label: () => string }[] = [
+  { every: 0.5, label: () => $t('每半拍') },
+  { every: 1, label: () => $t('每拍') },
+  { every: 2, label: () => $t('每 2 拍') },
+  { every: 4, label: () => $t('每小節') },
+];
+
+function TimingRow({ tm, dur, lc, view, localAt, seek }: { tm: TimingLane; dur: number; lc: number; view: View; localAt: (x: number) => number; seek: (t: number) => void }) {
+  const sel = useHitSel();
+  hitLanes.set(tm.id, tm);
+  const timing = tm.get();
+  const span = view.b - view.a || 1;
+  const frac = (t: number) => (t - view.a) / span;
+  const laneRef = useRef<HTMLDivElement>(null);
+  /** 目前的 Hit 清單（整段 = 一個蓋滿的；beat = 展開後的） */
+  const manual = (t = tm.get()): Hit[] => (!t ? [{ t: 0, d: dur }] : t.kind === 'hits' ? t.hits : beatHits(t.every, t.d, tm.start, dur));
+  const setHits = (hits: Hit[]) => tm.set({ kind: 'hits', hits: normalizeHits(hits, dur) });
+  /** 在 t 加一次播放（整段 / 每拍會先變成手動；蓋到的那個換掉） */
+  const addAt = (t: number) => {
+    const cur = tm.get();
+    const base = cur ? manual(cur) : [];
+    const next = base.find((h) => h.t > t + 1e-4);
+    setHits([...base.filter((h) => !(t >= h.t && t < h.t + h.d)), { t, d: Math.max(HIT_MIN, Math.min(tm.defD, (next?.t ?? dur) - t)) }]);
+    // 選取新加的那個（接著可以 Ctrl+D、Delete…）
+    const now = tm.get();
+    const j = now?.kind === 'hits' ? now.hits.findIndex((h) => Math.abs(h.t - t) < 1e-4) : -1;
+    useHitSel.setState({ id: tm.id, is: j >= 0 ? [j] : [] });
+  };
+  const beatD = () => {
+    const cur = tm.get();
+    return cur?.kind === 'beat' ? cur.d : cur?.kind === 'hits' && cur.hits[0] ? cur.hits[0].d : tm.defD;
+  };
+  const menuItems = (): MenuItem[] => {
+    const cur = tm.get();
+    return [
+      { label: $t('在播放頭觸發'), action: () => addAt(lc) },
+      { label: $t('每拍觸發'), submenu: BEATS.map((b) => ({ label: b.label(), checked: cur?.kind === 'beat' && cur.every === b.every, action: () => tm.set({ kind: 'beat', every: b.every, d: beatD() }) })) },
+      { label: $t('整段'), checked: !cur, action: () => tm.set(undefined) },
+      { label: $t('轉成手動'), action: cur?.kind === 'beat' ? () => setHits(manual(cur)) : undefined },
+    ];
+  };
+  const laneMenu = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    useHitSel.setState({ id: tm.id, is: [] });
+    openMenu(e.clientX, e.clientY, [{ label: $t('貼上到播放頭'), shortcut: 'Ctrl+V', action: hitClipboard.length ? pasteHits : undefined }, { label: $t('全選'), shortcut: 'Ctrl+A', action: tm.get()?.kind === 'hits' ? selectAllHits : undefined }, { separator: true }, ...menuItems()]);
+  };
+
+  /**
+   * 拖曳 Hit（跟時間軸的片段一樣）：中間移動、兩端修剪；對齊格線，磁吸開著時吸附播放頭、旁邊的 Hit、節拍。
+   * 點選取中的（或播放頭不在裡面）→ 播放頭跳到開頭，移動時播放頭跟著開頭走；修剪時預覽顯示邊緣那一格。
+   * 每拍模式：拖右端 = 改每一次的長度。
+   */
+  const drag = (e: React.PointerEvent, i: number, mode: 'move' | 'l' | 'r') => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const cur = tm.get();
+    const w = laneRef.current!.getBoundingClientRect().width || 1;
+    const pxPerSec = w / span;
+    const x0 = e.clientX;
+    if (cur?.kind === 'beat') {
+      if (mode !== 'r') return;
+      const d0 = cur.d;
+      document.body.classList.add('hit-dragging', 'hit-resizing');
+      return listen(
+        (ev) => tm.set({ ...cur, d: Math.max(HIT_MIN, d0 + (ev.clientX - x0) / pxPerSec) }),
+        () => document.body.classList.remove('hit-dragging', 'hit-resizing'),
+      );
+    }
+    if (cur?.kind !== 'hits') return;
+    const prev = useHitSel.getState();
+    const mine = prev.id === tm.id ? prev.is : [];
+    if (e.ctrlKey || e.metaKey || e.shiftKey) return useHitSel.setState({ id: tm.id, is: mine.includes(i) ? mine.filter((x) => x !== i) : [...mine, i] });
+    const already = mine.includes(i);
+    useHitSel.setState({ id: tm.id, is: already ? mine : [i] });
+    const hits = cur.hits;
+    const h = hits[i];
+    const lt0 = useStore.getState().time - tm.start;
+    const inside = lt0 >= h.t - 1e-6 && lt0 < h.t + h.d;
+    if (mode === 'move' && (already || !inside)) seekHit(tm, h.t);
+    const lo = i > 0 ? hits[i - 1].t + hits[i - 1].d : 0;
+    const hi = i + 1 < hits.length ? hits[i + 1].t : tm.len;
+    // 吸附點（片段內時間）：播放頭、片段頭尾、旁邊的 Hit、節拍
+    const pts = [useStore.getState().time - tm.start, 0, tm.len, lo, hi, ...beatSnapPoints().map((b) => b - tm.start)];
+    const snap = (t: number) => {
+      const q = qLocal(tm, t);
+      if (!useStore.getState().snap) return q;
+      let best = q, bd = 6 / pxPerSec;
+      for (const p of pts) if (Math.abs(p - t) < bd) { bd = Math.abs(p - t); best = p; }
+      return best;
+    };
+    let moved = false;
+    document.body.classList.add('hit-dragging');
+    document.body.classList.toggle('hit-resizing', mode !== 'move');
+    listen(
+      (ev) => {
+        if (!moved && Math.abs(ev.clientX - x0) < 3) return;
+        moved = true;
+        const dt = (ev.clientX - x0) / pxPerSec;
+        let n: Hit;
+        if (mode === 'move') {
+          // 開頭或結尾哪個比較靠近吸附點就用哪個
+          const s0 = snap(h.t + dt), s1 = snap(h.t + h.d + dt) - h.d;
+          const t = Math.abs(s0 - (h.t + dt)) <= Math.abs(s1 - (h.t + dt)) ? s0 : s1;
+          n = { t: Math.min(Math.max(lo, t), Math.max(lo, hi - h.d)), d: h.d };
+          if (inside || already) seekHit(tm, n.t);
+        } else if (mode === 'l') {
+          const t = Math.min(Math.max(lo, snap(h.t + dt)), h.t + h.d - HIT_MIN);
+          n = { t, d: h.t + h.d - t };
+          useTrimView.setState({ t: tm.start + n.t });
+        } else {
+          const end = Math.min(hi, Math.max(h.t + HIT_MIN, snap(h.t + h.d + dt)));
+          n = { t: h.t, d: end - h.t };
+          useTrimView.setState({ t: tm.start + end - 1e-3 });
+        }
+        tm.set({ kind: 'hits', hits: hits.map((x, j) => (j === i ? n : x)) });
+      },
+      () => {
+        document.body.classList.remove('hit-dragging', 'hit-resizing');
+        useTrimView.setState({ t: null });
+        // 點一下多選中的其中一個（沒拖）→ 只選它
+        if (!moved && already && mine.length > 1) useHitSel.setState({ id: tm.id, is: [i] });
+      },
+    );
+  };
+
+  const auto = timing?.kind === 'beat';
+  const blocks = !timing ? [] : timing.kind === 'hits' ? timing.hits : beatHits(timing.every, timing.d, tm.start, dur);
+  const mode = !timing ? 'all' : timing.kind === 'hits' ? 'hits' : `b${timing.every}`;
+  return (
+    <div className="ec-row">
+      <div className="ec-left ec-plain">
+        <span className="ec-label">{$t('作用')}</span>
+        <div className="ec-node">
+          {timing?.kind === 'beat' && <DragNumber variant="text" value={timing.d} step={0.05} min={HIT_MIN} suffix="s" onChange={(v) => tm.set({ ...timing, d: Math.max(HIT_MIN, v) })} />}
+          <select
+            className="select"
+            value={mode}
+            onChange={(e) => {
+              const v = e.target.value;
+              if (v === 'all') tm.set(undefined);
+              else if (v === 'hits') setHits(manual());
+              else tm.set({ kind: 'beat', every: Number(v.slice(1)) as BeatEvery, d: beatD() });
+            }}
+          >
+            <option value="all">{$t('整段')}</option>
+            <option value="hits">{$t('手動')}</option>
+            {BEATS.map((b) => <option key={b.every} value={`b${b.every}`}>{b.label()}</option>)}
+          </select>
+        </div>
+      </div>
+      <div ref={laneRef} className="ec-right ec-hits" onPointerDown={(e) => e.target === e.currentTarget && useHitSel.setState({ id: tm.id, is: [] })} onContextMenu={laneMenu} onDoubleClick={(e) => e.target === e.currentTarget && addAt(qLocal(tm, localAt(e.clientX)))}>
+        {!timing && <div className="ec-hit all" />}
+        {blocks.map((h, i) => {
+          const l = Math.max(0, frac(h.t)), r = Math.min(1, frac(Math.min(dur, h.t + h.d)));
+          if (r <= 0 || l >= 1) return null;
+          const isSel = !auto && sel.id === tm.id && sel.is.includes(i);
+          return (
+            <div
+              key={i}
+              className={`ec-hit ${auto ? 'auto' : ''} ${isSel ? 'sel' : ''}`}
+              style={{ left: `${l * 100}%`, width: `${(r - l) * 100}%` }}
+              title={`${tc(h.t)} · ${h.d.toFixed(2)}s`}
+              onPointerDown={(e) => drag(e, i, 'move')}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                seek(h.t);
+              }}
+              onContextMenu={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                if (!auto && !isSel) useHitSel.setState({ id: tm.id, is: [i] });
+                const del: MenuItem[] = auto
+                  ? []
+                  : [
+                      { label: $t('複製'), shortcut: 'Ctrl+C', action: copyHits },
+                      { label: $t('剪下'), shortcut: 'Ctrl+X', action: cutHits },
+                      { label: $t('再製'), shortcut: 'Ctrl+D', action: duplicateHits },
+                      { label: $t('刪除'), shortcut: 'Delete', danger: true, action: deleteSelectedHit },
+                      { separator: true },
+                    ];
+                openMenu(e.clientX, e.clientY, [...del, ...menuItems()]);
+              }}
+            >
+              {!auto && <i className="l" onPointerDown={(e) => drag(e, i, 'l')} />}
+              <i className="r" onPointerDown={(e) => drag(e, i, 'r')} />
+            </div>
+          );
+        })}
       </div>
     </div>
   );

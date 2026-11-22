@@ -1,4 +1,4 @@
-import { beatIndexAtOrAfter, beatTime, estimateBeats, layoutOnBeats, subdivideBeats, timelineBeats } from '../src/engine/beats';
+import { beatIndexAtOrAfter, beatTime, estimateBeats, layoutOnBeats, snapBeats, subdivideBeats, timelineBeats } from '../src/engine/beats';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -72,6 +72,18 @@ ok(lay.length === 3 && lay.every(([a, b], i) => Math.abs(a - want[i][0]) < 1e-9 
     const atZero = timelineBeats({ audios: [{ ...a, start: 0 }], clips: [], media: [media] }, new Set(), 0.1);
     ok(atZero.every((b) => b.t >= 0), '提前後跑到 0 之前的拍子不要');
   } else ok(false, '節拍提前：測試素材沒有偵測到節拍');
+}
+
+// ── 節拍對齊時間軸格線 ──
+{
+  const q = (f: number) => (t: number) => Math.round(t * f) / f;
+  const src = [{ t: 0.508, s: 0.5, down: true }, { t: 1.013, s: 0.4, down: false }, { t: 1.52, s: 0.6, down: false }];
+  const sub2 = snapBeats(subdivideBeats(src, 2), q(60));
+  ok(sub2.every((b) => Math.abs(b.t * 60 - Math.round(b.t * 60)) < 1e-9), '細分後的拍點都在 1/60 格上');
+  ok(sub2.length === 5 && sub2[0].down, '數量不變、重拍標記保留');
+  const same = snapBeats([{ t: 1.0, s: 0.3, down: true }, { t: 1.01, s: 0.9, down: false }], q(30));
+  ok(same.length === 1 && same[0].s === 0.9 && same[0].down && same[0].t === 1, '落在同一格：留強的、重拍標記保留');
+  ok(snapBeats(src, q(30)).every((b) => Math.abs(b.t * 30 - Math.round(b.t * 30)) < 1e-9), '1/30 格');
 }
 
 console.log(fails ? `\n${fails} 項失敗` : '\n全部通過');
