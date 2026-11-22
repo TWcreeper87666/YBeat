@@ -232,8 +232,10 @@ export function ConfirmHost() {
 
 export function Toasts() {
   const toasts = useToast((s) => s.toasts);
+  const busy = useToast((s) => s.busy);
   return (
     <div className="toasts">
+      {busy && <div className="toast">{busy}</div>}
       {toasts.map((t) => (
         <div key={t.id} className={`toast ${t.kind}`}>{t.text}</div>
       ))}

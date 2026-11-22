@@ -48,6 +48,8 @@ const MAP: Record<string, string> = {
   'fx-rgb': 'glitch',
   'fx-glitch': 'glitch',
   'fx-pixelate': 'glitch',
+  'fx-mosaic': 'style',
+  'fx-followzoom': 'motion',
   'fx-vhs': 'glitch',
   'fx-grain': 'glitch',
   'fx-mirror': 'frame',

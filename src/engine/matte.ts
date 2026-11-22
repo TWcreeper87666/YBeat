@@ -8,6 +8,7 @@ import { clipSource } from './remap';
 import type { MatteReq, MatteRes } from './matteWorker';
 import { hasKeyIn, insertKey, pickFrame, snapFps, toKey } from './matteIndex';
 import { decodeRange } from './matteDecode';
+import { Need, clipStill } from './jobNeed';
 
 export const MATTE_SIZE = 320;
 /** 偵測不到影片影格率時的預設 */
@@ -244,7 +245,7 @@ async function detectFps(v: RVFCVideo, duration: number): Promise<{ fps: number;
 
 // ───────────── 工作佇列（一次只跑一個素材） ─────────────
 
-interface Job { mediaId: string; idx: number[]; promise: Promise<void> }
+interface Job { mediaId: string; idx: number[]; promise: Promise<void>; need: Need }
 const jobs = new Map<string, Job>();
 let chain: Promise<void> = Promise.resolve();
 
@@ -266,7 +267,7 @@ async function finish(mediaId: string) {
 }
 
 /** 用 WebCodecs 依序解碼片段用到的範圍，每一格推論一次（已經有的跳過） */
-async function runDecode(media: Media, e: Entry, times: number[]) {
+async function runDecode(media: Media, e: Entry, times: number[], live: () => boolean) {
   let from = Infinity, to = -Infinity;
   for (const t of times) {
     if (t < from) from = t;
@@ -298,11 +299,12 @@ async function runDecode(media: Media, e: Entry, times: number[]) {
       setProgress(media.id, ++n, total);
       if (n % 48 === 0) await persist(media.id);
     },
-    alive: () => cache.has(media.id),
+    alive: () => cache.has(media.id) && live(),
   });
 }
 
-async function runJob(media: Media, times: number[]) {
+/** live = 還有人需要（沒人需要就停下來，已經算好的存起來） */
+async function runJob(media: Media, times: number[], live: () => boolean) {
   const e = entry(media.id);
   if (media.kind === 'image' && e.frames.has(0)) return;
   if (media.kind !== 'image' && media.kind !== 'video') return;
@@ -321,7 +323,7 @@ async function runJob(media: Media, times: number[]) {
       // 優先：直接解碼影片檔（不受頁面在不在前景影響、時間戳記是檔案裡的實際值）
       let decoded = false;
       try {
-        await runDecode(media, e, times);
+        await runDecode(media, e, times, live);
         decoded = true;
       } catch (err) {
         console.warn('matte: WebCodecs decode failed, falling back to seeking', err);
@@ -376,6 +378,7 @@ async function runJob(media: Media, times: number[]) {
       for (let pass = 0; pass < 2 && todo.length; pass++) {
         for (const k of todo) {
           if (!cache.has(media.id)) return; // 中途被清掉
+          if (!live()) return void (await persist(media.id)); // 沒人需要了
           // 對準這一格的正中間，再用畫面真正出來的那一格的時間戳記當 key
           const target = Math.min(off + (k + 0.5) / fps, last);
           let pts = await seek(vid, target, 1 / fps);
@@ -421,16 +424,24 @@ export function matteFrames(clip: Clip, media: Media, modules: Map<string, Modul
 }
 
 /** 確保這些時間點的遮罩都算好了（已經在算的會接著等） */
-export function ensureMatte(media: Media, times: number[]): Promise<void> {
+export function ensureMatte(media: Media, times: number[], by?: { id: string; still: () => boolean }): Promise<void> {
   const e = entry(media.id);
   const prev = jobs.get(media.id);
   const key = times.join(',');
-  if (prev && prev.idx.join(',') === key) return prev.promise;
+  if (prev && prev.idx.join(',') === key) {
+    prev.need.add(by?.id, by?.still);
+    return prev.promise;
+  }
+  const need = new Need();
+  need.add(by?.id, by?.still);
+  const live = () => need.live();
   const promise = (chain = chain.then(async () => {
     await e.loaded;
-    await runJob(media, times);
+    if (live()) await runJob(media, times, live);
+    // 停下來了（片段刪掉 / 修剪 / 關掉）：之後再要求（例如復原）要重新排，接著算還沒好的格子
+    if (!live()) for (const [k, v] of requested) if (v.startsWith(`${media.id}|`)) requested.delete(k);
   }));
-  const job = { mediaId: media.id, idx: times, promise };
+  const job = { mediaId: media.id, idx: times, promise, need };
   jobs.set(media.id, job);
   promise.finally(() => jobs.get(media.id) === job && jobs.delete(media.id));
   return promise;
@@ -468,7 +479,7 @@ export function requestMatte(clip: Clip, media: Media, modules: Map<string, Modu
   const key = `${media.id}|${clip.in}|${clip.duration}|${clip.rate}|${JSON.stringify(clip.remap)}`;
   if (requested.get(clip.id) === key) return;
   requested.set(clip.id, key);
-  void ensureMatte(media, matteFrames(clip, media, modules));
+  void ensureMatte(media, matteFrames(clip, media, modules), { id: clip.id, still: clipStill(clip, (c) => !!c.aiMatte) });
 }
 
 /**

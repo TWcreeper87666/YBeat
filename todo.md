@@ -1,62 +1,8 @@
 # TODO
 
-- [x] 屬性不需要能夠直接切換其他特效
-- [x] 可以從tabs將特效啥的拖曳到timeline的特效片段來取代，如果有設keyframe就要跳確認，會把keyframe都清掉
-- [x] timeline的單個軌道內容不應該可以重疊
-- [x] 新增語言切換
-- [x] 分類效果、我的最愛、自訂義...
-- [x] timeline graph optimize
-- [x] timeline track height drag(change size)
-- [x] 特效要可以分層(根據實際hierarchy)
-- [x] 新增軌道按鈕好小，UI好爛(應該要可以一次同時新增幾種)
-- [x] 所有效果都要有遮罩功能
-- [x] 素材新增色板
-- [x] 新增字幕元素
-- [x] add more edit transitions, like scale+video play/reverse idk
-- [x] 去背也當作一個effect or as a default property
-- [x] 影片audio軌道分離後，properties就不應該有sound了
-- [x] timeline tab, home/end key, preventDefault so y scrollbar won't move
-- [x] 點擊未選中的片段時，若playhead已經在片段內部，就不要動到playhead。如果本來就已經選中片段，再點一次的話再回到開頭
-- [x] 跟timeline tab互動時要把其他focus停掉，例如tab的search欄位，不然我已經在timeline tab操作，按下ctrl+Z結果undo的是search欄位的搜尋
-- [x] timeline播放，經過片段間隙處會卡，就算我已經把預覽品質調整為33%，你確定用web而不是exe啥的真的沒問題嗎..
-- [x] text tab無法透過滑鼠滾動
-- [x] 拖曳某一個tabs區塊標題列右側空白時，應該要可以整塊一起移動，不然目前如果有多個tab我會需要將每個tab都移動一次
-- [x] properties tab寬度很容易讓屬性不能完整顯示，無法改善的話我覺得變成hover時會顯示完整property name也不是不行
-- [x] 拖曳影片到timeline tab，為什麼不是完整的影片片段啊
-- [x] 點選片段前方的空白處按下delete或backspace，應該要可以移除空白並將後面內容往前推，其實應該就是根據選中的track以及playhead位置並且沒有選取片段來判斷之類的。
-- [x] 為什麼軌道沒辦法隨心所欲的移動順序啊?軌道就是軌道沒有在分什麼audio/video/effect之類的啦
-- [x] alt+delete片段時，其他軌道也要一起往前推，就像威力導演那樣
-- [x] 額外UI用於自定義遮罩形狀，片段的屬性本身就要有mask（片段遮罩：屬性面板「＋遮罩」；自訂形狀：遮罩分頁的鋼筆工具）
-- [x] 片段的混合模式property，加法、色減等等啥的
-- [x] zoom blur transition, 放大位置應該要可以自定義
-- [x] 按ctrl時timeline tab的所有片段不需要有那個黃色的顯示，只有按著ctrl並且滑鼠處於某個片段的開頭或結尾時再出現
-- [x] 融入AI，自行輸入gemini api key，使用gemini-3.5-flash-lite，可以介紹怎麼使用，並幫忙生成轉場代碼
-
-- [x] 色板custom color ui 優化
-- [x] editor window, property panel, 跟preview panel水平排時, property內部的property field min-width size也應該固定成最小值，而不是等到property panel本身也變窄了才跟著改變min-width size
-- [x] 滑鼠的旋轉icon可以再小一些
-- [x] timeline, 播放時拖曳某個片段，音訊會卡卡的，即使跟我拖曳的東西完全沒有關係(例如只是拖曳色板)
-- [x] contextMenu可以再小一些
-- [x] properties tab 的關鍵影格時間軸可以縮放（scale）
-
-- [ ] no idea speed curve how to use
-- [x] drag clip start/end should always allow overlap other clips, and press ctrl during the period should work(speed change by clip length)
-- [x] stupid lyrics UI and function fix, should have a lyrics tab
-- [x] 鎖住軌道後就無法選取track的任何片段(選中該軌道也不行)，右鍵會出現解鎖選項，鎖住的UI簡化，就是變深色，鎖頭顏色變亮，不需要bg什麼的
-- [x] undo時media card遺失，我說的自動移除是只有missing的片段才會自動剔除
-- [x] ghost item can't snap other track
-- [x] video clip contextMenu add: remove sound from video
-- [x] 吸色去背
-- [x] AI去背，在遮罩之後?
-- [x] beat偵測後應該要可以手動改變取樣間隔，不然有些都太大根本沒用
-- [x] waveform放大後畫質變很差
-- [x] round value like property
-- [x] multiselect items across track types, resize matching edges together
-- [x] preview tab, volume slider
-- [ ] add track top vs down
-- [x] icon
-- [ ] .ybeat optimize
-- [x] more effect/transition
-- [x] clip-fx-timing-plan.md
-- [ ] ai-roadmap.md
-- [ ] timeline scale should be memorize when f5
+- [ ] hard to use, speed curve
+- [ ] add track, top vs down
+- [ ] AI 寫的模組檢查畫面輸出：用隱藏的 WebGL2 算幾格、讀回像素，整片黑 / 全透明 / NaN / 跟原圖一樣就當錯誤丟回去修（不用看圖、成本低）
+- [ ] 時間軸標記：可命名、跳轉、吸附
+- [ ] 音量曲線＋背景音樂自動避讓人聲
+- [ ] 代理檔／區段預先渲染（視效能再做, when 4K lol）

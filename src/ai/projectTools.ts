@@ -8,7 +8,7 @@ import { parseParams, parsePointCh, type ParamValue, type ParamValues } from '..
 import { newKey, sortKeys, type Keyframe } from '../engine/keyframes';
 import { normalizeHits, type FxTiming } from '../engine/trigger';
 import { captionList } from '../engine/subtitles';
-import { followOf, type Follow, type FollowMap } from '../engine/follow';
+import { anchorTime, fitOf, followOf, frameRectToBox, putAnchor, type Follow, type FollowMap, type Subject } from '../engine/follow';
 import { fitStart } from '../engine/overlap';
 import { laneOf, spansOf } from '../store';
 import { triggerBeats, type BeatEvery, type FxTrigger } from '../engine/trigger';
@@ -137,13 +137,22 @@ export const PROJECT_TOOL_DECLS: ToolDecl[] = [
     },
   },
   {
-    name: 'set_face_tracking',
-    description: 'Propose turning face tracking on / off for video or image clips. Face-aware effects (center params marked "follows face") on or over a tracked clip aim at the face; untracked clips are never analysed.',
-    parameters: { type: 'object', properties: { clipIds: strs('clip ids'), on: { type: 'boolean' } }, required: ['clipIds', 'on'] },
+    name: 'set_tracking',
+    description: 'Propose what video / image clips track. target: face = the largest face (automatic); box = a custom object (car, ball, game sprite…) the user outlines — pass box to add an outline yourself, otherwise the user outlines it on the preview; off = stop tracking. Followable params (marked "follows target") of effects on or over a tracked clip aim at the tracked thing; untracked clips are never analysed.',
+    parameters: {
+      type: 'object',
+      properties: {
+        clipIds: strs('clip ids'),
+        target: { type: 'string', enum: ['face', 'box', 'off'] },
+        box: { type: 'array', items: { type: 'number' }, description: 'target box on screen at time "at": [x0, y0, x1, y1], 0..1, y down (one clip only)' },
+        at: num('timeline seconds the box is seen at (default: clip start)'),
+      },
+      required: ['clipIds', 'target'],
+    },
   },
   {
     name: 'set_follow',
-    description: 'Propose whether a point parameter (e.g. center) of effect blocks / clip effects / transitions follows the face. Only matters when the clip it looks at has face tracking on (set_face_tracking). Zoom-like built-in modules follow by default; on=false lets the user place / keyframe the point by hand. offset = position relative to the face (screen units, y down); side = which clip a transition follows (from = previous, to = next).',
+    description: 'Propose whether a point parameter (e.g. center) of effect blocks / clip effects / transitions follows the tracked target (face / custom object). Only matters when the clip it looks at is tracking something (set_tracking). Zoom-like built-in modules follow by default; on=false lets the user place / keyframe the point by hand. offset = position relative to the target (screen units, y down); side = which clip a transition follows (from = previous, to = next).',
     parameters: {
       type: 'object',
       properties: {
@@ -211,7 +220,7 @@ export type Op =
   | { op: 'set_keyframes'; targets: Target[]; param: string; keys: { t: number; v: number }[]; ease: string }
   | { op: 'set_effect_timing'; targets: Target[]; timing: FxTiming | undefined }
   | { op: 'set_follow'; targets: Target[]; param: string; follow: Follow | null }
-  | { op: 'set_face_tracking'; clipIds: string[]; on: boolean }
+  | { op: 'set_tracking'; clipIds: string[]; subject: Subject | null }
   | { op: 'edit_subtitles'; items: { clipId: string; text?: string; start?: number; end?: number }[] }
   | { op: 'split_subtitles'; items: { clipId: string; parts: string[]; times: number[] }[] }
   | { op: 'translate_subtitles'; items: { clipId: string; text: string }[] };
@@ -419,7 +428,7 @@ function propose(name: string, a: Record<string, unknown>, s: S): { p: Proposal;
     return { p: { summary, op: { op: 'set_keyframes', targets, param, keys: list, ease } }, warn };
   }
 
-  if (name === 'set_face_tracking') {
+  if (name === 'set_tracking') {
     const ids = idList(a.clipIds);
     if (!ids.length) fail('clipIds is empty');
     tooMany(ids.length);
@@ -429,8 +438,26 @@ function propose(name: string, a: Record<string, unknown>, s: S): { p: Proposal;
       const m = media.get(c.mediaId);
       if (c.text || !m || (m.kind !== 'video' && m.kind !== 'image')) fail(`clip ${id} is not a video / image clip`);
     }
-    const on = a.on !== false;
-    return { p: { summary: on ? $t('臉部追蹤 ×{0}', ids.length) : $t('關閉臉部追蹤 ×{0}', ids.length), op: { op: 'set_face_tracking', clipIds: ids, on } }, warn };
+    const target = a.target === 'off' || a.target === 'box' ? a.target : 'face';
+    if (target === 'off') return { p: { summary: $t('關閉追蹤 ×{0}', ids.length), op: { op: 'set_tracking', clipIds: ids, subject: null } }, warn };
+    if (target === 'face') return { p: { summary: $t('臉部追蹤 ×{0}', ids.length), op: { op: 'set_tracking', clipIds: ids, subject: { kind: 'face' } } }, warn };
+    // 自訂目標：有給框就在那一格加錨點，沒給 = 開著等使用者在預覽上框
+    const c = clipOf(s, ids[0]);
+    let anchors = c.subject?.kind === 'box' ? c.subject.anchors : [];
+    if (a.box !== undefined) {
+      if (ids.length !== 1) fail('box needs exactly one clip');
+      const b = a.box;
+      if (!Array.isArray(b) || b.length !== 4 || !b.every(isNum)) fail('box must be [x0, y0, x1, y1]');
+      const at = isNum(a.at) ? (a.at as number) : c.start;
+      if (at < c.start || at >= c.start + c.duration) fail(`at ${at} is outside clip ${c.id}`);
+      const m = media.get(c.mediaId)!;
+      const modules = new Map(s.modules.map((x) => [x.id, x]));
+      const v = b as number[];
+      const box = frameRectToBox(c, m, at - c.start, s.format.w / s.format.h, [v[0], v[1]], [v[2], v[3]]);
+      if (!box) fail('box is empty or outside the clip');
+      anchors = putAnchor(anchors, { t: anchorTime(c, m, at - c.start, modules), box: box! });
+    }
+    return { p: { summary: $t('追蹤自訂目標 ×{0}', ids.length), op: { op: 'set_tracking', clipIds: ids, subject: { kind: 'box', anchors } } }, warn };
   }
 
   if (name === 'set_follow') {
@@ -444,8 +471,8 @@ function propose(name: string, a: Record<string, unknown>, s: S): { p: Proposal;
       if (!m || !parseParams(m.code).some((d) => d.name === param && d.type === 'point')) fail(`${targetModule(s, t)} has no point parameter ${param}`);
     }
     const off = Array.isArray(a.offset) && a.offset.length === 2 && a.offset.every(isNum) ? (a.offset as [number, number]) : undefined;
-    const follow: Follow | null = a.on === false ? null : { target: 'face', ...(off ? { offset: off } : {}), ...(a.side === 'to' || a.side === 'from' ? { side: a.side } : {}) };
-    return { p: { summary: follow ? $t('跟隨臉部 ×{0}', targets.length) : $t('不跟隨臉部 ×{0}', targets.length), op: { op: 'set_follow', targets, param, follow } }, warn };
+    const follow: Follow | null = a.on === false ? null : { ...(off ? { offset: off } : {}), ...(a.side === 'to' || a.side === 'from' ? { side: a.side } : {}) };
+    return { p: { summary: follow ? $t('跟隨目標 ×{0}', targets.length) : $t('不跟隨目標 ×{0}', targets.length), op: { op: 'set_follow', targets, param, follow } }, warn };
   }
 
   if (name === 'set_effect_timing') {
@@ -648,7 +675,8 @@ function paramLine(s: S, moduleId: string, values: ParamValues, follow?: FollowM
   return defs.map((d) => {
     const v = values[d.name] ?? d.def;
     const range = (d.type === 'float' || d.type === 'int') && d.max > d.min ? ` (${d.min}..${d.max})` : '';
-    return `${d.name}:${d.type}=${JSON.stringify(v)}${range}${followOf(d, follow) ? ' (follows face)' : ''}`;
+    const tag = followOf(d, follow) ? ' (follows target)' : fitOf(d, defs, follow) ? ' (sized to target)' : '';
+    return `${d.name}:${d.type}=${JSON.stringify(v)}${range}${tag}`;
   }).join(', ');
 }
 
@@ -716,7 +744,8 @@ export function projectSnapshot(s: S = useStore.getState()): string {
     if (c.transitionOut) x.push(`out:${c.transitionOut.module}/${c.transitionOut.duration}`);
     if (c.remap) x.push(`remap:${c.remap.module}`);
     if (c.fx) x.push(`fx:${c.fx.map((f) => `${f.id}=${f.module}`).join(',')}`);
-    if (s.clips.find((k) => k.id === c.id)?.faceTrack) x.push('face-tracking');
+    const sub = s.clips.find((k) => k.id === c.id)?.subject;
+    if (sub) x.push(sub.kind === 'face' ? 'tracking:face' : `tracking:box(${sub.anchors.length} anchors)`);
     L.push(`${c.id} v${c.track} ${c.start}-${c.end} ${c.type} "${(c.name ?? '').slice(0, 30)}"${x.length ? ' ' + x.join(' ') : ''}`);
   }
   L.push(...more(s.clips.length));
@@ -899,10 +928,10 @@ function applyOp(op: Op): number {
       }
       return n;
     }
-    case 'set_face_tracking':
+    case 'set_tracking':
       for (const id of op.clipIds) {
         if (!has(id)) continue;
-        patchClip(id, (c) => ({ ...c, faceTrack: op.on || undefined }));
+        patchClip(id, (c) => ({ ...c, subject: op.subject ?? undefined }));
         n++;
       }
       return n;

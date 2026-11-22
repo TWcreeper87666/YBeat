@@ -6,6 +6,7 @@ import { isHitFx, parseDuration, type ParamValues } from './engine/params';
 import { clipSource, plainSpeed } from './engine/remap';
 import { DEFAULT_TRANSFORM, EASES, normalizeScale, type EaseName, type Fit, type Transform } from './engine/transform';
 import { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualRows, type TrackKind, type TrackState, type Tracks } from './engine/tracks';
+import { remapDriveTracks } from './engine/audioReact';
 export { DEFAULT_TRACKS, TRACK_H, displayRows, fxLevel, tracksFromOrder, visualRows, type TrackKind, type TrackState, type Tracks };
 import { splitTiming, type FxTiming, type FxTrigger } from './engine/trigger';
 import { ANIM_PROPS, newKey, scaleKeyList, scaleKeyMap, splitKeys, type Ease, type Keyframe, type Keys } from './engine/keyframes';
@@ -15,7 +16,7 @@ import { fxCombo, stillDur, transDur, userTextStyle, type FxCombo } from './pref
 import { PPS_MAX, PPS_MIN } from './engine/rulerTicks';
 import { DEFAULT_TEXT, TEXT_PRESETS, type TextStyle } from './engine/text';
 import type { Mask } from './engine/mask';
-import type { FollowMap } from './engine/follow';
+import type { FollowMap, Subject } from './engine/follow';
 
 export type { Module, ModuleKind };
 
@@ -41,7 +42,7 @@ export interface TransitionRef {
   moduleId: string;
   params: ParamValues;
   duration: number;
-  /** point 參數跟著臉（沒有 = 照模組的 @follow 預設；null = 關掉） */
+  /** point 參數跟著片段追蹤的目標（沒有 = 照模組的 @follow 預設；null = 關掉） */
   follow?: FollowMap;
 }
 
@@ -60,7 +61,10 @@ export interface AudioDrive {
   source: 'level' | 'beat';
   min: number;
   max: number;
+  /** 只聽這些軌道的聲音（軌道索引；video = 影片片段本身的聲音）；沒有 = 全部 */
+  from?: AudioFrom;
 }
+export interface AudioFrom { audio?: number[]; video?: number[] }
 
 /** 套在單一片段上的特效（可以疊好幾個，只影響這個片段） */
 export interface ClipFx {
@@ -77,7 +81,7 @@ export interface ClipFx {
   base?: boolean;
   /** 什麼時候作用（片段內時間）；沒有 = 整段 */
   timing?: FxTiming;
-  /** point 參數跟著臉（沒有 = 照模組的 @follow 預設；null = 關掉） */
+  /** point 參數跟著片段追蹤的目標（沒有 = 照模組的 @follow 預設；null = 關掉） */
   follow?: FollowMap;
 }
 
@@ -117,8 +121,8 @@ export interface Clip extends ItemBase {
   audioSplit?: boolean;
   /** AI 去背（U²-Netp，遮罩預先逐格算好） */
   aiMatte?: boolean;
-  /** 臉部追蹤：開了才偵測；套在這個片段上（或看這個片段）的特效 / 轉場的中心會跟著臉 */
-  faceTrack?: boolean;
+  /** 追蹤的目標（臉部 / 自訂框選）；套在這個片段上（或看這個片段）的特效 / 轉場的中心會跟著它 */
+  subject?: Subject;
   /** 舊版欄位，載入時會轉成 keys */
   transformEnd?: Transform | null;
   ease?: EaseName;
@@ -136,10 +140,10 @@ export interface FxItem extends ItemBase {
   params: ParamValues;
   /** 參數跟著音量 / 節拍變化 */
   audio?: Record<string, AudioDrive>;
-  /** point 參數跟著臉（沒有 = 照模組的 @follow 預設；null = 關掉） */
+  /** point 參數跟著片段追蹤的目標（沒有 = 照模組的 @follow 預設；null = 關掉） */
   follow?: FollowMap;
-  /** 跟隨臉部時看哪一條影片軌的片段（沒有 = 自動：底下最上層有開臉部追蹤的片段） */
-  faceFrom?: number;
+  /** 跟隨目標時看哪一條影片軌的片段（沒有 = 自動：底下最上層有追蹤的片段） */
+  subjectFrom?: number;
   /** 數值參數的關鍵影格（特效內時間）；遮罩的 key 叫 `mask.x` 之類 */
   keys?: Record<string, Keyframe[]>;
   /** 遮罩：只在這個區域套用特效 */
@@ -1363,10 +1367,13 @@ export const useStore = create<State>()(
                 return { ...t, row: r0 > q || (r0 === q && q < L0) ? r0 + 1 : r0 };
               });
             }
+            const items = kind === 'video' ? { clips: shift(s.clips) } : kind === 'fx' ? { effects: shift(s.effects) } : { audios: shift(s.audios) };
             return {
               activeTrack: act,
               tracks: next,
-              ...(kind === 'video' ? { clips: shift(s.clips) } : kind === 'fx' ? { effects: shift(s.effects) } : { audios: shift(s.audios) }),
+              ...items,
+              // 音訊反應的來源軌道跟著往後挪
+              ...(kind === 'fx' ? {} : remapDriveTracks({ clips: items.clips ?? s.clips, effects: s.effects }, kind, (j) => (j >= i ? j + 1 : j))),
             };
           }),
 
@@ -1379,10 +1386,12 @@ export const useStore = create<State>()(
             order.splice(to, 0, from);
             const newIdx = new Map(order.map((old, i) => [old, i]));
             const remap = <T extends AnyItem>(items: T[]) => items.map((x) => ({ ...x, track: newIdx.get(x.track) ?? x.track }));
+            const items = kind === 'video' ? { clips: remap(s.clips) } : kind === 'fx' ? { effects: remap(s.effects) } : { audios: remap(s.audios) };
             return {
               activeTrack: s.activeTrack?.kind === kind ? { kind, idx: newIdx.get(s.activeTrack.idx) ?? s.activeTrack.idx } : s.activeTrack,
               tracks: { ...s.tracks, [kind]: order.map((o) => s.tracks[kind][o]) },
-              ...(kind === 'video' ? { clips: remap(s.clips) } : kind === 'fx' ? { effects: remap(s.effects) } : { audios: remap(s.audios) }),
+              ...items,
+              ...(kind === 'fx' ? {} : remapDriveTracks({ clips: items.clips ?? s.clips, effects: s.effects }, kind, (j) => newIdx.get(j) ?? j)),
             };
           }),
 
@@ -1396,10 +1405,11 @@ export const useStore = create<State>()(
               return n === undefined || n === x.track ? x : { ...x, track: n };
             });
             const act = s.activeTrack;
+            let fixed = { clips: remap(s.clips, 'video'), effects: remap(s.effects, 'fx') };
+            for (const k of ['video', 'audio'] as const) fixed = remapDriveTracks(fixed, k, (j) => maps[k].get(j) ?? j);
             return {
               tracks,
-              clips: remap(s.clips, 'video'),
-              effects: remap(s.effects, 'fx'),
+              ...fixed,
               audios: remap(s.audios, 'audio'),
               activeTrack: act ? { kind: act.kind, idx: maps[act.kind].get(act.idx) ?? act.idx } : act,
             };
@@ -1440,6 +1450,8 @@ export const useStore = create<State>()(
             });
           }
           if (kind === 'video') tracks.fx = s.tracks.fx.map((t, j) => ({ ...t, level: fxLevel(s.tracks, j) > idx ? fxLevel(s.tracks, j) - 1 : fxLevel(s.tracks, j) }));
+          // 音訊反應的來源：刪掉的軌道拿掉、後面的往前補
+          if (kind !== 'fx') ({ clips, effects } = remapDriveTracks({ clips, effects }, kind, (j) => (j === idx ? null : j > idx ? j - 1 : j)));
           const act = s.activeTrack;
           const ids = new Set([...clips, ...effects, ...audios].map((x) => x.id));
           set({

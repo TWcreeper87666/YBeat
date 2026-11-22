@@ -22,7 +22,7 @@ const crashZoom = `// 衝擊變焦：一開始猛衝進去再快速回穩
 // @param amount: float = 0.6 (0..2) "變焦量"
 // @param blur: float = 0.6 (0..1) "放射模糊"
 // @param zoomOut: bool = false "反向（拉遠）"
-// @param center: point = 0.5,0.5 "中心" @follow(face)
+// @param center: point = 0.5,0.5 "中心" @follow
 // @param ease: curve = expoOut "曲線"
 vec4 effect(vec2 uv) {
   float k = 1.0 - curve(ease, u_progress);      // 1 → 0
@@ -93,7 +93,7 @@ const lens = `// 魚眼 / 鏡頭扭曲
 // @hit
 // @param amount: float = 0.6 (-1..2) "扭曲量"
 // @param decay: float = 2 (0..6) "衰減"
-// @param center: point = 0.5,0.5 "中心" @follow(face)
+// @param center: point = 0.5,0.5 "中心" @follow
 vec4 effect(vec2 uv) {
   float k = amount * pow(1.0 - u_progress, decay);
   vec2 p = uv - center;
@@ -113,7 +113,7 @@ const speedLines = `// 速度線（漫畫集中線）
 // @param speed: float = 14 (0..60) "閃動速度"
 // @param opacity: float = 0.85 (0..1) "不透明度"
 // @param tint: color = #ffffff "顏色"
-// @param center: point = 0.5,0.5 "中心" @follow(face)
+// @param center: point = 0.5,0.5 "中心" @follow
 vec4 effect(vec2 uv) {
   vec4 c = tex(uv);
   vec2 p = uv - center;
@@ -185,7 +185,7 @@ vec4 transition(vec2 uv) {
 const crashZoomTr = `// 衝擊變焦轉場：前一段衝進去，下一段從放大狀態回穩
 // @param strength: float = 1.2 (0..3) "變焦強度"
 // @param blur: float = 0.7 (0..1) "放射模糊"
-// @param center: point = 0.5,0.5 "中心" @follow(face)
+// @param center: point = 0.5,0.5 "中心" @follow
 vec4 radial(sampler2D s, vec2 uv, float z, float b) {
   vec2 c = center;
   vec2 base = zoomUV(uv, z, c);
@@ -234,7 +234,7 @@ const spin = `// 旋轉衝擊
 // @param turns: float = 1 (0..4) "圈數"
 // @param zoom: float = 0.5 (0..2) "拉遠量"
 // @param blur: float = 0.6 (0..1.5) "旋轉模糊"
-// @param center: point = 0.5,0.5 "中心" @follow(face)
+// @param center: point = 0.5,0.5 "中心" @follow
 // @param ease: curve = inOut3 "曲線"
 vec4 transition(vec2 uv) {
   float e = curve(ease, progress);
@@ -272,7 +272,7 @@ vec4 transition(vec2 uv) {
 `;
 
 const iris = `// 圓形擴散遮罩
-// @param center: point = 0.5,0.5 "中心" @follow(face)
+// @param center: point = 0.5,0.5 "中心" @follow
 // @param softness: float = 0.02 (0..0.3) "邊緣柔化"
 // @param ease: curve = inOut3 "曲線"
 vec4 transition(vec2 uv) {
@@ -344,20 +344,20 @@ const curve_remap_freeze = curvePreset('中段定格', '[[0,0,[0,0,1,1]],[0.4,0.
 const mk = (id: string, kind: ModuleKind, name: string, code: string, rev?: number): Module => ({ id, kind, name, code, builtin: true, ...(rev ? { rev } : {}) });
 
 const BASE_MODULES: Module[] = [
-  mk('fx-crashzoom', 'effect', '衝擊變焦 Crash Zoom', crashZoom, 4),
+  mk('fx-crashzoom', 'effect', '衝擊變焦 Crash Zoom', crashZoom, 5),
   mk('fx-shake', 'effect', '相機震動 Shake', shake, 2),
   mk('fx-flash', 'effect', '閃白 Flash', flash, 2),
   mk('fx-rgb', 'effect', 'RGB 色差', rgbSplit, 2),
-  mk('fx-lens', 'effect', '魚眼扭曲 Lens', lens, 4),
-  mk('fx-speedlines', 'effect', '速度線 Speed Lines', speedLines, 3),
+  mk('fx-lens', 'effect', '魚眼扭曲 Lens', lens, 5),
+  mk('fx-speedlines', 'effect', '速度線 Speed Lines', speedLines, 4),
   mk('fx-entrance', 'effect', '進場變換 Entrance', entrance, 3),
   mk('fx-grade', 'effect', '調色 Grade', grade),
   mk('tr-crossfade', 'transition', '溶接 Crossfade', crossfade, 2),
-  mk('tr-crashzoom', 'transition', '衝擊變焦 Crash Zoom', crashZoomTr, 3),
+  mk('tr-crashzoom', 'transition', '衝擊變焦 Crash Zoom', crashZoomTr, 4),
   mk('tr-whip', 'transition', '甩鏡 Whip Pan', whipPan, 2),
-  mk('tr-spin', 'transition', '旋轉 Spin', spin, 3),
+  mk('tr-spin', 'transition', '旋轉 Spin', spin, 4),
   mk('tr-diagonal', 'transition', '斜切 Diagonal Wipe', diagonal, 2),
-  mk('tr-iris', 'transition', '圓形擴散 Iris', iris, 3),
+  mk('tr-iris', 'transition', '圓形擴散 Iris', iris, 4),
   mk('tr-flash', 'transition', '閃白 Flash Cut', flashCut),
   mk('remap-speed', 'remap', '變速 / 倒放', remapSpeed),
   mk('remap-curve', 'remap', '曲線', remapCurve),

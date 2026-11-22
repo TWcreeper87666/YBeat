@@ -5,7 +5,8 @@
 //       // @param center: point = 0.5,0.5 "中心"        → uniform vec2（uv 座標）
 //       // @param ease: curve = inOut "曲線"             → uniform vec4（cubic-bezier），用 curve(ease, x) 取值
 //       // @param to: float = 0.2 (0..1) "大小" @box(center) → 預覽畫面上以 center 為中心畫出縮放後的畫面框
-//       // @param center: point = 0.5,0.5 "中心" @follow(face) → 預設跟著畫面裡的臉（素材有偵測結果時）
+//       // @param center: point = 0.5,0.5 "中心" @follow → 預設跟著片段追蹤的目標（片段有追蹤結果時）
+//       // @param size: point = 0.3,0.3 "範圍" @fit(center, k) → 寬、高（畫面 0..1）；center 跟著目標時 = 目標大小；都再乘上 float 參數 k
 
 import { EASE_PRESETS, evalKeys, type Bez, type Keyframe } from './keyframes';
 
@@ -25,12 +26,14 @@ export interface ParamDef {
   box?: string;
   /** curve 參數：「無」選項的固定值（`@none(1)`，例如不淡入 = 一直是 1） */
   none?: number;
-  /** point 參數：預設跟著畫面裡的臉（`@follow(face)`） */
-  follow?: 'face';
+  /** point 參數：預設跟著片段追蹤的目標（`@follow`） */
+  follow?: true;
+  /** point 參數（寬、高）：`@fit(點, 倍率參數)`，點跟著目標時 = 目標的大小；不管有沒有跟隨都乘上倍率參數（float） */
+  fit?: { of: string; scale?: string };
 }
 
 const RE =
-  /\/\/\s*@param\s+(\w+)\s*:\s*(float|int|bool|color|point|curve)\s*=\s*(\S+?)(?:\s*\(\s*(-?[\d.]+)\s*\.\.\s*(-?[\d.]+)\s*\))?(?:\s*"([^"]*)")?(?:\s*@box\(\s*(\w+)\s*\))?(?:\s*@none\(\s*(-?[\d.]+)\s*\))?(?:\s*@follow\(\s*(face)\s*\))?[ \t\r]*$/gm;
+  /\/\/\s*@param\s+(\w+)\s*:\s*(float|int|bool|color|point|curve)\s*=\s*(\S+?)(?:\s*\(\s*(-?[\d.]+)\s*\.\.\s*(-?[\d.]+)\s*\))?(?:\s*"([^"]*)")?(?:\s*@box\(\s*(\w+)\s*\))?(?:\s*@fit\(\s*(\w+)\s*(?:,\s*(\w+)\s*)?\))?(?:\s*@none\(\s*(-?[\d.]+)\s*\))?(?:\s*(@follow))?[ \t\r]*$/gm;
 
 const cache = new Map<string, ParamDef[]>();
 
@@ -51,7 +54,7 @@ export function parseParams(code: string): ParamDef[] {
   RE.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = RE.exec(code))) {
-    const [, name, type, raw, mn, mx, label, box, none, follow] = m;
+    const [, name, type, raw, mn, mx, label, box, fit, fitK, none, follow] = m;
     let def: ParamValue;
     if (type === 'bool') def = raw === 'true' || raw === '1';
     else if (type === 'color') def = /^#[0-9a-fA-F]{6}$/.test(raw) ? raw.toLowerCase() : '#ffffff';
@@ -70,7 +73,8 @@ export function parseParams(code: string): ParamDef[] {
       label: label || name,
       ...(box && type === 'float' ? { box } : {}),
       ...(none !== undefined && type === 'curve' ? { none: parseFloat(none) } : {}),
-      ...(follow && type === 'point' ? { follow: 'face' as const } : {}),
+      ...(fit && type === 'point' ? { fit: { of: fit, ...(fitK ? { scale: fitK } : {}) } } : {}),
+      ...(follow && type === 'point' && !fit ? { follow: true as const } : {}),
     });
   }
   if (cache.size > 300) cache.clear();
@@ -105,6 +109,12 @@ export function parsePointCh(ch: string): { name: string; axis: 0 | 1 } | null {
   return m && m[1] !== 'mask' ? { name: m[1], axis: m[2] === 'y' ? 1 : 0 } : null;
 }
 
+/** @fit 參數的倍率（倍率參數這一格的值；沒有倍率參數 = 1） */
+export function fitScale(d: ParamDef, defs: ParamDef[], values: ParamValues, keys: Record<string, Keyframe[]> | undefined, local: number): number {
+  const s = d.fit?.scale ? defs.find((x) => x.name === d.fit!.scale && (x.type === 'float' || x.type === 'int')) : undefined;
+  return s ? Number(paramAt(s, values, keys, local)) : 1;
+}
+
 /** 數值型（可以打關鍵影格、跟著音訊變化） */
 export const isNumeric = (d: ParamDef) => d.type === 'float' || d.type === 'int';
 
@@ -136,8 +146,8 @@ export function parseDuration(code: string, fallback: number): number {
   return m ? parseFloat(m[1]) || fallback : fallback;
 }
 
-/** 可以跟隨臉部的模組：有 point 參數標了 @follow(face)（縮放、旋轉、扭曲這類有中心的） */
-export function isFaceAware(m: { kind: string; code: string }): boolean {
+/** 可以跟隨目標的模組：有 point 參數標了 @follow（縮放、旋轉、扭曲這類有中心的） */
+export function canFollow(m: { kind: string; code: string }): boolean {
   return (m.kind === 'effect' || m.kind === 'transition') && parseParams(m.code).some((d) => !!d.follow);
 }
 

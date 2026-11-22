@@ -1,5 +1,6 @@
 import { EasePresetsMini } from './CurveEdit';
 import { $t } from '../i18n';
+import { flushSync } from 'react-dom';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { create } from 'zustand';
 import { useStore, type Clip, type ClipFx, type FxItem } from '../store';
@@ -55,7 +56,7 @@ export interface Channel {
   partner?: { id: string; value: number; keys: Keyframe[] };
   /** 右鍵選單最後多加的項目（名稱與數值欄位都適用，例如「套用到相同特效」） */
   menu?: MenuItem[];
-  /** 名稱後面的小圖示（例如跟隨臉部） */
+  /** 名稱後面的小圖示（例如跟隨目標） */
   icon?: React.ReactNode;
 }
 
@@ -503,8 +504,8 @@ export interface Section {
   id: string;
   title: string;
   channels?: Channel[];
-  /** 不可動畫的列（下拉、開關、顏色…） */
-  rows?: { label: string; node: React.ReactNode }[];
+  /** 不可動畫的列（下拉、開關、顏色…）；sub = 上一列的子屬性（往內縮、小標題） */
+  rows?: { label: string; node: React.ReactNode; sub?: boolean }[];
   /** 放在區塊最下面（例如程式碼） */
   footer?: React.ReactNode;
   onReset?: () => void;
@@ -597,7 +598,8 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
   useLayoutEffect(() => {
     const el = rulerRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setRulerW(el.clientWidth));
+    // ResizeObserver 在繪製前通知：flushSync 讓尺規跟面板同一幀更新（不然換排版時會先畫一幀舊寬度）
+    const ro = new ResizeObserver(() => flushSync(() => setRulerW(el.clientWidth)));
     ro.observe(el);
     setRulerW(el.clientWidth);
     return () => ro.disconnect();
@@ -977,8 +979,8 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
             {!isCol && (
               <>
                 {sec.timing && <TimingRow tm={sec.timing} dur={dur} lc={lc} view={view} localAt={localAt} seek={seek} />}
-                {sec.rows?.map((r) => (
-                  <div key={r.label} className="ec-row">
+                {sec.rows?.map((r, i) => (
+                  <div key={`${i}:${r.label}`} className={`ec-row ${r.sub ? 'sub' : ''}`}>
                     <div className="ec-left ec-plain" onContextMenu={(e) => sectionResetMenu(e, sec)}><span className="ec-label" title={typeof r.label === 'string' ? r.label : undefined}>{r.label}</span><div className="ec-node">{r.node}</div></div>
                     <div className="ec-right ec-dim" onPointerDown={startMarquee} onContextMenu={(e) => laneMenu(e)} />
                   </div>
@@ -1086,7 +1088,7 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
 
   useLayoutEffect(() => {
     const el = wrapRef.current!;
-    const ro = new ResizeObserver(() => setW(el.clientWidth));
+    const ro = new ResizeObserver(() => flushSync(() => setW(el.clientWidth)));
     ro.observe(el);
     setW(el.clientWidth);
     return () => ro.disconnect();

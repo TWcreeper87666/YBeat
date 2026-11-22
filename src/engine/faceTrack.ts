@@ -129,3 +129,74 @@ export function trackAt(track: TrackPoint[], t: number): TrackPoint | null {
   const n = a && t - a.t <= near ? a : b && b.t - t <= near ? b : null;
   return n ? { ...n, t } : null;
 }
+
+// ───────────── 臉追丟的地方用 VitTrack 補（側臉、低頭、背對鏡頭） ─────────────
+
+/** 給 VitTrack 的框是臉框放大這麼多倍（含頭髮、頭的輪廓：轉頭時還認得出來）；追出來的框再縮回臉的大小 */
+export const HEAD_PAD = 1.6;
+
+/**
+ * 臉部軌跡的一個空洞：從 seed 那張臉往 dir 方向追（1 = 往後到 to、−1 = 往前到 from）。
+ * end = 空洞另一頭的臉（有的話；用來修正接縫）。
+ */
+export interface Gap { from: number; to: number; dir: 1 | -1; seed: TrackPoint; end?: TrackPoint }
+
+/** 空洞離範圍太遠的那一頭就不從那裡追（追蹤要一格一格走，走太遠又慢又容易飄） */
+const REACH = MAX_GAP * 2;
+
+/**
+ * 範圍 lo..hi 裡要補的空洞（picked = pickTrack 的結果，整個素材）。
+ * - 兩張臉中間超過 MAX_GAP（trackAt 不內插）；範圍開頭 / 結尾離最近的臉超過 MAX_GAP / 2（trackAt 不延伸）。
+ * - 優先從前面那張臉往後追；前面那張離範圍太遠就從後面那張往前追；兩邊都太遠就不補。
+ */
+export function findGaps(picked: TrackPoint[], lo: number, hi: number): Gap[] {
+  const out: Gap[] = [];
+  if (!picked.length || hi <= lo) return out;
+  const pts = [...picked].sort((a, b) => a.t - b.t);
+  for (let i = 0; i <= pts.length; i++) {
+    const a = pts[i - 1], b = pts[i];
+    // 空洞的範圍（頭尾 = 延伸到範圍邊界）
+    const s = a ? a.t : lo, e = b ? b.t : hi;
+    const need = a && b ? e - s > MAX_GAP : e - s > MAX_GAP / 2;
+    if (!need || e <= lo || s >= hi) continue;
+    if (a && a.t >= lo - REACH) out.push({ from: a.t, to: Math.min(e, hi), dir: 1, seed: a, ...(b && b.t <= hi ? { end: b } : {}) });
+    else if (b && b.t <= hi + REACH) out.push({ from: Math.max(s, lo), to: b.t, dir: -1, seed: b, ...(a && a.t >= lo ? { end: a } : {}) });
+  }
+  return out;
+}
+
+/** 臉框 → 給 VitTrack 的框（中心不變、放大 HEAD_PAD 倍） */
+export const padBox = (p: TrackPoint): [number, number, number, number] => [p.x, p.y, p.w * HEAD_PAD, p.h * HEAD_PAD];
+
+/**
+ * 把 VitTrack 補的點併進臉部軌跡（pts = VitTrack 追出來的框，已經是 padBox 的大小）。
+ * - 空洞已經不在了（seed 不見了、或中間偵測到臉了）的不用。
+ * - 另一頭有臉、而且追到的最後一點跟它對得上：誤差沿著空洞線性攤掉（接縫不會跳）。
+ */
+export function bridgeTrack(picked: TrackPoint[], bridges: { gap: Gap; pts: TrackPoint[] }[]): TrackPoint[] {
+  const out = [...picked];
+  const eps = 1e-3;
+  for (const { gap: g, pts } of bridges) {
+    if (!picked.some((p) => Math.abs(p.t - g.seed.t) < eps && Math.abs(p.x - g.seed.x) < 1e-4 && Math.abs(p.y - g.seed.y) < 1e-4)) continue;
+    if (picked.some((p) => p.t > g.from + eps && p.t < g.to - eps)) continue;
+    const mid = pts
+      .filter((p) => p.t > g.from + eps && p.t < g.to - eps)
+      .map((p) => ({ t: p.t, x: p.x, y: p.y, w: p.w / HEAD_PAD, h: p.h / HEAD_PAD }))
+      .sort((a, b) => a.t - b.t);
+    if (!mid.length) continue;
+    const L = g.dir > 0 ? mid[mid.length - 1] : mid[0];
+    const e = g.end;
+    if (e && Math.abs(L.t - e.t) <= MAX_GAP / 4 && Math.hypot(L.x - e.x, L.y - e.y) < Math.max(e.w, e.h) * 2.5) {
+      const span = L.t - g.seed.t || 1;
+      for (const p of mid) {
+        const k = Math.min(1, Math.max(0, (p.t - g.seed.t) / span));
+        p.x += (e.x - L.x) * k;
+        p.y += (e.y - L.y) * k;
+        p.w += (e.w - L.w) * k;
+        p.h += (e.h - L.h) * k;
+      }
+    }
+    out.push(...mid);
+  }
+  return out.sort((a, b) => a.t - b.t);
+}

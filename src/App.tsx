@@ -20,7 +20,7 @@ import { fps } from './engine/rulerTicks';
 import { copyHits, copyKeys, cutHits, deleteSelectedHit, deleteSelectedKey, duplicateHits, hitEdge, hitsFocused, keysFocused, navHit, navHitEdge, nudgeHits, nudgeKeys, pasteHits, pasteKeys, selectAllHits, selectAllKeys, splitHit, trimHit } from './ui/EffectControls';
 import { ShapeDrawerHost } from './ui/ShapeDrawer';
 import { SHORTCUTS, TUTORIAL } from './ui/helpText';
-import { useLayout, toast, stopPreviewFx, confirmDialog, openMenu, useConfirm, type MenuItem } from './ui/uiStore';
+import { useLayout, toast, setBusy, stopPreviewFx, confirmDialog, openMenu, useConfirm, type MenuItem } from './ui/uiStore';
 import { DragNumber } from './ui/DragNumber';
 import { usePrefs } from './prefs';
 import { Globe, Settings } from 'lucide-react';
@@ -33,6 +33,7 @@ import { LyricsPanel } from './ui/SubtitlesDialog';
 import { ColorPanel } from './ui/ColorPanel';
 import { EditorWindow, openEditorWindow, useEditorWindow } from './ui/EditorWindow';
 import { snapToDevicePixels } from './ui/pixelSnap';
+import { Seg, Switch } from './ui/Toggle';
 
 
 // ───────────── 對話框 ─────────────
@@ -77,15 +78,12 @@ function ExportDialog({ close }: { close: () => void }) {
         <div className="form-row"><span>{$t('解析度')}</span><b>{fmt.w} × {fmt.h} <span className="muted">({formatLabel(fmt)})</span></b></div>
         <div className="form-row col">
           <span>{$t('影格率')}</span>
-          <div className="seg">{[24, 30, 60].map((f) => <button key={f} className={fps === f ? 'on' : ''} onClick={() => setFps(f)}>{f} fps</button>)}</div>
+          <Seg value={fps} on={setFps} opts={[24, 30, 60].map((f) => ({ v: f, label: `${f} fps` }))} />
         </div>
-        <div className="form-row col"><span>{$t('品質')}</span><div className="seg">{[[8, $t('較小檔案')], [20, $t('標準')], [35, $t('高品質')]].map(([rate, label]) => <button key={rate} className={quality === rate ? 'on' : ''} onClick={() => setQuality(Number(rate))}>{label}</button>)}</div></div>
+        <div className="form-row col"><span>{$t('品質')}</span><Seg value={quality} on={setQuality} opts={[{ v: 8, label: $t('較小檔案') }, { v: 20, label: $t('標準') }, { v: 35, label: $t('高品質') }]} /></div>
         {loop && <div className="form-row col">
           <span>{$t('範圍')}</span>
-          <div className="seg">
-            <button className={!onlyLoop ? 'on' : ''} onClick={() => setOnlyLoop(false)}>{$t('整個專案')}</button>
-            <button className={onlyLoop ? 'on' : ''} onClick={() => setOnlyLoop(true)}>{$t('循環範圍')}</button>
-          </div>
+          <Seg value={onlyLoop} on={setOnlyLoop} opts={[{ v: false, label: $t('整個專案') }, { v: true, label: $t('循環範圍') }]} />
         </div>}
         <div className="export-summary">
           <div><span>{$t('長度')}</span><b>{dur.toFixed(2)} {$t('秒')}</b></div>
@@ -234,50 +232,25 @@ function SettingsDialog({ close }: { close: () => void }) {
       <div className="dialog-body">
         <div className="set-sec">{$t('專案')}</div>
         <SetRow label={$t('輸出比例')} desc={<>{$t('匯出與預覽的畫面比例')} · {fmt.w} × {fmt.h}</>}>
-          <div className="seg wrap">
-            {FORMATS.map((f) => (
-              <button key={f.id} className={fmt.w === f.w && fmt.h === f.h ? 'on' : ''} onClick={() => useStore.getState().setFormat(f)} title={`${f.w} × ${f.h}`}>
-                <span className="ratio-box" style={{ aspectRatio: `${f.w} / ${f.h}` }} />
-                {f.label}
-              </button>
-            ))}
-          </div>
+          <Seg className="wrap" value={FORMATS.find((f) => fmt.w === f.w && fmt.h === f.h)?.id ?? ''} on={(id) => { const f = FORMATS.find((x) => x.id === id); if (f) useStore.getState().setFormat(f); }}
+            opts={FORMATS.map((f) => ({ v: f.id, title: `${f.w} × ${f.h}`, label: <><span className="ratio-box" style={{ aspectRatio: `${f.w} / ${f.h}` }} />{f.label}</> }))} />
         </SetRow>
-        <SetRow label={$t('自動儲存')} desc={$t('關閉後按 Ctrl+S 存檔')}>
-          <div className="seg">
-            <button className={P.autosave ? 'on' : ''} onClick={() => P.set({ autosave: true })}>{$t('開')}</button>
-            <button className={!P.autosave ? 'on' : ''} onClick={() => P.set({ autosave: false })}>{$t('關')}</button>
-          </div>
+        <SetRow label={$t('自動儲存')} desc={$t('關閉後按 Ctrl+S 存檔')} inline>
+          <Switch v={P.autosave} on={(v) => P.set({ autosave: v })} />
         </SetRow>
         <div className="set-sec">{$t('預覽')}</div>
         <SetRow label={$t('預覽畫質')} desc={$t('調低編輯會比較順，不影響匯出')}>
-          <div className="seg">
-            {QUALITIES.map((q) => (
-              <button key={q} className={L.previewScale === q ? 'on' : ''} onClick={() => L.set({ previewScale: q })}>
-                {q === 1 ? $t('完整') : `${Math.round(q * 100)}%`}
-              </button>
-            ))}
-          </div>
+          <Seg value={L.previewScale} on={(q) => L.set({ previewScale: q })} opts={QUALITIES.map((q) => ({ v: q, label: q === 1 ? $t('完整') : `${Math.round(q * 100)}%` }))} />
         </SetRow>
         <div className="set-sec">{$t('時間軸')}</div>
         <SetRow label={$t('上層軌道顯示在')} desc={$t('疊在上面的軌道放在時間軸的哪一邊')}>
-          <div className="seg">
-            <button className={L.upperLayerAt === 'bottom' ? 'on' : ''} onClick={() => L.set({ upperLayerAt: 'bottom' })}>{$t('下方')}</button>
-            <button className={L.upperLayerAt === 'top' ? 'on' : ''} onClick={() => L.set({ upperLayerAt: 'top' })}>{$t('上方')}</button>
-          </div>
+          <Seg value={L.upperLayerAt} on={(v) => L.set({ upperLayerAt: v })} opts={[{ v: 'bottom' as const, label: $t('下方') }, { v: 'top' as const, label: $t('上方') }]} />
         </SetRow>
         <SetRow label={$t('軌道高度')} desc={$t('預設與新增的軌道')}>
-          <div className="seg">
-            {(['s', 'm', 'l'] as const).map((k) => (
-              <button key={k} className={L.trackSize === k ? 'on' : ''} onClick={() => L.set({ trackSize: k })}>{{ s: $t('小'), m: $t('中'), l: $t('大') }[k]}</button>
-            ))}
-          </div>
+          <Seg value={L.trackSize} on={(k) => L.set({ trackSize: k })} opts={[{ v: 's' as const, label: $t('小') }, { v: 'm' as const, label: $t('中') }, { v: 'l' as const, label: $t('大') }]} />
         </SetRow>
         <SetRow label={$t('滾輪捲動方向')} desc={$t('在時間軸上直接滾動滾輪時')}>
-          <div className="seg">
-            <button className={L.wheelScroll !== 'vertical' ? 'on' : ''} onClick={() => L.set({ wheelScroll: 'horizontal' })}>{$t('水平')}</button>
-            <button className={L.wheelScroll === 'vertical' ? 'on' : ''} onClick={() => L.set({ wheelScroll: 'vertical' })}>{$t('垂直')}</button>
-          </div>
+          <Seg value={L.wheelScroll === 'vertical' ? 'vertical' : 'horizontal'} on={(v) => L.set({ wheelScroll: v })} opts={[{ v: 'horizontal' as const, label: $t('水平') }, { v: 'vertical' as const, label: $t('垂直') }]} />
         </SetRow>
         <SetRow label={$t('圖片 / 色板 / 文字預設長度')} desc={$t('新加入時的長度')} inline>
           <DragNumber value={P.stillDur} min={0.1} max={60} step={0.1} def={2} suffix=" s" onChange={(v) => P.set({ stillDur: Math.round(v * 100) / 100 })} />
@@ -286,11 +259,7 @@ function SettingsDialog({ close }: { close: () => void }) {
           <DragNumber value={P.transDur} min={0.05} max={5} step={0.05} def={0.4} suffix=" s" onChange={(v) => P.set({ transDur: Math.round(v * 100) / 100 })} />
         </SetRow>
         <SetRow label={$t('時間軸格線')} desc={$t('拖曳、吸附、節拍的最小單位')}>
-          <div className="seg">
-            {([30, 60] as const).map((n) => (
-              <button key={n} className={L.timeGrid === n ? 'on' : ''} onClick={() => L.set({ timeGrid: n })}>1/{n} s</button>
-            ))}
-          </div>
+          <Seg value={L.timeGrid} on={(n) => L.set({ timeGrid: n })} opts={([30, 60] as const).map((n) => ({ v: n, label: `1/${n} s` }))} />
         </SetRow>
         <SetRow label={$t('節拍提前')} desc={$t('節拍格線比聲音早一點，看起來才會對拍')} inline>
           <span className="set-hint">≈ {Math.round((L.beatLead / 60) * 1000)} ms</span>
@@ -298,11 +267,7 @@ function SettingsDialog({ close }: { close: () => void }) {
         </SetRow>
         <div className="set-sec">{$t('語言')} / Language</div>
         <SetRow label={$t('介面語言')} desc={$t('切換後會重新載入')}>
-          <div className="seg">
-            {LANGS.map((l) => (
-              <button key={l.id} className={lang === l.id ? 'on' : ''} onClick={() => changeLanguage(l.id)}>{l.label}</button>
-            ))}
-          </div>
+          <Seg value={lang} on={changeLanguage} opts={LANGS.map((l) => ({ v: l.id, label: l.label }))} />
         </SetRow>
       </div>
       <div className="dialog-actions">
@@ -403,8 +368,8 @@ function menus(): { label: string; items: () => MenuItem[] }[] {
       items: () => [
         { label: $t('新專案…'), action: () => openDialog('new') },
         { label: $t('匯入媒體…'), shortcut: 'Ctrl+O', action: async () => importFiles(await pickFiles()) },
-        { label: $t('匯入專案包…'), action: async () => { const [file] = await pickFiles('.ybeat', false); if (!file) return; if (!await confirmDialog({ title: $t('匯入專案包？'), message: $t('目前專案會被取代，請先匯出專案包備份。'), ok: $t('匯入') })) return; try { await importProjectPack(file); toast($t('專案包已匯入')); } catch (e) { toast($t('匯入失敗：{0}', e instanceof Error ? e.message : e), 'error'); } } },
-        { label: $t('匯出專案包…'), action: async () => { try { downloadBlob(await exportProjectPack(), 'YBeat_project.ybeat'); toast($t('專案包已匯出')); } catch (e) { toast($t('匯出失敗：{0}', e instanceof Error ? e.message : e), 'error'); } } },
+        { label: $t('匯入專案包…'), action: async () => { const [file] = await pickFiles('.ybeat', false); if (!file) return; if (!await confirmDialog({ title: $t('匯入專案包？'), message: $t('目前專案會被取代，請先匯出專案包備份。'), ok: $t('匯入') })) return; try { await importProjectPack(file, (n, total) => setBusy($t('匯入專案包 {0}/{1}', n, total))); toast($t('專案包已匯入')); } catch (e) { toast($t('匯入失敗：{0}', e instanceof Error ? e.message : e), 'error'); } finally { setBusy(null); } } },
+        { label: $t('匯出專案包…'), action: async () => { try { downloadBlob(await exportProjectPack((n, total) => setBusy($t('匯出專案包 {0}/{1}', n, total))), 'YBeat_project.ybeat'); toast($t('專案包已匯出')); } catch (e) { toast($t('匯出失敗：{0}', e instanceof Error ? e.message : e), 'error'); } finally { setBusy(null); } } },
         { label: $t('載入示範專案…'), action: () => (projectDuration(S()) > 0 ? openDialog('demo') : loadDemo()) },
         { separator: true },
         { label: $t('立即存檔'), shortcut: 'Ctrl+S', action: () => saveNow().then(() => toast($t('已儲存'))) },

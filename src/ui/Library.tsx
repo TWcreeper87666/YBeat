@@ -143,6 +143,8 @@ interface PickerReq {
   body: (close: () => void) => React.ReactNode;
   x: number;
   y: number;
+  /** 視窗寬度；有給 = 小視窗，高度跟著內容 */
+  w?: number;
 }
 const usePicker = create<{ req: PickerReq | null }>(() => ({ req: null }));
 export const closePicker = () => usePicker.setState({ req: null });
@@ -150,9 +152,9 @@ export const closePicker = () => usePicker.setState({ req: null });
 export const pickerOpen = () => !!usePicker.getState().req;
 
 /** 打開挑選視窗，出現在 anchor（按下的按鈕）旁邊 */
-export function openPicker(anchor: Element | null, title: string, body: PickerReq['body']) {
+export function openPicker(anchor: Element | null, title: string, body: PickerReq['body'], size?: { w: number }) {
   const r = anchor?.getBoundingClientRect();
-  usePicker.setState({ req: { title, body, x: r ? r.left : innerWidth / 2 - 180, y: r ? r.bottom + 4 : 120 } });
+  usePicker.setState({ req: { title, body, x: r ? r.left : innerWidth / 2 - 180, y: r ? r.bottom + 4 : 120, ...(size ? { w: size.w } : {}) } });
 }
 
 const PICK_W = 380, PICK_H = 440;
@@ -169,8 +171,10 @@ export function PickerHost() {
   useLayoutEffect(() => {
     if (!req) return;
     // 放得下就在按鈕下方，不然往上 / 往左移
-    const x = Math.max(8, Math.min(req.x, innerWidth - PICK_W - 8));
-    const y = req.y + PICK_H > innerHeight - 8 ? Math.max(8, innerHeight - PICK_H - 8) : req.y;
+    const w = req.w ?? PICK_W;
+    const h = req.w ? ref.current?.offsetHeight ?? 200 : PICK_H;
+    const x = Math.max(8, Math.min(req.x, innerWidth - w - 8));
+    const y = req.y + h > innerHeight - 8 ? Math.max(8, innerHeight - h - 8) : req.y;
     setPos({ x, y });
   }, [req]);
 
@@ -209,7 +213,7 @@ export function PickerHost() {
     window.addEventListener('pointerup', up);
   };
   return (
-    <div ref={ref} className="float-win picker-win" style={{ left: pos.x, top: pos.y, width: PICK_W, height: PICK_H }}>
+    <div ref={ref} className={`float-win picker-win ${req.w ? 'small' : ''}`} style={{ left: pos.x, top: pos.y, width: req.w ?? PICK_W, height: req.w ? undefined : PICK_H }}>
       <div className="float-title" onPointerDown={drag}>
         <span>{req.title}</span>
         <button title={$t('關閉 (Esc)')} onPointerDown={(e) => e.stopPropagation()} onClick={closePicker}><X size={14} /></button>

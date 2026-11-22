@@ -1,6 +1,6 @@
 import { $t, displayName } from '../i18n';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { BookOpen, Check, CircleAlert, Copy, ExternalLink, Eye, EyeOff, Info, LoaderCircle, Paperclip, Plus, RefreshCw, Send, Settings, Sparkles, Square, Trash2, Wand2 } from 'lucide-react';
+import { BookOpen, Check, CircleAlert, Copy, ExternalLink, Eye, EyeOff, Image as ImageIcon, Info, LoaderCircle, Paperclip, Plus, RefreshCw, Send, Settings, Sparkles, Square, Trash2, Wand2 } from 'lucide-react';
 import {
   MAX_FIXES, aiErrorText, applyChatProposals, clearChat, refreshModels, sendChat, stopChat, useAiChat, useAiModels, useAiSettings,
   type ChatMsg,
@@ -9,6 +9,7 @@ import { codeBlocks, detectKind, guessName, validateModule } from '../ai/validat
 import { currentModule, openNewModule, setModuleCode, useCodeEditor } from './CodePanel';
 import { toast } from './uiStore';
 import { useStore } from '../store';
+import { Switch, ToggleChip } from './Toggle';
 
 const KEY_URL = 'https://aistudio.google.com/apikey';
 
@@ -42,7 +43,7 @@ function AiSetup({ onDone }: { onDone?: () => void }) {
           {$t('取得免費金鑰')} <ExternalLink size={11} />
         </a>
         <span className="spacer" />
-        <span className="ai-info" title={$t('金鑰只存在這個瀏覽器。Google 的免費方案可能會用送出的內容改善服務；送出的只有你輸入的文字和附加的模組程式碼。')}>
+        <span className="ai-info" title={$t('金鑰只存在這個瀏覽器。Google 的免費方案可能會用送出的內容改善服務；送出的只有你輸入的文字、附加的模組程式碼和預覽畫面截圖。')}>
           <Info size={13} />
         </span>
       </div>
@@ -74,8 +75,21 @@ function AiSetup({ onDone }: { onDone?: () => void }) {
           <button className="btn small-h" onClick={() => { set({ key: '', model: '' }); setDraft(''); setMsg(null); useAiModels.setState({ list: [] }); }}>{$t('移除金鑰')}</button>
         </div>
       )}
+      {key && <LookToggle />}
       {key && <CustomPrompt />}
       {model && !models.list.length && models.error && <div className="err-line" title={models.error}><CircleAlert size={12} /> {$t('讀不到模型清單')}</div>}
+    </div>
+  );
+}
+
+function LookToggle() {
+  const look = useAiSettings((s) => s.look);
+  const set = useAiSettings((s) => s.set);
+  return (
+    <div className="ai-setup-row" title={$t('寫好特效 / 轉場後，把套在預覽畫面上的結果給 AI 看一次，有問題就修正（每次多用一個請求）')}>
+      <span className="ai-setup-label">{$t('寫完看畫面檢查')}</span>
+      <span className="spacer" />
+      <Switch v={look} on={(v) => set({ look: v })} />
     </div>
   );
 }
@@ -227,6 +241,7 @@ function Message({ msg }: { msg: ChatMsg }) {
       <div className="ai-msg user">
         <div className="ai-bubble">
           {msg.attach && <span className="ai-chip" title={msg.attach.code}><Paperclip size={11} /> {msg.attach.name}</span>}
+          {msg.image && <img className="ai-shot" src={msg.image} alt="" />}
           <div className="ai-user-text">{msg.text}</div>
         </div>
       </div>
@@ -236,6 +251,12 @@ function Message({ msg }: { msg: ChatMsg }) {
     <div className="ai-msg model">
       {!!msg.refs?.length && <span className="ai-status muted"><BookOpen size={11} /> {$t('參考：{0}', msg.refs.map(displayName).join('、'))}</span>}
       {msg.text && <MsgBody msg={msg} />}
+      {!!msg.seen?.length && (
+        <div className="ai-shots" title={$t('給 AI 看的畫面')}>
+          {msg.seen.map((u, i) => <img key={i} src={u} alt="" />)}
+        </div>
+      )}
+      {msg.streaming && !!msg.seen?.length && !msg.fixing && <span className="ai-status"><LoaderCircle size={12} className="spin" /> {$t('檢查畫面中')}</span>}
       {!!msg.proposals?.length && <ProposalCard msg={msg} />}
       {msg.streaming && !msg.text && <span className="muted small"><LoaderCircle size={12} className="spin" /> {$t('思考中')}</span>}
       {msg.fixing ? <span className="ai-status"><LoaderCircle size={12} className="spin" /> {$t('修正中 {0}/{1}', msg.fixing, MAX_FIXES)}</span> : null}
@@ -254,6 +275,7 @@ export function AiPanel() {
   const [setup, setSetup] = useState(false);
   const [text, setText] = useState('');
   const [attachOn, setAttachOn] = useState(true);
+  const [frameOn, setFrameOn] = useState(false);
   // 程式碼分頁目前打開的模組（可以附加到問題裡）
   useCodeEditor((s) => s.active);
   useCodeEditor((s) => s.drafts);
@@ -275,7 +297,7 @@ export function AiPanel() {
 
   const send = (t = text) => {
     if (!t.trim() || busy) return;
-    sendChat(t.trim(), attachOn && cur ? { id: cur.id, name: cur.name, kind: cur.kind, code: cur.code } : undefined);
+    sendChat(t.trim(), attachOn && cur ? { id: cur.id, name: cur.name, kind: cur.kind, code: cur.code } : undefined, frameOn);
     setText('');
     stick.current = true;
   };
@@ -314,11 +336,16 @@ export function AiPanel() {
         {msgs.map((m) => <Message key={m.id} msg={m} />)}
       </div>
       <div className="ai-compose">
-        {cur && (
-          <button className={`ai-chip toggle ${attachOn ? 'on' : ''}`} title={attachOn ? $t('不附加') : $t('附加目前的模組')} onClick={() => setAttachOn(!attachOn)}>
-            <Paperclip size={11} /> {cur.name}
-          </button>
-        )}
+        <div className="ai-chips">
+          {cur && (
+            <ToggleChip v={attachOn} on={setAttachOn} title={attachOn ? $t('不附加') : $t('附加目前的模組')}>
+              <Paperclip size={11} /> {cur.name}
+            </ToggleChip>
+          )}
+          <ToggleChip v={frameOn} on={setFrameOn} title={frameOn ? $t('不附加') : $t('附加預覽畫面')}>
+            <ImageIcon size={11} /> {$t('預覽畫面')}
+          </ToggleChip>
+        </div>
         <div className="ai-input-row">
           <textarea
             className="ai-input"

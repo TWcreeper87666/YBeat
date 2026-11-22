@@ -20,7 +20,10 @@ import { TextInlineEdit } from './TextInlineEdit';
 import { stopPreviewFx, toast, useColorPick, useLayout, usePreviewFx, useTrimView } from './uiStore';
 import { useEditorWindow } from './EditorWindow';
 import { fps } from '../engine/rulerTicks';
-import { faceAt, requestFaces, useFaces } from '../engine/face';
+import { useFaces } from '../engine/face';
+import { useBoxTracks, trackKey } from '../engine/boxTrack';
+import { anchorTime, frameRectToBox, putAnchor, requestSubject, subjectAt, tracking } from '../engine/follow';
+import { stopBoxPick, useBoxPick } from './subjectUi';
 
 const frameAspect = () => useStore.getState().format.w / useStore.getState().format.h;
 
@@ -234,21 +237,32 @@ export function Preview() {
     return () => el.removeEventListener('wheel', onWheel);
   }, []);
 
-  /** 平移：中鍵任何地方、或左鍵拖畫面外的空白處 */
+  /** 平移：中鍵任何地方、或左 / 右鍵拖畫面外的空白處 */
   const startPan = (e: React.PointerEvent) => {
     const onBlank = e.target === e.currentTarget;
-    if (!(e.button === 1 || (e.button === 0 && onBlank))) return;
+    if (!(e.button === 1 || ((e.button === 0 || e.button === 2) && onBlank))) return;
     e.preventDefault();
-    const x0 = e.clientX, y0 = e.clientY, v0 = usePreviewView.getState();
+    const x0 = e.clientX, y0 = e.clientY;
+    let lx = x0, ly = y0;
     let moved = false;
     document.body.classList.add('panning');
+    // 每次只加這次移動的量（以目前的檢視為準）：拖曳中用滾輪縮放改了 px / py 也不會被蓋回去
     const mv = (ev: PointerEvent) => {
       if (Math.abs(ev.clientX - x0) + Math.abs(ev.clientY - y0) > 3) moved = true;
-      usePreviewView.setState({ px: v0.px + ev.clientX - x0, py: v0.py + ev.clientY - y0 });
+      const v = usePreviewView.getState();
+      usePreviewView.setState({ px: v.px + ev.clientX - lx, py: v.py + ev.clientY - ly });
+      lx = ev.clientX;
+      ly = ev.clientY;
     };
     const up = () => {
-      // 左鍵點空白處（沒拖）= 取消選取
-      if (!moved && e.button === 0) useStore.getState().select(null);
+      // 左鍵點空白處（沒拖）= 取消選取；編輯視窗裡不取消（取消選取會關掉編輯視窗）
+      if (!moved && e.button === 0 && !useEditorWindow.getState().open) useStore.getState().select(null);
+      // 右鍵拖完：放開時不要跳出右鍵選單
+      if (moved && e.button === 2) {
+        const block = (ev: Event) => ev.preventDefault();
+        window.addEventListener('contextmenu', block, { capture: true, once: true });
+        setTimeout(() => window.removeEventListener('contextmenu', block, { capture: true }), 300);
+      }
       document.body.classList.remove('panning');
       window.removeEventListener('pointermove', mv);
       window.removeEventListener('pointerup', up);
@@ -263,7 +277,7 @@ export function Preview() {
       className={`preview pannable ${pickingColor ? 'color-picking' : ''}`}
       style={bg ? { background: bg } : undefined}
       onPointerDownCapture={(e) => { if (!sampleColor(e) && e.button === 1) startPan(e); }}
-      onPointerDown={(e) => e.button === 0 && startPan(e)}
+      onPointerDown={(e) => (e.button === 0 || e.button === 2) && startPan(e)}
       onDoubleClick={(e) => e.target === e.currentTarget && resetView()}
     >
       {err ? <div className="fatal">{err}</div> : <canvas ref={ref} style={canvasStyle} />}
@@ -317,8 +331,11 @@ function boxOf(clip: Clip, media: Media | undefined, local: number, W: number, H
   return { xf, cx: (0.5 + xf.x) * W, cy: (0.5 + xf.y) * H, w: sw * Math.abs(xf.scaleX) * H, h: sh * Math.abs(xf.scaleY) * H, rot: xf.rotation };
 }
 
-/** 臉部偵測框：選取的片段開了臉部追蹤時顯示（框跟著片段的縮放、位置、旋轉、翻轉走） */
-function FaceOverlay({ W, H }: { W: number; H: number }) {
+/**
+ * 追蹤框：選取的片段有追蹤時顯示（框跟著片段的縮放、位置、旋轉、翻轉走）。
+ * 自訂目標：錨點那一格是實線，追出來的是虛線。
+ */
+function SubjectOverlay({ W, H }: { W: number; H: number }) {
   const sel = useStore((s) => s.selection);
   const time = useStore((s) => s.time);
   const clips = useStore((s) => s.clips);
@@ -326,48 +343,103 @@ function FaceOverlay({ W, H }: { W: number; H: number }) {
   const tracks = useStore((s) => s.tracks);
   const modulesList = useStore((s) => s.modules);
   useFaces((f) => f.ver);
-  const jobs = useFaces((f) => f.jobs);
-  const errors = useFaces((f) => f.errors);
+  useBoxTracks((b) => b.ver);
+  const faceJobs = useFaces((f) => f.jobs);
+  const faceErrors = useFaces((f) => f.errors);
+  const boxJobs = useBoxTracks((b) => b.jobs);
+  const boxErrors = useBoxTracks((b) => b.errors);
   if (!W || !H || sel?.type !== 'clip') return null;
   const media = new Map(mediaList.map((m) => [m.id, m]));
   const modules = new Map(modulesList.map((m) => [m.id, m]));
-  const shown = clips.filter((c) => {
-    const m = media.get(c.mediaId);
-    return c.id === sel.id && c.faceTrack && !c.text && m && !m.missing && (m.kind === 'video' || m.kind === 'image') && !tracks.video[c.track]?.hidden && time >= c.start && time < c.start + c.duration;
-  });
-  const boxes: { key: string; cx: number; cy: number; w: number; h: number; rot: number }[] = [];
-  let busy: { done: number; total: number } | null = null;
-  let err: string | null = null;
-  for (const c of shown) {
-    const m = media.get(c.mediaId)!;
-    requestFaces(c, m, modules);
-    if (jobs[m.id]) busy = jobs[m.id];
-    if (errors[m.id]) err = errors[m.id];
-    const local = time - c.start;
-    const f = faceAt(m, m.kind === 'image' ? local : clipSource(c, local, m, modules).src);
-    if (!f) continue;
+  const c = clips.find((x) => x.id === sel.id);
+  const m = c && media.get(c.mediaId);
+  if (!c || !m || !tracking(c) || c.text || m.missing || (m.kind !== 'video' && m.kind !== 'image') || tracks.video[c.track]?.hidden || time < c.start || time >= c.start + c.duration) return null;
+  requestSubject(c, m, modules);
+  const s = c.subject!;
+  const key = s.kind === 'box' ? trackKey(m.id, s.anchors) : m.id;
+  const busy = s.kind === 'face' ? faceJobs[m.id] : boxJobs[key];
+  const err = s.kind === 'face' ? faceErrors[m.id] : boxErrors[key];
+  const local = time - c.start;
+  const f = subjectAt(c, m, local, modules);
+  let shape: { cx: number; cy: number; w: number; h: number; rot: number; anchor: boolean } | null = null;
+  if (f) {
     const b = boxOf(c, m, local, W, H);
     const sx = Math.sign(b.xf.scaleX) || 1, sy = Math.sign(b.xf.scaleY) || 1;
     const dx = (f.x - 0.5) * b.w * sx, dy = (f.y - 0.5) * b.h * sy;
-    const a = (b.rot * Math.PI) / 180;
-    boxes.push({ key: c.id, cx: b.cx + dx * Math.cos(a) - dy * Math.sin(a), cy: b.cy + dx * Math.sin(a) + dy * Math.cos(a), w: f.w * b.w, h: f.h * b.h, rot: b.rot });
+    const ang = (b.rot * Math.PI) / 180;
+    const src = s.kind === 'box' ? anchorTime(c, m, local, modules) : 0;
+    const anchor = s.kind === 'box' && s.anchors.some((x) => Math.abs(x.t - src) < 0.5 / 30);
+    shape = { cx: b.cx + dx * Math.cos(ang) - dy * Math.sin(ang), cy: b.cy + dx * Math.sin(ang) + dy * Math.cos(ang), w: f.w * b.w, h: f.h * b.h, rot: b.rot, anchor };
   }
+  const label = s.kind === 'face' ? (err ? $t('臉部偵測失敗') : $t('臉部偵測 {0}%', Math.round(((busy?.done ?? 0) / Math.max(1, busy?.total ?? 1)) * 100))) : err ? $t('追蹤失敗') : $t('追蹤 {0}%', Math.round(((busy?.done ?? 0) / Math.max(1, busy?.total ?? 1)) * 100));
   return (
     <>
       <svg className="face-overlay" width={W} height={H}>
-        {boxes.map((b) => (
-          <g key={b.key} transform={`translate(${b.cx} ${b.cy}) rotate(${b.rot})`}>
-            <rect x={-b.w / 2} y={-b.h / 2} width={b.w} height={b.h} rx={4} />
+        {shape && (
+          <g transform={`translate(${shape.cx} ${shape.cy}) rotate(${shape.rot})`} className={s.kind === 'box' && !shape.anchor ? 'tracked' : ''}>
+            <rect x={-shape.w / 2} y={-shape.h / 2} width={shape.w} height={shape.h} rx={4} />
             <circle r={3} />
           </g>
-        ))}
+        )}
       </svg>
       {(busy || err) && (
         <div className={`face-status ${err ? 'error' : ''}`} title={err ?? undefined}>
-          {err ? $t('臉部偵測失敗') : $t('臉部偵測 {0}%', Math.round((busy!.done / Math.max(1, busy!.total)) * 100))}
+          {label}
         </div>
       )}
     </>
+  );
+}
+
+/** 框選目標：在預覽上拖一個框 → 在目前這一格加錨點（Esc 取消） */
+function BoxPickLayer({ W, H }: { W: number; H: number }) {
+  const clipId = useBoxPick((s) => s.clipId);
+  const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  useEffect(() => {
+    if (!clipId) return;
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && (e.stopPropagation(), stopBoxPick());
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [clipId]);
+  if (!clipId || !W || !H) return null;
+  const finish = (d: { x0: number; y0: number; x1: number; y1: number }) => {
+    const st = useStore.getState();
+    const c = st.clips.find((x) => x.id === clipId);
+    const m = c && st.media.find((x) => x.id === c.mediaId);
+    if (!c || !m || st.time < c.start || st.time >= c.start + c.duration) return stopBoxPick();
+    const modules = new Map(st.modules.map((x) => [x.id, x]));
+    const local = st.time - c.start;
+    const box = frameRectToBox(c, m, local, frameAspect(), [d.x0, d.y0], [d.x1, d.y1]);
+    if (!box) return;
+    const prev = c.subject?.kind === 'box' ? c.subject.anchors : [];
+    st.updateClip(c.id, { subject: { kind: 'box', anchors: putAnchor(prev, { t: anchorTime(c, m, local, modules), box }) } });
+    stopBoxPick();
+  };
+  // 存畫面比例 0..1（拖曳中縮放檢視也不會跑掉）
+  const at = (e: React.PointerEvent) => {
+    const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    const cl = (v: number) => Math.min(1, Math.max(0, v));
+    return { x: cl((e.clientX - r.left) / (r.width || 1)), y: cl((e.clientY - r.top) / (r.height || 1)) };
+  };
+  return (
+    <div
+      className="box-pick"
+      onPointerDown={(e) => {
+        if (e.button !== 0) return;
+        e.stopPropagation();
+        (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+        const p = at(e);
+        setDrag({ x0: p.x, y0: p.y, x1: p.x, y1: p.y });
+      }}
+      onPointerMove={(e) => drag && setDrag({ ...drag, x1: at(e).x, y1: at(e).y })}
+      onPointerUp={() => {
+        if (drag) finish(drag);
+        setDrag(null);
+      }}
+    >
+      {drag && <div className="box-pick-rect" style={{ left: Math.min(drag.x0, drag.x1) * W, top: Math.min(drag.y0, drag.y1) * H, width: Math.abs(drag.x1 - drag.x0) * W, height: Math.abs(drag.y1 - drag.y0) * H }} />}
+      <div className="face-status">{$t('框選目標')}</div>
+    </div>
   );
 }
 
@@ -468,6 +540,12 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
     // 畫面寬度用輸出比例算（canvas 量到的寬高是整數 px，比例會差一點，吸附到邊緣時縮放就變成 99.9%）
     const W = H * frameAspect();
     const b = boxOf(c, m, l, W, H);
+    // 拖曳中可能用滾輪縮放 / 平移檢視：每次重新量圖層，換成開始拖時的像素尺度（不然下一次移動會跳）
+    const H0 = H;
+    const pt = (ev: { clientX: number; clientY: number }) => {
+      const r = layerRef.current!.getBoundingClientRect();
+      return { x: ((ev.clientX - r.left) / (r.width || 1)) * W, y: ((ev.clientY - r.top) / (r.height || 1)) * H0 };
+    };
     const p0 = pt(e);
     const d0 = Math.hypot(p0.x - b.cx, p0.y - b.cy) || 1;
     const a0 = Math.atan2(p0.y - b.cy, p0.x - b.cx);
@@ -598,7 +676,7 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
   return (
     <div ref={layerRef} className="gizmo-layer" style={{ left: rect.left, top: rect.top, width: W, height: H }} onPointerDown={onLayerDown}>
       <GridOverlay W={W} H={H} />
-      <FaceOverlay W={W} H={H} />
+      <SubjectOverlay W={W} H={H} />
       {(guides.x !== null || guides.y !== null) && (
         <svg className="snap-guides" width={W} height={H}>
           {guides.x !== null && <line x1={guides.x * W} y1={0} x2={guides.x * W} y2={H} />}
@@ -607,6 +685,7 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
       )}
       <MaskGizmos W={W} H={H} />
       <ParamGizmos W={W} H={H} />
+      <BoxPickLayer W={W} H={H} />
       {box && clip && editingText !== clip.id && (
         <div
           className="gizmo"

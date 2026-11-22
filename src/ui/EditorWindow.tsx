@@ -11,6 +11,7 @@ import { docChanged, restoreDoc, snapshotDoc, type HistoryDoc } from '../engine/
 import type { PanelId } from './dockTree';
 import { isTextField, modalOpen } from './focus';
 import { pickerOpen } from './Library';
+import { Seg } from './Toggle';
 
 /**
  * 編輯視窗（參考威力導演的子母畫面設計師）：針對「一個片段 / 特效 / 轉場」的編輯畫面。
@@ -171,9 +172,11 @@ export function EditorWindow({ hosts }: { hosts: Record<PanelId, HTMLElement> })
     window.addEventListener('pointerup', up);
   };
 
-  const props = <div className="editor-props" key="props"><Slot host={hosts.inspector} /></div>;
-  const preview = <div className="editor-preview" key="preview"><Slot host={hosts.preview} /></div>;
-  const sash = <div key="sash" className={`editor-sash ${mode}`} onPointerDown={drag} onDoubleClick={() => useLayout.getState().set({ editorSplit: { ...split, [mode]: mode === 'stacked' ? 0.6 : 0.42 } })} />;
+  // DOM 順序固定（屬性、分隔線、預覽），上下排用 CSS order 換位置：搬動預覽的 DOM 會讓畫面和框閃一下舊位置
+  const st = mode === 'stacked';
+  const props = <div className="editor-props" key="props" style={{ order: st ? 2 : 0 }}><Slot host={hosts.inspector} /></div>;
+  const preview = <div className="editor-preview" key="preview" style={{ order: st ? 0 : 2 }}><Slot host={hosts.preview} /></div>;
+  const sash = <div key="sash" className={`editor-sash ${mode}`} style={{ order: 1 }} onPointerDown={drag} onDoubleClick={() => useLayout.getState().set({ editorSplit: { ...split, [mode]: mode === 'stacked' ? 0.6 : 0.42 } })} />;
 
   // 排版切換：三個固定位置的圖示按鈕（文字會變長變短的單一按鈕，連點時位置會跑掉）
   const layouts = [
@@ -189,13 +192,7 @@ export function EditorWindow({ hosts }: { hosts: Record<PanelId, HTMLElement> })
           <span className="editor-title">{$t('編輯視窗')}</span>
           {name && <span className="editor-name">{name}</span>}
           <span className="spacer" />
-          <div className="seg editor-layouts">
-            {layouts.map((l) => (
-              <button key={l.id} className={pref === l.id ? 'on' : ''} title={l.label} onClick={() => useLayout.getState().set({ editorLayout: l.id })}>
-                {l.icon}
-              </button>
-            ))}
-          </div>
+          <Seg className="editor-layouts" value={pref} on={(v) => useLayout.getState().set({ editorLayout: v })} opts={layouts.map((l) => ({ v: l.id, label: l.icon, title: l.label }))} />
           <button className="btn primary small-h" title={$t('完成 (Ctrl+Enter)')} onClick={closeEditorWindow}>{$t('完成')}</button>
           <button className="title-icon" title={$t('取消 (Esc)')} onClick={() => void cancelEditorWindow()}><X size={16} /></button>
         </div>
@@ -204,7 +201,9 @@ export function EditorWindow({ hosts }: { hosts: Record<PanelId, HTMLElement> })
           className="editor-body"
           style={mode === 'stacked' ? { gridTemplateRows: tracks } : { gridTemplateColumns: tracks }}
         >
-          {mode === 'stacked' ? [preview, sash, props] : [props, sash, preview]}
+          {props}
+          {sash}
+          {preview}
         </div>
       </div>
     </div>

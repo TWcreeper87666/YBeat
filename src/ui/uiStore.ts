@@ -89,7 +89,8 @@ useLayout.subscribe((s, p) => {
 // ───────────── 提示訊息 ─────────────
 
 interface Toast { id: number; text: string; kind: 'info' | 'error' }
-export const useToast = create<{ toasts: Toast[] }>(() => ({ toasts: [] }));
+export const useToast = create<{ toasts: Toast[]; /** 進行中的工作（不會自動消失，null = 沒有） */ busy: string | null }>(() => ({ toasts: [], busy: null }));
+export const setBusy = (busy: string | null) => useToast.setState({ busy });
 let toastId = 0;
 export function toast(text: string, kind: Toast['kind'] = 'info') {
   const id = ++toastId;

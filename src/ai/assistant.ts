@@ -5,7 +5,9 @@ import { $t } from '../i18n';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { ModuleKind } from '../store';
-import { ApiKeyError, BlockedError, RateLimitError, listModels, pickDefaultModel, streamTurn, type ModelInfo, type Turn } from './gemini';
+import { ApiKeyError, BlockedError, RateLimitError, imagePart, listModels, pickDefaultModel, streamTurn, type ModelInfo, type Turn } from './gemini';
+import { moduleShots, previewShot } from './frames';
+import { parseDuration } from '../engine/params';
 import { chatSystem, moduleSystem, withCustom } from './prompt';
 import { codeBlocks, detectKind, validateModule } from './validate';
 import { TOOL_DECLS, mentionedModules, runTool, toolRefs } from './tools';
@@ -26,10 +28,12 @@ interface AiSettings {
   model: string;
   /** 自訂指示：接在系統提示後面 */
   custom: string;
-  set(p: Partial<Pick<AiSettings, 'key' | 'model' | 'custom'>>): void;
+  /** 寫好模組後，把套在預覽畫面上的結果給 AI 看一次（多一個請求） */
+  look: boolean;
+  set(p: Partial<Pick<AiSettings, 'key' | 'model' | 'custom' | 'look'>>): void;
 }
 export const useAiSettings = create<AiSettings>()(
-  persist((set) => ({ key: '', model: '', custom: '', set: (p) => set(p) }), { name: 'ybeat-ai', partialize: (s) => ({ key: s.key, model: s.model, custom: s.custom }) }),
+  persist((set) => ({ key: '', model: '', custom: '', look: false, set: (p) => set(p) }), { name: 'ybeat-ai', partialize: (s) => ({ key: s.key, model: s.model, custom: s.custom, look: s.look }) }),
 );
 
 export const useAiModels = create<{ list: ModelInfo[]; loading: boolean; error: string }>(() => ({ list: [], loading: false, error: '' }));
@@ -87,6 +91,12 @@ export function checkReply(text: string, hint?: ModuleKind): CheckResult | null 
   return null;
 }
 
+const LOOKS_OK = 'LOOKS_OK';
+const lookPrompt = (kind: ModuleKind, at: number[]) =>
+  `The app rendered your ${kind} module with its default parameters on the user's current preview frame. Image 1 = the original frame; images 2-${at.length + 1} = the module at progress ${at.join(', ')}` +
+  (kind === 'transition' ? ' (outgoing clip = the preview frame, incoming clip = a test card).' : '.') +
+  ` Check that it visibly does what was asked (not black, not unchanged, nothing broken or off-center). If it looks right, reply with exactly ${LOOKS_OK}. Otherwise reply with the full corrected module in one code block and one short sentence on what was wrong.`;
+
 const fixPrompt = (err: string) =>
   `The app could not compile that module:\n\`\`\`\n${err.slice(0, 1500)}\n\`\`\`\nReply with the full corrected module in one code block.`;
 
@@ -108,6 +118,9 @@ async function runWithFixes(o: {
   /** 可以操作專案（聊天才有；程式碼分頁的 AI 修改沒有） */
   project?: boolean;
   onProposals?: (list: Proposal[]) => void;
+  /** 編譯通過的模組套在預覽畫面上給 AI 看一次；onLook = 給 AI 看的圖（data URL） */
+  look?: boolean;
+  onLook?: (urls: string[]) => void;
 }): Promise<{ added: Turn[]; text: string; check: CheckResult | null; fixes: number; refs: string[]; proposals: Proposal[] }> {
   const { key, model } = useAiSettings.getState();
   if (!key) throw new ApiKeyError('no key');
@@ -117,6 +130,9 @@ async function runWithFixes(o: {
   const tools = o.project ? [...TOOL_DECLS, ...PROJECT_TOOL_DECLS] : TOOL_DECLS;
   let fixes = 0;
   let rounds = 0;
+  // 看畫面：只看一次；看完 AI 說沒問題 → 回到看之前的回覆
+  let looked = false;
+  let seen: { text: string; check: CheckResult } | null = null;
   // 工具呼叫前已經說的話（這次回覆裡要接著顯示）
   let before = '';
   const join = (a: string, b: string) => (a && b ? `${a}\n\n${b}` : a || b);
@@ -148,10 +164,32 @@ async function runWithFixes(o: {
       }
       continue;
     }
-    const text = join(before, r.text);
+    let text = join(before, r.text);
     before = '';
-    added.push({ role: 'model', text });
+    added.push({ role: 'model', text: seen ? r.text : text });
+    if (seen) {
+      // 看完畫面的回覆：沒有新的程式碼 = 原本的就好（不是 OK 的話把意見接在後面）
+      const prev = seen;
+      seen = null;
+      text = r.text;
+      if (!checkReply(text, o.hint)) {
+        const note = text.trim().startsWith(LOOKS_OK) ? '' : text.trim();
+        return { added, text: join(prev.text, note), check: prev.check, fixes, refs, proposals };
+      }
+    }
     const check = checkReply(text, o.hint);
+    if (check && !check.error && o.look && !looked && check.kind !== 'remap') {
+      looked = true;
+      const s = moduleShots(check.kind, check.code, check.kind === 'effect' ? parseDuration(check.code, 0.5) : 0.8);
+      if (s) {
+        seen = { text, check };
+        before = text;
+        o.onLook?.(s.shots.map((x) => x.url));
+        const prompt = lookPrompt(check.kind, s.at);
+        added.push({ role: 'user', text: `${prompt} [images omitted]`, img: true, parts: [{ text: prompt }, ...s.shots.map(imagePart)] });
+        continue;
+      }
+    }
     if (!check?.error || fixes >= MAX_FIXES) return { added, text, check, fixes, refs, proposals };
     fixes++;
     o.onFix?.(fixes);
@@ -178,6 +216,10 @@ export interface ChatMsg {
   refs?: string[];
   /** AI 提議的專案修改（按「套用」才執行） */
   proposals?: Proposal[];
+  /** 使用者附加的預覽畫面（data URL） */
+  image?: string;
+  /** 給 AI 看過的模組畫面（data URL；第一張是原始畫面） */
+  seen?: string[];
   /** 已套用：實際套用 / 跳過幾項 */
   applied?: { done: number; skipped: number };
   error?: AiError;
@@ -207,23 +249,24 @@ function patch(id: string, p: Partial<ChatMsg>) {
   useAiChat.setState({ msgs: useAiChat.getState().msgs.map((m) => (m.id === id ? { ...m, ...p } : m)) });
 }
 
-export function sendChat(text: string, attach?: Attach) {
+export function sendChat(text: string, attach?: Attach, withFrame = false) {
   const S = useAiChat.getState();
   if (S.busy || !text.trim()) return;
   const apiText = attach
     ? `${text}\n\nCurrent ${attach.kind} module "${attach.name}":\n\`\`\`${LANG_OF[attach.kind]}\n${attach.code}\n\`\`\``
     : text;
-  const user: ChatMsg = { id: uid(), role: 'user', text, attach, turns: [{ role: 'user', text: apiText }] };
+  const frame = withFrame ? previewShot() : null;
+  const user: ChatMsg = { id: uid(), role: 'user', text, attach, turns: [{ role: 'user', text: apiText }], ...(frame ? { image: frame.url } : {}) };
   // 專案快照、提到的模組只跟著這一次的問題送（紀錄裡不留，免得越疊越多）
   const named = namedModules(text, attach?.code);
-  const withSnap: Turn = {
-    role: 'user',
-    text: `${apiText}${refBlock(text, attach?.code)}\n\n<project_snapshot>\n${projectSnapshot()}\n</project_snapshot>`,
-  };
+  const snapText = `${apiText}${refBlock(text, attach?.code)}\n\n<project_snapshot>\n${projectSnapshot()}\n</project_snapshot>`;
+  const withSnap: Turn = frame
+    ? { role: 'user', text: snapText, img: true, parts: [{ text: snapText }, { text: `Attached: the current preview frame at the playhead (${useStore.getState().time.toFixed(2)}s).` }, imagePart(frame)] }
+    : { role: 'user', text: snapText };
   const reply: ChatMsg = { id: uid(), role: 'model', text: '', turns: [], streaming: true, ...(named.length ? { refs: named.map((m) => m.name) } : {}) };
   const abort = new AbortController();
-  // 舊訊息只帶最近幾則；失敗的回覆、工具回合（讀到的程式碼很長）不帶
-  const history = S.msgs.filter((m) => !m.error).flatMap((m) => m.turns).filter((t) => !t.parts).slice(-HISTORY);
+  // 舊訊息只帶最近幾則；失敗的回覆、工具回合（讀到的程式碼很長）不帶；附圖的回合只留文字
+  const history = S.msgs.filter((m) => !m.error).flatMap((m) => m.turns).filter((t) => !t.parts || t.img).map((t): Turn => (t.img ? { role: t.role, text: t.text } : t)).slice(-HISTORY);
   useAiChat.setState({ msgs: [...S.msgs, user, reply], busy: true, abort });
   void (async () => {
     try {
@@ -238,6 +281,8 @@ export function sendChat(text: string, attach?: Attach) {
         refs: reply.refs,
         project: true,
         onProposals: (proposals) => patch(reply.id, { proposals }),
+        look: useAiSettings.getState().look,
+        onLook: (seen) => patch(reply.id, { seen }),
       });
       patch(reply.id, { text: r.text, turns: r.added, streaming: false, fixing: undefined, fixes: r.fixes, check: r.check, refs: r.refs, proposals: r.proposals });
     } catch (e) {
@@ -276,11 +321,12 @@ export async function editModule(o: {
   signal?: AbortSignal;
   onText?: (t: string) => void;
   onFix?: (n: number) => void;
+  onLook?: (urls: string[]) => void;
 }): Promise<{ code: string | null; note: string; error: string | null; fixes: number }> {
   const turns: Turn[] = [
     { role: 'user', text: `Current ${o.kind} module "${o.name}":\n\`\`\`${LANG_OF[o.kind]}\n${o.code}\n\`\`\`\n\nChange request: ${o.request}${refBlock(o.request, o.code)}` },
   ];
-  const r = await runWithFixes({ system: withCustom(moduleSystem(), useAiSettings.getState().custom), turns, hint: o.kind, signal: o.signal, onText: o.onText, onFix: o.onFix });
+  const r = await runWithFixes({ system: withCustom(moduleSystem(), useAiSettings.getState().custom), turns, hint: o.kind, signal: o.signal, onText: o.onText, onFix: o.onFix, look: useAiSettings.getState().look, onLook: o.onLook });
   // 說明文字 = 程式碼區塊以外的部分
   const blocks = codeBlocks(r.text);
   const note = blocks.length ? (r.text.slice(0, blocks[0].start) + r.text.slice(blocks[0].end)).trim() : r.text.trim();

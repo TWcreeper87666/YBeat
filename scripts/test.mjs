@@ -25,6 +25,8 @@ await build({
   outdir,
   outExtension: { '.js': '.cjs' },
   logLevel: 'error',
+  // onnxruntime-web 自己會找 wasm 檔，不能打包進去
+  external: ['onnxruntime-web'],
   define: { 'import.meta.env': JSON.stringify({ BASE_URL: '/' }) },
 });
 

@@ -3,6 +3,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLayout } from './uiStore';
 import { DragNumber } from './DragNumber';
+import { Check } from './Toggle';
 
 /**
  * 輔助網格：預覽與鋼筆工具共用同一組設定（開關、列 / 欄、中心十字、短影音安全區）。
@@ -74,15 +75,18 @@ function GridPopover({ at, close }: { at: { x: number; y: number }; close: () =>
   return (
     <div ref={ref} className="popover" style={{ left: pos.x, top: pos.y }} onContextMenu={(e) => e.preventDefault()}>
       <div className="pop-title">{$t('輔助網格')}</div>
-      <div className="pop-row"><span>{$t('列')}</span><DragNumber value={L.gridRows} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridRows: Math.round(v), grid: true })} /></div>
-      <div className="pop-row"><span>{$t('欄')}</span><DragNumber value={L.gridCols} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridCols: Math.round(v), grid: true })} /></div>
-      <div className="chips">
+      <div className="pop-grid2">
+        <label className="pop-field"><span>{$t('欄')}</span><DragNumber value={L.gridCols} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridCols: Math.round(v), grid: true })} /></label>
+        <label className="pop-field"><span>{$t('列')}</span><DragNumber value={L.gridRows} min={1} max={24} step={1} decimals={0} def={3} onChange={(v) => L.set({ gridRows: Math.round(v), grid: true })} /></label>
+      </div>
+      <div className="chips even">
         {presets.map(([r, c]) => (
           <button key={`${r}x${c}`} className={L.gridRows === r && L.gridCols === c ? 'on' : ''} onClick={() => L.set({ gridRows: r, gridCols: c, grid: true })}>{c}×{r}</button>
         ))}
       </div>
-      <label className="check"><input type="checkbox" checked={L.gridCenter} onChange={(e) => L.set({ gridCenter: e.target.checked })} />{' '}{$t('中心十字')}</label>
-      <label className="check"><input type="checkbox" checked={L.gridSafe} onChange={(e) => L.set({ gridSafe: e.target.checked })} />{' '}{$t('短影音安全區')}</label>
+      <div className="pop-sep" />
+      <Check v={L.gridCenter} on={(v) => L.set({ gridCenter: v })}>{$t('中心十字')}</Check>
+      <Check v={L.gridSafe} on={(v) => L.set({ gridSafe: v })}>{$t('短影音安全區')}</Check>
     </div>
   );
 }

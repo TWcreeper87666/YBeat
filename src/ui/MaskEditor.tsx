@@ -225,8 +225,12 @@ function MaskBox({ t, W, H, setGuides }: { t: Target; W: number; H: number; setG
     if (e.button !== 0 || !t.active) return;
     e.stopPropagation();
     e.preventDefault();
-    const layer = (e.currentTarget as HTMLElement).closest('.gizmo-layer')!.getBoundingClientRect();
-    const P = (ev: { clientX: number; clientY: number }) => ({ x: ev.clientX - layer.left, y: ev.clientY - layer.top });
+    // 每次重新量圖層、換成開始拖時的像素尺度：拖曳中縮放 / 平移檢視不會跳
+    const el = (e.currentTarget as HTMLElement).closest('.gizmo-layer')!;
+    const P = (ev: { clientX: number; clientY: number }) => {
+      const r = el.getBoundingClientRect();
+      return { x: ((ev.clientX - r.left) / (r.width || 1)) * W, y: ((ev.clientY - r.top) / (r.height || 1)) * H };
+    };
     const m0 = { ...m };
     const th = (m0.rotation * Math.PI) / 180, c = Math.cos(th), s = Math.sin(th);
     const C0 = { x: (0.5 + m0.x) * W, y: (0.5 + m0.y) * H };

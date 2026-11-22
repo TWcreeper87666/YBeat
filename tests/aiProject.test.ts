@@ -159,23 +159,36 @@ ok(names('how do I add keyframes?') === '', '沒提到就不附');
   ok(projectSnapshot().includes('active: every 4 beat'), '快照列出片段特效的作用範圍');
 }
 
-// ── 跟隨臉部 ──
+// ── 跟隨目標 ──
 {
   reset();
   useStore.setState({ clips: S().clips.map((c) => (c.id === 'b' ? { ...c, effects: [{ id: 'z1', moduleId: 'fx-crashzoom', params: {} }] } : c)) });
   useStore.setState({ selection: { type: 'clip', id: 'b' }, selected: ['clip:b'] });
-  ok(projectSnapshot().includes('(follows face)'), '快照：內建縮放類預設跟隨');
+  ok(projectSnapshot().includes('(follows target)'), '快照：內建縮放類預設跟隨');
   const list: Proposal[] = [];
   ok(!!run('set_follow', { targets: [{ kind: 'effect', id: 'e1' }], param: 'center', on: true }).error, '沒有這個 point 參數 → 錯誤');
   run('set_follow', { targets: [{ kind: 'clip_fx', clipId: 'b', fxId: 'z1' }], param: 'center', on: false }, list);
   applyProposals(list);
   ok(S().clips.find((c) => c.id === 'b')!.effects![0].follow?.center === null, '關掉跟隨（蓋過模組預設）');
-  ok(!projectSnapshot().includes('(follows face)'), '快照跟著更新');
+  ok(!projectSnapshot().includes('(follows target)'), '快照跟著更新');
   const l2: Proposal[] = [];
-  ok(!!run('set_face_tracking', { clipIds: ['zz'], on: true }).error, '不存在的片段 → 錯誤');
-  run('set_face_tracking', { clipIds: ['b'], on: true }, l2);
+  ok(!!run('set_tracking', { clipIds: ['zz'], target: 'face' }).error, '不存在的片段 → 錯誤');
+  run('set_tracking', { clipIds: ['b'], target: 'face' }, l2);
   applyProposals(l2);
-  ok(S().clips.find((c) => c.id === 'b')!.faceTrack === true && projectSnapshot().includes('face-tracking'), '片段打開臉部追蹤、快照標示');
+  ok(S().clips.find((c) => c.id === 'b')!.subject?.kind === 'face' && projectSnapshot().includes('tracking:face'), '片段追蹤臉部、快照標示');
+  // 自訂目標：框（畫面座標）換成素材座標的錨點
+  useStore.setState({ format: { w: 1080, h: 1920 } as any });
+  ok(!!run('set_tracking', { clipIds: ['b'], target: 'box', box: [0.4, 0.4, 0.6, 0.5], at: 9 }).error, '時間不在片段裡 → 錯誤');
+  ok(!!run('set_tracking', { clipIds: ['a', 'b'], target: 'box', box: [0.4, 0.4, 0.6, 0.5] }).error, '框只能給一個片段');
+  const l3: Proposal[] = [];
+  run('set_tracking', { clipIds: ['b'], target: 'box', box: [0.4, 0.4, 0.6, 0.5], at: 2.5 }, l3);
+  applyProposals(l3);
+  const sub = S().clips.find((c) => c.id === 'b')!.subject;
+  ok(sub?.kind === 'box' && sub.anchors.length === 1 && Math.abs(sub.anchors[0].t - 0.5) < 1e-6 && projectSnapshot().includes('tracking:box(1 anchors)'), '自訂目標：加一個錨點');
+  const l4: Proposal[] = [];
+  run('set_tracking', { clipIds: ['b'], target: 'off' }, l4);
+  applyProposals(l4);
+  ok(!S().clips.find((c) => c.id === 'b')!.subject, '關閉追蹤');
 }
 
 // ── 字幕 ──

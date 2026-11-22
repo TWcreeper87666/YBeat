@@ -1,6 +1,7 @@
 import { $t } from '../i18n';
 import type { ParamDef, ParamValue, ParamValues } from '../engine/params';
 import { DragNumber } from './DragNumber';
+import { Switch } from './Toggle';
 
 /** 由程式碼中的 // @param 註解自動產生的調整 UI */
 export function ParamControls({ defs, values, onChange }: { defs: ParamDef[]; values: ParamValues; onChange: (v: ParamValues) => void }) {
@@ -28,10 +29,7 @@ export function ParamControls({ defs, values, onChange }: { defs: ParamDef[]; va
               />
             )}
             {d.type === 'bool' && (
-              <label className="switch">
-                <input type="checkbox" checked={Boolean(v)} onChange={(e) => set(d.name, e.target.checked)} />
-                <span />
-              </label>
+              <Switch v={Boolean(v)} on={(x) => set(d.name, x)} />
             )}
             {d.type === 'color' && <input type="color" value={String(v)} onChange={(e) => set(d.name, e.target.value)} />}
           </div>

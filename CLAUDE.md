@@ -16,3 +16,8 @@
 ## 驗證
 
 - 改完跑 `npx tsc --noEmit -p .` 和 `npm test`，不要自己開瀏覽器測試（慢又耗 token）；最後列出使用者該點哪些地方確認。
+
+## 開關 / 選擇元件
+
+- 用 `src/ui/Toggle.tsx`，不要自己寫 `<input type="checkbox">` 或 `.seg` 按鈕：`Switch`（開 / 關）、`Check`（彈出視窗 / 小視窗的一串選項：左文字、右開關）、`Seg`（幾個選一個）、`SegToggles`（同外觀、各自開關）、`ToggleChip`（輸入框上方的附加開關）。
+- 工具列圖示按鈕直接加 `on` class（`.tbtn` / `.ec-icon` / `.btn.on-accent`）。

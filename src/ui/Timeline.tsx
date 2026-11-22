@@ -2,7 +2,7 @@ import { matteCoverage, requestMatte, useMatte } from '../engine/matte';
 import { openEditorWindow } from './EditorWindow';
 import { clickTransition, copyTransition, hasTransitionClipboard, pasteTransition, removeTransitions, useTrSel } from './trSelect';
 import { $t, displayName } from '../i18n';
-import { Repeat, ArrowLeftRight, ArrowRightLeft, CircleDashed, Eye, EyeOff, FastForward, Film, Gauge, Magnet, Minus, MoveHorizontal, Music, Plus, Redo2, Replace, Scissors, Sparkles, TriangleAlert, Undo2, Volume2, VolumeX, Group, Link2, ArrowRightFromLine, ArrowRightToLine, Drum, ChevronDown, Lock, Unlock, ScanFace } from 'lucide-react';
+import { Repeat, ArrowLeftRight, ArrowRightLeft, CircleDashed, Eye, EyeOff, FastForward, Film, Gauge, Magnet, Minus, MoveHorizontal, Music, Plus, Redo2, Replace, Scissors, Sparkles, TriangleAlert, Undo2, Volume2, VolumeX, Group, Link2, ArrowRightFromLine, ArrowRightToLine, Drum, ChevronDown, Lock, Unlock, ScanFace, Crosshair } from 'lucide-react';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { create } from 'zustand';
 import {
@@ -20,13 +20,18 @@ import { audioBufferPeak, getAudioBuffer, setScrubbing, waveformLevels } from '.
 import { fps, PPS_MAX, PPS_MIN, rulerLabel, rulerSteps, snapFrame } from '../engine/rulerTicks';
 import { undo, redo, useHistory, beginHistoryTransaction, endHistoryTransaction } from '../engine/history';
 import { relinkWithPicker } from '../engine/media';
+import { projectRestored } from '../engine/project';
+import { rememberScroll, savedScroll } from './timelineView';
 import { confirmDialog, openMenu, promptDialog, stopPreviewFx, toast, useDrag, useLayout, useReveal, useSnapLine, useMenu, useTrimView, type MenuItem } from './uiStore';
 import { itemName } from './names';
 import { clickTrack, moveRows, moveRowsToEnd, rowKey, useTrackSel } from './trackSel';
 import { closeSource } from './SourcePanel';
 import { beatLead, beatSnapPoints, fitToBeats, getBeats, splitAtBeats, useBeats } from './beatGrid';
 import { beatSource } from '../engine/beats';
-import { requestFaces, useFaces } from '../engine/face';
+import { useSubjectStatus } from './subjectUi';
+import { sourceTime, tracking } from '../engine/follow';
+import { faceDone, useFaces } from '../engine/face';
+import { boxCoverage, useBoxTracks } from '../engine/boxTrack';
 
 const SNAP_PX = 8;
 /** 時間軸預設長度（秒）；專案比這個長才依專案長度延伸 */
@@ -1069,10 +1074,31 @@ interface ClipViewProps {
 /** 依片段寬度切幾格檢查（每格約 3px，最多 240 格） */
 const matteCells = (w: number) => Math.max(1, Math.min(240, Math.round(w / 3)));
 
-/**
- * AI 去背：片段底部顯示哪些地方的遮罩已經好了（跟預覽用同一個查法，所以位置對得上）。
- * 全部好了就不顯示；失敗時沒好的部分是紅色。
- */
+/** 片段底部的進度條：cov 每格 1 = 好了；全部好了就不顯示；失敗時沒好的部分是紅色 */
+function CoverageBar({ cov, busy, err, title, cls, color }: { cov: Uint8Array; busy: boolean; err?: string; title: (pct: number) => string; cls?: string; color: string }) {
+  let ready = 0;
+  for (const v of cov) ready += v;
+  if (ready === cov.length) return null;
+  // 連續的格子合併成漸層的一段
+  const stops: string[] = [];
+  const off = err && !busy ? 'var(--err)' : 'transparent';
+  for (let k = 0; k < cov.length; ) {
+    let j = k;
+    while (j < cov.length && cov[j] === cov[k]) j++;
+    const c = cov[k] ? color : off;
+    stops.push(`${c} ${((k / cov.length) * 100).toFixed(2)}%`, `${c} ${((j / cov.length) * 100).toFixed(2)}%`);
+    k = j;
+  }
+  return (
+    <div
+      className={`clip-matte ${cls ?? ''} ${busy ? 'busy' : ''}`}
+      style={{ backgroundImage: `linear-gradient(to right, ${stops.join(', ')})` }}
+      title={err && !busy ? err : title(Math.round((ready / cov.length) * 100))}
+    />
+  );
+}
+
+/** AI 去背：片段底部顯示哪些地方的遮罩已經好了（跟預覽用同一個查法，所以位置對得上） */
 function MatteBar({ clip, media, width }: { clip: Clip; media: Media; width: number }) {
   useMatte((s) => s.ver);
   const job = useMatte((s) => s.jobs[media.id]);
@@ -1081,41 +1107,35 @@ function MatteBar({ clip, media, width }: { clip: Clip; media: Media; width: num
   const map = useMemo(() => new Map(modules.map((m) => [m.id, m])), [modules]);
   // 開了 AI 去背就開始算（不用等播放頭走到這個片段；同樣的範圍不會重複排）
   useEffect(() => requestMatte(clip, media, map), [clip, media, map]);
-  const cov = matteCoverage(clip, media, map, matteCells(width));
-  let ready = 0;
-  for (const v of cov) ready += v;
-  if (ready === cov.length) return null;
-  // 連續的格子合併成漸層的一段
-  const stops: string[] = [];
-  const on = 'var(--accent2)', off = err && !job ? 'var(--err)' : 'transparent';
-  for (let k = 0; k < cov.length; ) {
-    let j = k;
-    while (j < cov.length && cov[j] === cov[k]) j++;
-    const c = cov[k] ? on : off;
-    stops.push(`${c} ${((k / cov.length) * 100).toFixed(2)}%`, `${c} ${((j / cov.length) * 100).toFixed(2)}%`);
-    k = j;
-  }
-  const pct = Math.round((ready / cov.length) * 100);
-  return (
-    <div
-      className={`clip-matte ${job ? 'busy' : ''}`}
-      style={{ backgroundImage: `linear-gradient(to right, ${stops.join(', ')})` }}
-      title={err && !job ? err : $t('AI 去背 {0}%', pct)}
-    />
-  );
+  return <CoverageBar cov={matteCoverage(clip, media, map, matteCells(width))} busy={!!job} err={err} color="var(--accent2)" title={(p) => $t('AI 去背 {0}%', p)} />;
 }
 
-/** 片段開了臉部追蹤：時間軸上的小標記；還在偵測時顯示進度（開著就會在背景偵測，不用等選取或特效用到） */
-function FaceBadge({ clip, media }: { clip: Clip; media: Media }) {
-  const mediaId = media.id;
-  const job = useFaces((s) => s.jobs[mediaId]);
-  const err = useFaces((s) => !!s.errors[mediaId]);
+/** 追蹤：片段底部顯示哪些地方已經追過（加了錨點時從那裡往後重新長出來）；有 AI 去背的進度條時疊在它上面 */
+function SubjectBar({ clip, media, width, stack }: { clip: Clip; media: Media; width: number; stack: boolean }) {
+  useFaces((s) => s.ver);
+  useBoxTracks((s) => s.ver);
+  const st = useSubjectStatus(clip, media);
   const modules = useStore((s) => s.modules);
-  useEffect(() => requestFaces(clip, media, new Map(modules.map((x) => [x.id, x]))), [clip, media, modules]);
+  const map = useMemo(() => new Map(modules.map((m) => [m.id, m])), [modules]);
+  const s = clip.subject!;
+  const n = matteCells(width);
+  let cov: Uint8Array;
+  if (s.kind === 'box') cov = boxCoverage(clip, media, s.anchors, map, n);
+  else {
+    cov = new Uint8Array(n);
+    for (let k = 0; k < n; k++) cov[k] = faceDone(media, sourceTime(clip, media, ((k + 0.5) / n) * clip.duration, map)) ? 1 : 0;
+  }
+  return <CoverageBar cov={cov} busy={!!st.job} err={st.err} cls={stack ? 'stack' : ''} color="#ffd23f" title={(p) => `${s.kind === 'face' ? $t('臉部追蹤') : $t('追蹤')} ${p}%`} />;
+}
+
+/** 片段有追蹤：時間軸上的小標記（進度看底部的進度條） */
+function SubjectBadge({ clip, media }: { clip: Clip; media: Media }) {
+  const st = useSubjectStatus(clip, media);
+  const face = clip.subject?.kind === 'face';
   return (
-    <span className={`badge face ${err ? 'error' : ''}`} title={$t('臉部追蹤')}>
-      <ScanFace size={10} />
-      {job ? ` ${Math.round((job.done / Math.max(1, job.total)) * 100)}%` : err ? ' !' : ''}
+    <span className={`badge face ${st.err ? 'error' : ''}`} title={st.err ?? (face ? $t('臉部追蹤') : $t('追蹤'))}>
+      {face ? <ScanFace size={10} /> : <Crosshair size={10} />}
+      {st.err ? ' !' : ''}
     </span>
   );
 }
@@ -1148,12 +1168,13 @@ const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel,
       {isText && <span className="text-ico">T</span>}
       {!ok && <TriangleAlert size={12} className="warn-ico" />}
       {c.aiMatte && m && ok && (m.kind === 'video' || m.kind === 'image') && <MatteBar clip={c} media={m} width={c.duration * pps} />}
+      {tracking(c) && ok && !isText && m && <SubjectBar clip={c} media={m} width={c.duration * pps} stack={!!c.aiMatte} />}
       {c.link && <Link2 size={11} className="link-ico" />}
       {c.group && <Group size={11} className="link-ico" />}
       <span className="clip-name" title={`${name} · ${c.duration.toFixed(2)}s`}>{name}</span>
       {remapName && <span className="badge"><Gauge size={10} /> {remapName}</span>}
       {!!c.effects?.some((f) => !f.base) && <span className="badge" title={$t('片段特效')}><Sparkles size={10} /> {c.effects!.filter((f) => !f.base).length}</span>}
-      {c.faceTrack && ok && !isText && m && <FaceBadge clip={c} media={m} />}
+      {tracking(c) && ok && !isText && m && <SubjectBadge clip={c} media={m} />}
       {drop === 'replace' && <span className="badge replace-tag"><Replace size={10} /> {$t('取代')}</span>}
       {drop === 'effect' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段特效')}</span>}
       {drop === 'mask' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段遮罩')}</span>}
@@ -1461,6 +1482,25 @@ export function Timeline() {
       if (bar && Math.abs(bar.scrollLeft - el.scrollLeft) > 0.5) bar.scrollLeft = el.scrollLeft;
     };
     el.addEventListener('scroll', syncBar, { passive: true });
+    // 捲動位置：F5 / 面板重新打開時回到上次的地方（等專案載入、片段畫出來，捲軸才夠長）；回到之前不記，免得蓋掉
+    let viewReady = false;
+    const remember = () => viewReady && rememberScroll(el.scrollLeft, el.scrollTop);
+    el.addEventListener('scroll', remember, { passive: true });
+    let gone = false;
+    void projectRestored().then(() =>
+      requestAnimationFrame(() =>
+        requestAnimationFrame(() => {
+          if (gone) return;
+          const v = savedScroll();
+          if (v) {
+            el.scrollLeft = v.sl;
+            el.scrollTop = v.st;
+            syncBar();
+          }
+          viewReady = true;
+        }),
+      ),
+    );
     const ro = new ResizeObserver(updView);
     ro.observe(el);
     // 其他方式縮放（滑桿、= / - 鍵、選單）：播放頭在畫面內就固定播放頭，否則固定畫面中間
@@ -1487,6 +1527,8 @@ export function Timeline() {
     window.addEventListener('timeline-reveal-playhead', reveal);
     return () => {
       el.removeEventListener('scroll', syncBar);
+      el.removeEventListener('scroll', remember);
+      gone = true;
       ro.disconnect();
       unsub();
       el.removeEventListener('wheel', onWheel);

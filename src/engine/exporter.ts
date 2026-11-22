@@ -1,6 +1,6 @@
 import { ensureShapes } from './maskShapes';
 import { prepareMattes } from './matte';
-import { prepareFaces } from './follow';
+import { prepareSubjects } from './follow';
 import { $t } from '../i18n';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { projectDuration, useStore } from '../store';
@@ -54,7 +54,7 @@ export async function exportMp4(fps: number, range?: { a: number; b: number }, b
   await ensureShapes(fxs.map((f) => f.mask?.shape ?? 'none'));
   // AI 去背：遮罩要先全部算好
   await prepareMattes(st0.clips, ctx.media, ctx.modules);
-  await prepareFaces(st0.clips, ctx.media, ctx.modules);
+  await prepareSubjects(st0.clips, ctx.media, ctx.modules);
 
   const { w: FW, h: FH } = st0.format;
   const vConfig = await pickVideoConfig(FW, FH, fps, bitrate);

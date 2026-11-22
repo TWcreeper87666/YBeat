@@ -1,17 +1,17 @@
 import { $t } from '../i18n';
-import { audioSignal, type AudioSignal } from './audioReact';
+import { audioSignal, fromKey, type AudioSignal } from './audioReact';
 import { scrubFrameAt } from './scrubCache';
-import { fxLevel, type BlendMode, type TransitionRef, type AudioClip, type AudioDrive, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
+import { fxLevel, type BlendMode, type TransitionRef, type AudioClip, type AudioDrive, type AudioFrom, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
 import { maskAt, type Mask } from './mask';
 import { FIELD_RANGE, getShapeField, maskFieldKey, type ShapeField } from './maskShapes';
 import { CLIP_MASK_ID } from '../modules/extra';
 import { renderText, textKey } from './text';
-import { hexToRgb, isNumeric, paramAt, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
+import { fitScale, hexToRgb, isNumeric, paramAt, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
 import { clipSource, plainSpeed } from './remap';
 import { MATTE_SIZE, matteAt, requestMatte } from './matte';
 import { clipTransformAt } from './transform';
 import { evalKeys, type Keyframe } from './keyframes';
-import { faceInFrame, followOf, withOffset, type Follow, type FollowMap } from './follow';
+import { fitOf, followOf, subjectRectInFrame, tracking, withOffset, type Follow, type FollowMap } from './follow';
 import { animFrameAt, animImage, animImageReady } from './animImage';
 import { cutPoints, cutTracks, fxWindow, triggerBeats, triggerWindow } from './trigger';
 
@@ -70,15 +70,15 @@ export function sortClips(clips: Clip[]) {
 
 /** 單一軌道在時間 t 的狀態（clips 需已排序） */
 /**
- * 特效軌方塊（調整圖層，level = 它下面有幾條影片軌）跟隨臉部時看的片段：
- * track 有指定 → 那條影片軌這一刻的片段；沒有 → 底下由上往下第一個有開臉部追蹤的片段。
+ * 特效軌方塊（調整圖層，level = 它下面有幾條影片軌）跟隨目標時看的片段：
+ * track 有指定 → 那條影片軌這一刻的片段；沒有 → 底下由上往下第一個有追蹤的片段。
  */
-export function faceClipUnder(ctx: Pick<RenderCtx, 'videoTracks' | 'tracks'>, level: number, t: number, track?: number): { clip: Clip; local: number } | null {
+export function subjectClipUnder(ctx: Pick<RenderCtx, 'videoTracks' | 'tracks'>, level: number, t: number, track?: number): { clip: Clip; local: number } | null {
   const at = (i: number) => {
     if (ctx.tracks.video[i]?.hidden || !ctx.videoTracks[i]) return null;
     const fr = computeFrame(ctx.videoTracks[i], t);
     const c = fr.kind === 'clip' ? fr.clip : fr.kind === 'transition' ? (fr.progress < 0.5 ? fr.A ?? fr.B : fr.B ?? fr.A) : null;
-    return c && !c.text && c.faceTrack ? { clip: c, local: t - c.start } : null;
+    return c && !c.text && tracking(c) ? { clip: c, local: t - c.start } : null;
   };
   if (track != null) return at(track);
   for (let i = Math.min(level, ctx.videoTracks.length) - 1; i >= 0; i--) {
@@ -477,6 +477,16 @@ export class Renderer {
 
   /** 這一格的音訊訊號（render 開頭算一次） */
   private sig: AudioSignal = { level: 0, beat: 0 };
+  /** 只聽部分軌道的音訊反應（這一格裡同樣的來源只算一次） */
+  private sigFrom = new Map<string, AudioSignal>();
+  private sigAt: { ctx: RenderCtx; t: number } | null = null;
+  private signalOf(from: AudioFrom | undefined): AudioSignal {
+    const k = fromKey(from);
+    if (!k || !this.sigAt) return this.sig;
+    let v = this.sigFrom.get(k);
+    if (!v) this.sigFrom.set(k, (v = audioSignal(this.sigAt.ctx, this.sigAt.t, from)));
+    return v;
+  }
 
   private setParams(p: Prog, values: ParamValues, keys?: Record<string, Keyframe[]>, local = 0, drive?: Record<string, AudioDrive>, pts?: Record<string, number[]>) {
     const gl = this.gl;
@@ -485,20 +495,24 @@ export class Renderer {
       const l = this.loc(p, d.name);
       if (!l) continue;
       const dr = drive?.[d.name];
-      const x = pts?.[d.name] ?? (dr && isNumeric(d) ? dr.min + (dr.max - dr.min) * (dr.source === 'beat' ? this.sig.beat : this.sig.level) : paramAt(d, v, keys, local));
+      const sg = dr ? this.signalOf(dr.from) : this.sig;
+      const x = pts?.[d.name] ?? (dr && isNumeric(d) ? dr.min + (dr.max - dr.min) * (dr.source === 'beat' ? sg.beat : sg.level) : paramAt(d, v, keys, local));
       if (d.type === 'float') gl.uniform1f(l, Number(x));
       else if (d.type === 'int') gl.uniform1i(l, Math.round(Number(x)));
       else if (d.type === 'bool') gl.uniform1i(l, x ? 1 : 0);
-      // point：存的是畫面座標（y 向下），shader 裡是 uv（y 向上）
-      else if (d.type === 'point') gl.uniform2f(l, (x as number[])[0], 1 - (x as number[])[1]);
+      // point：存的是畫面座標（y 向下），shader 裡是 uv（y 向上）；範圍（@fit）是寬、高，不翻
+      else if (d.type === 'point' && d.fit) {
+        const k = fitScale(d, p.defs, v, keys, local);
+        gl.uniform2f(l, (x as number[])[0] * k, (x as number[])[1] * k);
+      } else if (d.type === 'point') gl.uniform2f(l, (x as number[])[0], 1 - (x as number[])[1]);
       else if (d.type === 'curve') gl.uniform4f(l, ...(x as [number, number, number, number]));
       else gl.uniform3f(l, ...hexToRgb(String(x)));
     }
   }
 
   /**
-   * 跟著臉的 point 參數：這一格的位置（畫面座標 + 偏移）。pick = 要看哪個片段的臉（轉場依 side 選前 / 後一段）。
-   * 沒有臉 / 還沒偵測好的參數不會出現在結果裡（照原本的值）。
+   * 跟著目標的 point 參數：這一格的位置（畫面座標 + 偏移）。pick = 要看哪個片段的目標（轉場依 side 選前 / 後一段）。
+   * 沒有目標 / 還沒算好的參數不會出現在結果裡（照原本的值）。
    */
   private followed(g: Prog, map: FollowMap | undefined, pick: (f: Follow) => { clip: Clip; local: number } | null | undefined, ctx: RenderCtx) {
     let out: Record<string, number[]> | undefined;
@@ -507,8 +521,11 @@ export class Renderer {
       if (!f) continue;
       const s = pick(f);
       if (!s) continue;
-      const pt = faceInFrame(s.clip, ctx.media.get(s.clip.mediaId), s.local, ctx.modules, this.w / this.h);
-      if (pt) (out ??= {})[d.name] = withOffset(pt, f);
+      const r = subjectRectInFrame(s.clip, ctx.media.get(s.clip.mediaId), s.local, ctx.modules, this.w / this.h);
+      if (!r) continue;
+      (out ??= {})[d.name] = withOffset(r.c, f);
+      // 跟著這個點的範圍參數（@fit）= 目標大小（倍率在 setParams 乘）
+      for (const z of g.defs) if (z.fit?.of === d.name && fitOf(z, g.defs, map)) out[z.name] = [...r.s];
     }
     return out;
   }
@@ -1050,6 +1067,8 @@ export class Renderer {
     this.clear(P0, true);
     let cur = P0;
     this.sig = audioSignal(ctx, t);
+    this.sigAt = { ctx, t };
+    this.sigFrom.clear();
 
     // 作用中的特效，依所在層（下面有幾條影片軌）分組
     const fxByLevel = new Map<number, FxItem[]>();
@@ -1078,7 +1097,7 @@ export class Renderer {
         for (const f of [fx, ...(fx.stack ?? []).filter((x) => x.enabled !== false)]) {
           const m = ctx.modules.get(f.moduleId);
           const g = m ? this.moduleProg(m) : null;
-          if (g) cur = this.applyFx(cur, f, g, t, t - w.t0, w.d, this.followed(g, f.follow, () => faceClipUnder(ctx, lv, t, fx.faceFrom), ctx));
+          if (g) cur = this.applyFx(cur, f, g, t, t - w.t0, w.d, this.followed(g, f.follow, () => subjectClipUnder(ctx, lv, t, fx.subjectFrom), ctx));
         }
       }
     };

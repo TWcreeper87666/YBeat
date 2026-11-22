@@ -74,7 +74,7 @@ const zoomPulse = `// 縮放脈衝（Zoom Bounce）：鼓點上彈一下
 // @param amount: float = 0.15 (0..1) "放大量"
 // @param blur: float = 0.4 (0..1) "放射模糊"
 // @param bounce: bool = true "回彈"
-// @param center: point = 0.5,0.5 "中心" @follow(face)
+// @param center: point = 0.5,0.5 "中心" @follow
 // @param ease: curve = inOut3 "回落曲線"
 vec4 effect(vec2 uv) {
   float p = u_progress;
@@ -202,7 +202,7 @@ const twirl = `// 漩渦 Twirl
 // @param angle: float = 3 (-10..10) "旋轉量"
 // @param radius: float = 0.6 (0.1..1.5) "範圍"
 // @param decay: float = 2 (0..6) "衰減"
-// @param center: point = 0.5,0.5 "中心" @follow(face)
+// @param center: point = 0.5,0.5 "中心" @follow
 vec4 effect(vec2 uv) {
   vec2 p = uv - center;
   p.x *= ASPECT;
@@ -275,6 +275,47 @@ vec4 effect(vec2 uv) {
   float s = max(1.0, size * pow(1.0 - u_progress, decay));
   vec2 px = u_resolution / s;
   return tex((floor(uv * px) + 0.5) / px);
+}
+`;
+
+const mosaic = `// 馬賽克：遮住一塊範圍（臉、車牌…）；片段有追蹤時範圍跟著目標移動、縮放
+// @duration 3
+// @param center: point = 0.5,0.5 "中心" @follow
+// @param size: point = 0.25,0.3 "範圍" @fit(center, scale)
+// @param scale: float = 1.4 (0.2..5) "大小"
+// @param cell: float = 24 (2..160) "格子大小"
+// @param ellipse: bool = true "橢圓"
+// @param feather: float = 0.1 (0..1) "柔邊"
+vec4 effect(vec2 uv) {
+  vec4 c = tex(uv);
+  // 範圍內：0 = 中心，1 = 邊
+  vec2 d = abs(uv - center) / max(size * 0.5, vec2(1e-4));
+  float r = ellipse ? length(d) : max(d.x, d.y);
+  float k = 1.0 - smoothstep(1.0 - feather - 1e-3, 1.0, r);
+  if (k <= 0.0) return c;
+  // 格子大小以 1080p 為準：預覽、匯出解析度不同時看起來一樣
+  vec2 n = u_resolution / max(1.0, cell * u_resolution.y / 1080.0);
+  vec2 b = floor(uv * n);
+  vec4 m = vec4(0.0);
+  for (int i = 0; i < 4; i++)
+    for (int j = 0; j < 4; j++) m += tex((b + (vec2(float(i), float(j)) + 0.5) / 4.0) / n);
+  return mix(c, m / 16.0, k);
+}
+`;
+
+const followZoom = `// 跟隨放大：畫面放大並把目標放在正中間（跟拍感），整段放著用
+// @duration 3
+// @param center: point = 0.5,0.5 "中心" @follow
+// @param view: point = 0.3,0.3 "取景" @fit(center, scale)
+// @param scale: float = 1.5 (0.2..5) "大小"
+// @param maxZoom: float = 3 (1..10) "最大放大"
+// @param edge: bool = true "不露邊"
+vec4 effect(vec2 uv) {
+  // 取景框 = 放大後一定看得到的範圍（框的寬或高撐滿畫面）；框比畫面大 = 不放大
+  float z = clamp(1.0 / max(max(view.x, view.y), 1e-3), 1.0, maxZoom);
+  vec2 c = center;
+  if (edge) c = clamp(c, vec2(0.5 / z), vec2(1.0 - 0.5 / z));
+  return tex(mirrorUV(c + (uv - 0.5) / z));
 }
 `;
 
@@ -435,7 +476,7 @@ vec4 transition(vec2 uv) {
 const zoomBlurTr = `// 縮放模糊轉場（拉遠 → 推近）
 // @param strength: float = 0.6 (0..2) "縮放量"
 // @param blur: float = 0.5 (0..1) "模糊"
-// @param center: point = 0.5,0.5 "中心" @follow(face)
+// @param center: point = 0.5,0.5 "中心" @follow
 vec4 radialS(sampler2D s, vec2 uv, float z, float b) {
   vec2 c = center;
   vec2 base = zoomUV(uv, z, c);
@@ -472,7 +513,7 @@ vec4 effect(vec2 uv) {
 `;
 
 const scaleIn = `// 縮放推入：新畫面從小放大蓋上來
-// @param center: point = 0.5,0.5 "中心" @follow(face)
+// @param center: point = 0.5,0.5 "中心" @follow
 // @param from: float = 0.3 (0..1) "起始大小" @box(center)
 // @param ease: curve = back "曲線"
 // @param fadeIn: curve = 0.3,1,0,1 "淡入" @none(1)
@@ -489,7 +530,7 @@ vec4 transition(vec2 uv) {
 `;
 
 const scaleOut = `// 縮放推出：舊畫面縮小飛走，露出新畫面
-// @param center: point = 0.5,0.5 "中心" @follow(face)
+// @param center: point = 0.5,0.5 "中心" @follow
 // @param to: float = 0.2 (0..1) "結束大小" @box(center)
 // @param spin: float = 0 (-2..2) "旋轉圈數"
 // @param ease: curve = inOut3 "曲線"
@@ -576,18 +617,20 @@ export const EXTRA_MODULES: Module[] = [
   mk('fx-shakeblur', 'effect', '模糊晃動 Shake Blur', shakeBlur, 2),
   mk('fx-handheld', 'effect', '手持晃動 Handheld', handheld, 2),
   mk('fx-motionblur', 'effect', '動態模糊 Motion Blur', motionBlur, 2),
-  mk('fx-zoompulse', 'effect', '縮放脈衝 Zoom Bounce', zoomPulse, 4),
+  mk('fx-zoompulse', 'effect', '縮放脈衝 Zoom Bounce', zoomPulse, 5),
   mk('fx-glitch', 'effect', '故障 Glitch', glitch, 2),
   mk('fx-strobe', 'effect', '頻閃 Strobe', strobe),
   mk('fx-invert', 'effect', '反相閃 Invert', invert, 2),
   mk('fx-hue', 'effect', '色相偏移 Hue Shift', hueShift),
   mk('fx-glow', 'effect', '光暈 Glow', glow),
   mk('fx-wave', 'effect', '波浪扭曲 Wave Warp', wave),
-  mk('fx-twirl', 'effect', '漩渦 Twirl', twirl, 4),
+  mk('fx-twirl', 'effect', '漩渦 Twirl', twirl, 5),
   mk('fx-mirror', 'effect', '鏡像 Mirror', mirror),
   mk('fx-split', 'effect', '分割畫面 Split Screen', split),
   mk('fx-kaleido', 'effect', '萬花筒 Kaleidoscope', kaleido, 2),
   mk('fx-pixelate', 'effect', '像素化 Pixelate', pixelate, 2),
+  mk('fx-mosaic', 'effect', '馬賽克 Mosaic', mosaic, 2),
+  mk('fx-followzoom', 'effect', '跟隨放大 Follow Zoom', followZoom, 2),
   mk('fx-bw', 'effect', '黑白高反差 B&W', bw),
   mk('fx-vhs', 'effect', 'VHS 掃描線', vhs),
   mk('fx-letterbox', 'effect', '電影黑邊 Letterbox', letterbox),
@@ -600,9 +643,9 @@ export const EXTRA_MODULES: Module[] = [
   mk('tr-glitch', 'transition', '故障 Glitch', glitchTr),
   mk('tr-stretch', 'transition', '拉伸 Stretch', stretch, 2),
   mk('tr-clock', 'transition', '時鐘擦除 Radial', clockWipe),
-  mk('tr-zoomblur', 'transition', '縮放模糊 Zoom Blur', zoomBlurTr, 4),
-  mk('tr-scalein', 'transition', '縮放推入 Scale In', scaleIn, 4),
-  mk('tr-scaleout', 'transition', '縮放推出 Scale Out', scaleOut, 5),
+  mk('tr-zoomblur', 'transition', '縮放模糊 Zoom Blur', zoomBlurTr, 5),
+  mk('tr-scalein', 'transition', '縮放推入 Scale In', scaleIn, 5),
+  mk('tr-scaleout', 'transition', '縮放推出 Scale Out', scaleOut, 6),
   mk('tr-push', 'transition', '推移 Push', pushTr, 2),
   mk('tr-flip', 'transition', '翻轉 Flip', flipTr, 2),
   mk('tr-rewind', 'transition', '倒帶 Rewind', rewindTr),

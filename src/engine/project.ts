@@ -7,6 +7,7 @@ import { historyPath, resetHistory, settleHistory } from './history';
 import { clearDetachedMedia } from './detachedMedia';
 import { colorBlob } from './colorBlob';
 import { usePrefs } from '../prefs';
+import { PackError, readPack, writePack, type PackProgress } from './ybeatPack';
 
 /** 專案自動存檔：素材檔案（Blob）與時間軸存在 IndexedDB，重新整理不會遺失 */
 
@@ -122,7 +123,15 @@ function startAutosave() {
   });
 }
 
-export async function restoreProject() {
+let restored: Promise<void> | null = null;
+/** 專案載入完成（還沒開始載入 = 馬上完成） */
+export const projectRestored = () => restored ?? Promise.resolve();
+
+export function restoreProject(): Promise<void> {
+  return (restored ??= loadProject());
+}
+
+async function loadProject() {
   try {
     const data = await run<Saved | undefined>('project', 'readonly', (os) => os.get('current'));
     if (data) {
@@ -190,55 +199,44 @@ export async function newProject() {
   await saveNow();
 }
 
-interface ProjectPack { type: 'ybeat-project'; version: 1; project: Saved; blobs: Record<string, { type: string; base64: string }> }
+const packProject = (s: ReturnType<typeof useStore.getState>): Saved => ({
+  media: s.media.map((m) => ({ ...m, url: '', thumb: m.kind === 'image' ? '' : m.thumb })),
+  clips: s.clips, effects: s.effects, audios: s.audios, tracks: s.tracks, format: s.format, modules: s.modules,
+});
 
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result).split(',')[1]);
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(blob);
-  });
-}
-
-function base64ToBlob(base64: string, type: string): Blob {
-  const raw = atob(base64);
-  const parts: ArrayBuffer[] = [];
-  for (let i = 0; i < raw.length; i += 65536) {
-    const chunk = raw.slice(i, i + 65536);
-    const bytes = new Uint8Array(chunk.length);
-    for (let j = 0; j < chunk.length; j++) bytes[j] = chunk.charCodeAt(j);
-    parts.push(bytes.buffer);
-  }
-  return new Blob(parts, { type });
-}
-
-/** 可攜專案包：時間軸、模組及所有可用素材放進同一個檔案。 */
-export async function exportProjectPack(): Promise<Blob> {
+/** 可攜專案包：時間軸、模組及所有可用素材放進同一個檔案（格式見 ybeatPack.ts）。 */
+export async function exportProjectPack(onProgress?: PackProgress): Promise<Blob> {
   const s = useStore.getState();
-  const project: Saved = {
-    media: s.media.map((m) => ({ ...m, url: '', thumb: m.kind === 'image' ? '' : m.thumb })),
-    clips: s.clips, effects: s.effects, audios: s.audios, tracks: s.tracks, format: s.format, modules: s.modules,
-  };
-  const blobs: ProjectPack['blobs'] = {};
-  for (const m of s.media) {
+  const project = packProject(s);
+  const media: { id: string; blob: Blob }[] = [];
+  onProgress?.(0, s.media.length * 2);
+  for (const [i, m] of s.media.entries()) {
     const blob = await loadMediaBlob(m.id);
-    if (!blob) continue;
-    blobs[m.id] = { type: blob.type, base64: await blobToBase64(blob) };
+    if (blob) media.push({ id: m.id, blob });
+    onProgress?.(i + 1, s.media.length * 2);
   }
-  return new Blob([JSON.stringify({ type: 'ybeat-project', version: 1, project, blobs } satisfies ProjectPack)], { type: 'application/json' });
+  return writePack(project, media, (done) => { if (done) onProgress?.(s.media.length + done, s.media.length * 2); });
 }
 
-/** 先驗證整包，再取代目前專案。 */
-export async function importProjectPack(file: Blob): Promise<void> {
-  const pack = JSON.parse(await file.text()) as ProjectPack;
-  if (!pack || pack.type !== 'ybeat-project' || pack.version !== 1 || !pack.project || !Array.isArray(pack.project.media) || !Array.isArray(pack.project.clips) || !Array.isArray(pack.project.effects) || !Array.isArray(pack.project.audios) || !pack.project.tracks || !pack.blobs) throw new Error($t('無效的專案包'));
-  const media: Media[] = [];
-  const decoded = new Map<string, Blob>();
-  for (const m of pack.project.media) {
-    const entry = pack.blobs[m.id];
-    if (entry) decoded.set(m.id, base64ToBlob(entry.base64, entry.type));
+const isSaved = (p: Record<string, unknown>): p is Record<string, unknown> & Saved =>
+  Array.isArray(p.media) && Array.isArray(p.clips) && Array.isArray(p.effects) && Array.isArray(p.audios) && !!p.tracks && typeof p.tracks === 'object'
+  && p.media.every((m) => !!m && typeof m === 'object' && typeof (m as Media).id === 'string');
+
+/** 先驗證整包（含素材雜湊），再取代目前專案；失敗時目前專案不動。 */
+export async function importProjectPack(file: Blob, onProgress?: PackProgress): Promise<void> {
+  let pack: Awaited<ReturnType<typeof readPack>>;
+  try {
+    pack = await readPack(file, onProgress);
+  } catch (e) {
+    if (e instanceof PackError) { console.warn('ybeat pack:', e.message); throw new Error($t('無效的專案包')); }
+    throw e;
   }
+  const project = pack.manifest.project as Record<string, unknown>;
+  if (!isSaved(project)) throw new Error($t('無效的專案包'));
+  const ids = new Set(project.media.map((m) => m.id));
+  if ([...pack.blobs.keys()].some((id) => !ids.has(id))) throw new Error($t('無效的專案包'));
+  const decoded = pack.blobs;
+  const media: Media[] = [];
   clearTimeout(saveTimer);
   clearDetachedMedia();
   const old = useStore.getState().media;
@@ -250,18 +248,19 @@ export async function importProjectPack(file: Blob): Promise<void> {
     for (const [id, blob] of decoded) os.put(blob, id);
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
   });
-  for (const m of pack.project.media) {
+  for (const m of project.media) {
     const blob = decoded.get(m.id);
     const url = blob ? URL.createObjectURL(blob) : '';
     media.push({ ...m, url, thumb: m.kind === 'image' ? url : m.thumb, missing: !blob });
   }
   for (const m of old) if (m.url.startsWith('blob:')) URL.revokeObjectURL(m.url);
   useStore.setState({
-    media, clips: pack.project.clips.map(makeClip), effects: pack.project.effects,
-    audios: pack.project.audios.map(makeAudio), tracks: pack.project.tracks,
-    format: pack.project.format ?? DEFAULT_FORMAT,
-    ...(pack.project.modules ? { modules: mergeModules(pack.project.modules) } : {}),
+    media, clips: project.clips.map(makeClip), effects: project.effects,
+    audios: project.audios.map(makeAudio), tracks: project.tracks,
+    format: project.format ?? DEFAULT_FORMAT,
+    ...(project.modules ? { modules: mergeModules(project.modules) } : {}),
     selection: null, selected: [], time: 0, playing: false, loop: null,
   });
   resetHistory();

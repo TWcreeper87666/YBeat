@@ -25,7 +25,7 @@ let samples: [HTMLCanvasElement, HTMLCanvasElement] | null = null;
 const queue = new Map<string, Module>();
 let scheduled = false;
 
-function card(a: string, b: string, label: string) {
+export function card(a: string, b: string, label: string) {
   const c = document.createElement('canvas');
   c.width = THUMB_W;
   c.height = THUMB_H;

@@ -5,9 +5,11 @@ import { useStore } from './store';
 import { restoreProject } from './engine/project';
 import { installAppBehavior } from './ui/Menu';
 import { installFileDrop } from './ui/dnd';
+import { restoreTimelineView } from './ui/timelineView';
 
 installAppBehavior();
 installFileDrop();
+restoreTimelineView();
 restoreProject();
 createRoot(document.getElementById('root')!).render(<App />);
 

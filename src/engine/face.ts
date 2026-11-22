@@ -1,14 +1,16 @@
 /**
  * 臉部偵測（YuNet）：每個素材在背景每秒取樣 SAMPLE_FPS 格，結果存在 IndexedDB（不進專案檔）。
- * 查詢時挑出要跟的那張臉、平滑、內插（faceTrack.ts）。目前只給預覽畫臉框用（第 1 階段）。
+ * 查詢時挑出要跟的那張臉、平滑、內插（faceTrack.ts）。
  */
 import { create } from 'zustand';
 import type { Clip, Media, Module } from '../store';
-import { clipSource } from './remap';
 import { decodeRange } from './matteDecode';
 import { animFrameAt, animImage, animImageReady, type AnimImage } from './animImage';
-import { pickTrack, smoothTrack, trackAt, type Face, type FaceSample, type TrackPoint } from './faceTrack';
+import { bridgeTrack, findGaps, padBox, pickTrack, smoothTrack, trackAt, type Face, type FaceSample, type Gap, type TrackPoint } from './faceTrack';
 import type { FaceReq, FaceRes } from './faceWorker';
+import { Need, clipStill, sourceRange } from './jobNeed';
+import { TRACK_FPS, ensureBoxTrack, runPoints, trackKey, useBoxTracks } from './boxTrack';
+import type { Anchor } from './follow';
 
 /** 每秒取樣幾格（臉的移動是平滑的，中間內插） */
 export const SAMPLE_FPS = 10;
@@ -22,14 +24,24 @@ interface Entry {
   samples: Map<number, FaceSample>;
   loaded: Promise<void>;
   dirty: boolean;
-  /** 平滑後的軌跡（samples 變了就重算） */
+  /** 平滑後的軌跡（samples、補的點變了就重算） */
   track: TrackPoint[] | null;
+  /** 臉追丟的空洞，用 VitTrack 補（key = 方向 + 起點；結果在 boxTrack 的快取，這裡只記要補哪些） */
+  bridges: Map<string, Gap>;
 }
 const cache = new Map<string, Entry>();
 
 /** 介面用：計算進度、錯誤；ver = 有新的偵測結果就 +1 */
 export const useFaces = create<{ jobs: Record<string, { done: number; total: number }>; errors: Record<string, string>; ver: number }>(() => ({ jobs: {}, errors: {}, ver: 0 }));
 const bump = () => useFaces.setState({ ver: useFaces.getState().ver + 1 });
+
+// 補空洞的追蹤有新結果：有補空洞的素材軌跡要重算
+useBoxTracks.subscribe((s, p) => {
+  if (s.ver === p.ver) return;
+  let any = false;
+  for (const e of cache.values()) if (e.bridges.size) (e.track = null), (any = true);
+  if (any) bump();
+});
 
 // ───────────── IndexedDB ─────────────
 
@@ -59,6 +71,7 @@ function entry(mediaId: string): Entry {
     samples: new Map(),
     dirty: false,
     track: null,
+    bridges: new Map(),
     loaded: idb<{ v: number; samples: FaceSample[] } | undefined>('readonly', (os) => os.get(mediaId))
       .then((rec) => {
         if (!rec) return;
@@ -119,7 +132,7 @@ export function inputBox(w: number, h: number) {
 
 // ───────────── 工作佇列（一次一個素材） ─────────────
 
-const jobs = new Map<string, Promise<void>>();
+const jobs = new Map<string, { promise: Promise<void>; need: Need }>();
 let chain: Promise<void> = Promise.resolve();
 
 function setProgress(mediaId: string, done: number, total: number | null) {
@@ -136,7 +149,8 @@ function add(e: Entry, t: number, faces: Face[]) {
   bump();
 }
 
-async function runJob(media: Media, from: number, to: number) {
+/** live = 還有人需要（沒人需要就停下來，已經算好的存起來） */
+async function runJob(media: Media, from: number, to: number, live: () => boolean) {
   const e = entry(media.id);
   await e.loaded;
   const box = inputBox(media.width, media.height);
@@ -157,7 +171,7 @@ async function runJob(media: Media, from: number, to: number) {
         setProgress(media.id, 0, todo.length);
         let n = 0;
         for (const k of todo) {
-          if (!cache.has(media.id)) return;
+          if (!cache.has(media.id) || !live()) break;
           add(e, k / SAMPLE_FPS, await infer(grab(animFrameAt(anim, k / SAMPLE_FPS).image), box.w, box.h, box.dw, box.dh));
           setProgress(media.id, ++n, todo.length);
         }
@@ -172,10 +186,10 @@ async function runJob(media: Media, from: number, to: number) {
     } else if (media.kind === 'video') {
       // 優先直接解碼檔案（快、不受分頁在不在前景影響）；只支援 MP4，其他格式（WebM…）改用 <video> 一格一格 seek
       try {
-        await decodeVideo(media, e, box, from, to);
+        await decodeVideo(media, e, box, from, to, live);
       } catch (err) {
         console.warn('face: WebCodecs decode failed, falling back to seeking', err);
-        await seekVideo(media, e, box, from, to);
+        await seekVideo(media, e, box, from, to, live);
       }
     } else return;
     await persist(media.id);
@@ -192,7 +206,7 @@ async function runJob(media: Media, from: number, to: number) {
 
 type Box = ReturnType<typeof inputBox>;
 
-async function decodeVideo(media: Media, e: Entry, box: Box, from: number, to: number) {
+async function decodeVideo(media: Media, e: Entry, box: Box, from: number, to: number, live: () => boolean) {
   let n = 0, total = 0;
   // 已經算過的取樣格、這次已經拿到的格子都跳過（同一個取樣格只算第一格）
   const taken = new Set<number>();
@@ -215,12 +229,12 @@ async function decodeVideo(media: Media, e: Entry, box: Box, from: number, to: n
       setProgress(media.id, ++n, Math.max(total, n));
       if (n % 50 === 0) await persist(media.id);
     },
-    alive: () => cache.has(media.id),
+    alive: () => cache.has(media.id) && live(),
   });
 }
 
 /** 備用：<video> seek 到每個取樣時間（臉的位置不用精確到哪一格，seek 完畫面換好就拿） */
-async function seekVideo(media: Media, e: Entry, box: Box, from: number, to: number) {
+async function seekVideo(media: Media, e: Entry, box: Box, from: number, to: number, live: () => boolean) {
   const todo: number[] = [];
   for (let k = Math.ceil(from * SAMPLE_FPS); k / SAMPLE_FPS <= to + 1e-6; k++) if (!e.samples.has(k)) todo.push(k);
   if (!todo.length) return;
@@ -240,7 +254,7 @@ async function seekVideo(media: Media, e: Entry, box: Box, from: number, to: num
     setProgress(media.id, 0, todo.length);
     let n = 0;
     for (const k of todo) {
-      if (!cache.has(media.id)) return;
+      if (!cache.has(media.id) || !live()) return;
       const t = Math.min(k / SAMPLE_FPS, last);
       await new Promise<void>((res) => {
         const done = () => (v.removeEventListener('seeked', done), clearTimeout(timer), res());
@@ -266,34 +280,74 @@ async function seekVideo(media: Media, e: Entry, box: Box, from: number, to: num
 }
 
 /** 確保素材 from..to（素材時間）的臉都偵測過（已經在算的同一段會接著等） */
-export function ensureFaces(media: Media, from: number, to: number): Promise<void> {
+export function ensureFaces(media: Media, from: number, to: number, by?: { id: string; still: () => boolean }): Promise<void> {
   const key = `${media.id}|${from.toFixed(2)}|${to.toFixed(2)}`;
   const prev = jobs.get(key);
-  if (prev) return prev;
-  const p = (chain = chain.then(() => runJob(media, from, to)));
-  jobs.set(key, p);
-  return p;
+  if (prev) {
+    prev.need.add(by?.id, by?.still);
+    return prev.promise;
+  }
+  const need = new Need();
+  need.add(by?.id, by?.still);
+  const live = () => need.live();
+  const promise = (chain = chain.then(async () => {
+    if (live()) await runJob(media, from, to, live);
+    if (live() && media.kind === 'video') await bridgeGaps(media, from, to, live);
+    // 停下來了：之後再要求（例如復原）要重新排，接著算還沒好的格子
+    if (!live() && jobs.get(key)?.need === need) jobs.delete(key);
+  }));
+  jobs.set(key, { promise, need });
+  return promise;
 }
 
-/** 片段實際用到的素材時間範圍（變速、曲線都算進去；圖片 = 0） */
-export function faceRange(clip: Clip, media: Media, modules: Map<string, Module>): { from: number; to: number } {
-  if (media.kind === 'image') return { from: 0, to: 0 };
-  let lo = Infinity, hi = -Infinity;
-  const steps = Math.max(2, Math.ceil(clip.duration * 4));
-  for (let k = 0; k <= steps; k++) {
-    const t = clipSource(clip, (k / steps) * clip.duration, media, modules).src;
-    lo = Math.min(lo, t);
-    hi = Math.max(hi, t);
+/** 空洞給 VitTrack 的錨點：追蹤從那張臉（放大到含整個頭）開始 */
+const gapAnchor = (g: Gap): Anchor => ({ t: g.seed.t, box: padBox(g.seed) });
+const gapKey = (g: Gap) => `${g.dir}|${g.seed.t.toFixed(4)}`;
+
+/**
+ * 側臉、低頭、背對鏡頭時 YuNet 抓不到臉：from..to 裡的空洞從旁邊那張臉開始用 VitTrack 追過去補起來。
+ * 追蹤結果存在 boxTrack 的快取（run），進度顯示在臉部追蹤的進度上。
+ */
+async function bridgeGaps(media: Media, from: number, to: number, live: () => boolean) {
+  const e = entry(media.id);
+  const gaps = findGaps(pickTrack([...e.samples.values()]), from, to);
+  if (!gaps.length) return;
+  for (const g of gaps) e.bridges.set(gapKey(g), g);
+  e.track = null;
+  bump();
+  const len = (g: Gap) => Math.round((g.to - g.from) * TRACK_FPS);
+  const total = Math.max(1, gaps.reduce((s, g) => s + len(g), 0));
+  let base = 0;
+  try {
+    for (const g of gaps) {
+      if (!cache.has(media.id) || !live()) return;
+      const a = gapAnchor(g);
+      const k = trackKey(media.id, [a]);
+      const off = useBoxTracks.subscribe((s) => {
+        const j = s.jobs[k];
+        if (j) setProgress(media.id, Math.min(total, base + j.done), total);
+      });
+      try {
+        await ensureBoxTrack(media, [a], g.from, g.to, { id: `face|${media.id}`, still: live });
+      } finally {
+        off();
+      }
+      base += len(g);
+    }
+  } finally {
+    setProgress(media.id, 0, null);
   }
-  return { from: Math.max(0, lo - 0.1), to: Math.min(media.duration || hi + 0.1, hi + 0.1) };
 }
+
+/** 片段實際用到的素材時間範圍 */
+export const faceRange = sourceRange;
 
 /** 預覽：這個片段用到的素材範圍還沒偵測 → 背景開始算（同一個範圍不重複排） */
 export function requestFaces(clip: Clip, media: Media, modules: Map<string, Module>) {
   if (media.missing || (media.kind !== 'video' && media.kind !== 'image')) return;
   if (useFaces.getState().errors[media.id]) return;
   const r = faceRange(clip, media, modules);
-  void ensureFaces(media, r.from, r.to);
+  void ensureFaces(media, r.from, r.to, { id: clip.id, still: clipStill(clip, (c) => c.subject?.kind === 'face') });
 }
 
 /**
@@ -303,7 +357,11 @@ export function requestFaces(clip: Clip, media: Media, modules: Map<string, Modu
 export function faceAt(media: Media, t: number): TrackPoint | null {
   const e = entry(media.id);
   if (!e.samples.size) return null;
-  e.track ??= smoothTrack(pickTrack([...e.samples.values()]));
+  if (!e.track) {
+    const picked = pickTrack([...e.samples.values()]);
+    const bridges = [...e.bridges.values()].map((g) => ({ gap: g, pts: runPoints(media.id, gapAnchor(g), g.dir) }));
+    e.track = smoothTrack(bridges.length ? bridgeTrack(picked, bridges) : picked);
+  }
   if (media.kind === 'image') {
     const a = animImage(media);
     return trackAt(e.track, a ? frameTime(a, t) : 0);
@@ -315,4 +373,14 @@ export function faceAt(media: Media, t: number): TrackPoint | null {
 function frameTime(a: AnimImage, t: number) {
   const x = ((t % a.total) + a.total) % a.total;
   return Math.min(x, Math.floor(a.total * SAMPLE_FPS - 1e-6) / SAMPLE_FPS);
+}
+
+/** 素材時間 t 偵測過了沒（不管有沒有臉）：時間軸進度條用 */
+export function faceDone(media: Media, t: number): boolean {
+  const e = entry(media.id);
+  if (media.kind === 'image') {
+    const a = animImage(media);
+    return e.samples.has(a ? slot(frameTime(a, t)) : 0);
+  }
+  return e.samples.has(slot(t));
 }

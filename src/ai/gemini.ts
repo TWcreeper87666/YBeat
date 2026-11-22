@@ -7,8 +7,11 @@ const BASE = 'https://generativelanguage.googleapis.com/v1beta';
 
 /** API 的原始 part（文字 / functionCall / functionResponse，可能帶 thoughtSignature） */
 export type Part = Record<string, any>;
-/** parts 有值時照原樣送出（工具呼叫的回合）；沒有就用 text */
-export interface Turn { role: 'user' | 'model'; text: string; parts?: Part[] }
+/** parts 有值時照原樣送出（工具呼叫的回合、附圖）；沒有就用 text。img = 附了圖（之後的對話紀錄只留 text） */
+export interface Turn { role: 'user' | 'model'; text: string; parts?: Part[]; img?: true }
+
+/** 圖片 part */
+export const imagePart = (s: { mime: string; data: string }): Part => ({ inlineData: { mimeType: s.mime, data: s.data } });
 export interface ToolDecl { name: string; description: string; parameters: Record<string, unknown> }
 export interface FnCall { name: string; args: Record<string, unknown>; id?: string }
 

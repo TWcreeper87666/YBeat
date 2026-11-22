@@ -12,10 +12,11 @@ import { useLayout } from './uiStore';
  * 預覽畫面上的參數把手（特效、片段特效、轉場共用）：
  * - point 參數：十字把手，拖曳移動（Shift 吸附）
  * - float 參數加了 @box(點)：以該點為中心、縮放後的畫面框，拖角落改大小
+ * - point 參數加了 @fit(點, 倍率)：以該點為中心的範圍框，拖角落改大小（跟著目標時改倍率參數）
  */
 
-import { faceInFrame, followOf, withOffset, type Follow, type FollowMap } from '../engine/follow';
-import { faceClipUnder, makeCtx } from '../engine/renderer';
+import { subjectRectInFrame, fitOf, followOf, withOffset, type Follow, type FollowMap } from '../engine/follow';
+import { subjectClipUnder, makeCtx } from '../engine/renderer';
 import { fxLevel } from '../engine/tracks';
 import { FollowIcon } from './followUi';
 import { useFaces } from '../engine/face';
@@ -30,22 +31,27 @@ interface Target {
   values: ParamValues;
   /** 寫入一個參數（point 傳 [x, y]） */
   set(name: string, v: number | number[]): void;
-  /** 跟隨臉部的 point 參數：這一格臉的位置（沒偵測到 = 不在裡面）與設定；拖曳時改偏移 */
-  follow?: Record<string, { face: [number, number]; f: Follow }>;
+  /** 跟隨目標的 point 參數：這一格目標的位置（沒偵測到 = 不在裡面）與設定；拖曳時改偏移 */
+  follow?: Record<string, { face: [number, number]; size: [number, number]; f: Follow }>;
   setFollow?(name: string, f: Follow): void;
 }
 
-/** 跟隨臉部：每個跟隨中的 point 參數，這一格臉在畫面上的位置 */
+/** 跟隨目標：每個跟隨中的 point 參數，這一格目標在畫面上的位置 */
 function followInfo(defs: ParamDef[], map: FollowMap | undefined, src: (f: Follow) => { clip: Clip; local: number } | null | undefined) {
   const s = useStore.getState();
   const media = new Map(s.media.map((m) => [m.id, m]));
   const modules = new Map(s.modules.map((m) => [m.id, m]));
-  const out: Record<string, { face: [number, number]; f: Follow }> = {};
+  const out: Record<string, { face: [number, number]; size: [number, number]; f: Follow }> = {};
   for (const d of defs) {
     const f = followOf(d, map);
     const c = f && src(f);
-    const face = c && faceInFrame(c.clip, media.get(c.clip.mediaId), c.local, modules, s.format.w / s.format.h);
-    if (f && face) out[d.name] = { face, f };
+    const r = c && subjectRectInFrame(c.clip, media.get(c.clip.mediaId), c.local, modules, s.format.w / s.format.h);
+    if (f && r) out[d.name] = { face: r.c, size: r.s, f };
+  }
+  // 範圍參數（@fit）：跟著它的點
+  for (const d of defs) {
+    const o = d.fit && out[d.fit.of];
+    if (o && fitOf(d, defs, map)) out[d.name] = { face: o.face, size: o.size, f: {} };
   }
   return out;
 }
@@ -94,7 +100,7 @@ function useTargets(): Target[] {
           defs,
           values: at(defs, fx.params, fx.keys, local),
           set: fxWriter(host, (c) => c, () => useStore.getState().effects.find((f) => f.id === fx.id)?.keys, local),
-          follow: followInfo(defs, fx.follow, () => faceClipUnder(makeCtx(useStore.getState()), fxLevel(useStore.getState().tracks, fx.track), time, fx.faceFrom)),
+          follow: followInfo(defs, fx.follow, () => subjectClipUnder(makeCtx(useStore.getState()), fxLevel(useStore.getState().tracks, fx.track), time, fx.subjectFrom)),
           setFollow: (name, f) => {
             const cur = useStore.getState().effects.find((x) => x.id === fx.id);
             if (cur) useStore.getState().updateEffect(fx.id, { follow: { ...(cur.follow ?? {}), [name]: f } });
@@ -179,9 +185,14 @@ function drag(e: React.PointerEvent, move: (p: { x: number; y: number }, ev: Poi
   if (e.button !== 0) return;
   e.stopPropagation();
   e.preventDefault();
-  const layer = (e.currentTarget as HTMLElement).closest('.gizmo-layer')!.getBoundingClientRect();
+  const el = (e.currentTarget as HTMLElement).closest('.gizmo-layer')!;
+  const r0 = el.getBoundingClientRect();
   document.body.classList.add('mask-dragging');
-  const mv = (ev: PointerEvent) => move({ x: ev.clientX - layer.left, y: ev.clientY - layer.top }, ev);
+  // 每次重新量圖層、換成開始拖時的像素尺度：拖曳中縮放 / 平移檢視不會跳
+  const mv = (ev: PointerEvent) => {
+    const r = el.getBoundingClientRect();
+    move({ x: ((ev.clientX - r.left) / (r.width || 1)) * r0.width, y: ((ev.clientY - r.top) / (r.height || 1)) * r0.height }, ev);
+  };
   const up = () => {
     done();
     document.body.classList.remove('mask-dragging');
@@ -222,8 +233,34 @@ function TargetGizmos({ t, W, H, setGuides }: { t: Target; W: number; H: number;
             </div>
           );
         }
+        if (d.type === 'point' && d.fit) {
+          const pd = t.defs.find((x) => x.name === d.fit!.of && x.type === 'point');
+          if (!pd) return null;
+          const pf = t.follow?.[pd.name];
+          const [cx, cy] = pf ? withOffset(pf.face, pf.f) : (t.values[pd.name] as number[]);
+          const fol = t.follow?.[d.name];
+          // 框 = （跟隨中：目標大小；沒跟隨：自己的值）× 倍率參數
+          const kd = d.fit.scale ? t.defs.find((x) => x.name === d.fit!.scale && (x.type === 'float' || x.type === 'int')) : undefined;
+          const k = kd ? Number(t.values[kd.name]) : 1;
+          const [bw, bh] = fol ? fol.size : (t.values[d.name] as number[]);
+          const w = bw * k, h = bh * k;
+          const onCorner = (e: React.PointerEvent) =>
+            drag(e, (p) => {
+              const r4 = (v: number) => Math.round(v * 10000) / 10000;
+              const nw = Math.max(0.01, Math.abs(p.x - cx * W) * 2 / W), nh = Math.max(0.01, Math.abs(p.y - cy * H) * 2 / H);
+              // 跟隨中：改倍率（框的比例 = 目標的比例）；沒跟隨：改寬高
+              if (fol && kd) t.set(kd.name, r4(Math.min(kd.max, Math.max(kd.min, (nw / (bw || 1) + nh / (bh || 1)) / 2))));
+              else if (!fol) t.set(d.name, [r4(Math.min(d.max, nw / (k || 1))), r4(Math.min(d.max, nh / (k || 1)))]);
+            }, () => {});
+          return (
+            <div key={d.name} className="mask-gizmo param-box" style={{ left: (cx - w / 2) * W, top: (cy - h / 2) * H, width: Math.max(2, w * W), height: Math.max(2, h * H) }}>
+              <span className="mask-tag">{t.label} · {$t(d.label)}{fol && <FollowIcon />}</span>
+              {CORNERS.map((c) => <div key={c.k} className={`mask-h ${c.k}`} onPointerDown={onCorner} />)}
+            </div>
+          );
+        }
         if (d.type === 'point') {
-          // 跟隨臉部：把手在「臉 + 偏移」，拖曳改偏移
+          // 跟隨目標：把手在「目標 + 偏移」，拖曳改偏移
           const fol = t.follow?.[d.name];
           const [x, y] = fol ? withOffset(fol.face, fol.f) : (t.values[d.name] as number[]);
           const onDown = (e: React.PointerEvent) =>
