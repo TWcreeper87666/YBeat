@@ -4,7 +4,7 @@ import { create } from 'zustand';
 import { Pause, Play, X } from 'lucide-react';
 import { mediaUsable, useStore, type Media } from '../store';
 import { $t } from '../i18n';
-import { scrubFrame } from '../engine/scrubCache';
+import { scrubFrame, warmScrub } from '../engine/scrubCache';
 import { tc } from '../engine/rulerTicks';
 import { useDock } from './Dock';
 import { stopPreviewFx, useEditorWindow, usePreviewFx } from './uiStore';
@@ -14,19 +14,19 @@ import { stopPreviewFx, useEditorWindow, usePreviewFx } from './uiStore';
  * mediaId = 素材分頁點的素材、color = 色板分頁點的顏色（兩者只會有一個）
  * inspect：屬性面板顯示這個素材的資訊（從素材庫點開時；之後在時間軸選了別的就換回去）
  */
-export const useSource = create<{ mediaId: string | null; color: string | null; open: boolean; inspect: boolean }>(() => ({ mediaId: null, color: null, open: false, inspect: false }));
+export const useSource = create<{ mediaId: string | null; color: string | null; open: boolean; inspect: boolean; range: [number, number] | null; label: string | null }>(() => ({ mediaId: null, color: null, open: false, inspect: false, range: null, label: null }));
 
-/** 在「預覽」面板試看素材 */
-export function openSource(mediaId: string) {
+/** 在「預覽」面板試看素材；range = 只循環播這一段（自動剪輯的片段）、label = 顯示的名稱 */
+export function openSource(mediaId: string, range: [number, number] | null = null, label: string | null = null) {
   stopPreviewFx();
-  useSource.setState({ mediaId, color: null, open: true, inspect: true });
+  useSource.setState({ mediaId, color: null, open: true, inspect: !range, range, label });
   useDock.getState().activatePanel('preview', true);
 }
 
 /** 在「預覽」面板試看顏色 */
 export function openColor(color: string) {
   stopPreviewFx();
-  useSource.setState({ mediaId: null, color, open: true, inspect: false });
+  useSource.setState({ mediaId: null, color, open: true, inspect: false, range: null, label: null });
   useDock.getState().activatePanel('preview', true);
 }
 
@@ -63,10 +63,12 @@ export function SourceOverlay() {
   const id = useSource((s) => s.mediaId);
   const color = useSource((s) => s.color);
   const media = useStore((s) => s.media.find((m) => m.id === id));
+  const range = useSource((s) => s.range);
+  const label = useSource((s) => s.label);
   if (!open) return null;
   if (color) return <ColorView color={color} />;
   if (!media || !mediaUsable(media)) return null;
-  return <SourceView key={media.id} media={media} />;
+  return <SourceView key={`${media.id}:${range?.join('-') ?? ''}`} media={media} range={range} label={label} />;
 }
 
 /** 試看標籤：跟特效試看的一樣 */
@@ -106,7 +108,7 @@ export function sourceHotkey(e: KeyboardEvent): boolean {
   return true;
 }
 
-function SourceView({ media }: { media: Media }) {
+function SourceView({ media, range, label }: { media: Media; range: [number, number] | null; label: string | null }) {
   const keys = useRef<Keys | null>(null);
   const overlay = useRef<HTMLCanvasElement>(null);
   const ref = useRef<HTMLVideoElement & HTMLAudioElement>(null);
@@ -139,6 +141,8 @@ function SourceView({ media }: { media: Media }) {
     };
     el.addEventListener('seeked', onSeeked);
     const tick = () => {
+      // 片段：只循環播範圍內
+      if (range && !el.paused && target.current === null && (el.currentTime >= range[1] - 0.01 || el.currentTime < range[0] - 0.05)) el.currentTime = range[0];
       if (target.current === null) setT(el.currentTime);
       // 拖曳中、精準畫面還沒出來 → 先畫快取的小張影格
       const ov = overlay.current;
@@ -163,8 +167,10 @@ function SourceView({ media }: { media: Media }) {
     const on = () => setPlaying(!el.paused);
     el.addEventListener('play', on);
     el.addEventListener('pause', on);
-    // 打開就從頭循環播放
-    el.currentTime = 0;
+    // 先在背景抽拖曳用的小張影格
+    if (media.kind === 'video') warmScrub(media, range?.[0] ?? 0);
+    // 打開就從頭（片段的開頭）循環播放
+    el.currentTime = range?.[0] ?? 0;
     el.play().catch(() => {});
     return () => {
       cancelAnimationFrame(raf);
@@ -223,7 +229,7 @@ function SourceView({ media }: { media: Media }) {
       onPointerLeave={() => activeKeys === keys && (activeKeys = null)}
     >
       <div className="source-view">
-        <TrialLabel name={media.name} />
+        <TrialLabel name={label ?? media.name} />
         {media.kind === 'video' && (
           <div className="src-video-wrap">
             <video ref={ref} src={media.url} playsInline loop preload="auto" onClick={toggle} />
@@ -242,7 +248,7 @@ function SourceView({ media }: { media: Media }) {
         <div className="transport-row">
           <button className="tp play" title={$t('播放 / 暫停 (Space)')} onClick={toggle}>{playing ? <Pause size={16} fill="currentColor" /> : <Play size={16} fill="currentColor" />}</button>
           <div className="scrub src-scrub" ref={barRef} onPointerDown={scrub}>
-            <div className="scrub-track"><div className="scrub-fill" style={{ width: pct(t) }} /></div>
+            <div className="scrub-track"><div className="scrub-fill" style={{ width: pct(t) }} />{range && <div className="src-range" style={{ left: pct(range[0]), width: pct(range[1] - range[0]) }} />}</div>
             <div className="scrub-thumb" style={{ left: pct(t) }} />
           </div>
           <span className="tp-time">{fmt(t)} / {fmt(dur)}</span>

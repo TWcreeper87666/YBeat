@@ -182,6 +182,29 @@ LLM 不擅長精確的時間計算，但擅長「看懂內容、做大方向決�
 5. **AI 接上（2026-11-23）**：AI 助手有 `get_auto_edit`（讀設定、音樂段落）和 `set_auto_edit`（提議改設定，可以順便產生一版；按套用才生效），在 `src/ai/autoEditTools.ts`。這是第 7 階段「AI 導演」的第一步：AI 調參數，還沒有看素材內容挑鏡頭。
 6. **第 4、7 階段（2026-11-23）**：素材分析（`src/engine/mediaAnalysis.ts` 統計、`src/engine/mediaSampler.ts` 取樣；運動量、畫質、影片內剪接點，臉部還沒接）、AI 導演（`src/ai/director.ts`：Gemini 看每個素材的畫面，回傳適合的段落、優先度、精彩時間點），結果都只放記憶體。
 7. **能量曲線（2026-11-23）**：使用者 / AI 可以調整分析出來的能量（整體強度、對比、控制點），`src/engine/energyShape.ts`；段落與 drop 不變，影響剪接密度與點綴。
-8. **主體跳出第 1 期（2026-11-23）**：見 `subject-pop-plan.md`。只用圖片；四種：逐拍放大（預設開）、黑白背景、飛入、震閃（預設關），面板可以整個關掉或個別開關。`src/engine/subjectPop.ts`（去背評分、展開）、`add_items` 改成多層。
-9. **跟拍變速第 1 期（2026-11-23）**：見 `speed-ramp-plan.md`。只往前播：每拍快慢（預設開）、衝入剪接、緩速、重音定格；用 `remap-curve` 的素材時間曲線，`src/engine/speedRamp.ts`。下一步是第 3 期的倒播預解碼。
-10. **分工**：純邏輯（`src/engine/musicAnalysis.ts`、`src/engine/autoEdit.ts`＋測試）交給 Codex；套用、對話框、說明文字由 Claude 做。
+8. **主體跳出第 2、3、5 期（2026-11-23）**：再加八種（跨畫面、文字在後、殘影、四格、旋轉分身、暗背景、描邊光暈、背景模糊，預設關），新模組 `fx-matteoutline`、`fx-blur`，AI 導演回傳圖片適不適合做主體跳出（pop）。第 4 期（剪影窗、主體挖洞）改用既有的片段遮罩：去背結果描成輪廓路徑（`traceMatte`），不改片段欄位。
+   **主體跳出第 1 期（2026-11-23）**：見 `subject-pop-plan.md`。只用圖片；四種：逐拍放大（預設開）、黑白背景、飛入、震閃（預設關），面板可以整個關掉或個別開關。`src/engine/subjectPop.ts`（去背評分、展開）、`add_items` 改成多層。
+9. **跟拍變速第 1 期（2026-11-23）**：見 `speed-ramp-plan.md`。只往前播：每拍快慢（預設開）、衝入剪接、緩速、重音定格；用 `remap-curve` 的素材時間曲線，`src/engine/speedRamp.ts`。第 3 期（同日）：倒播四種（剪前倒抽、倒播回正、正倒正、逐拍來回），編排器先替倒播事件預留夠長的影片鏡頭（最多用掉一半的次數）；預覽用 `src/engine/reverseCache.ts` 預先解碼倒播 / 極慢段的影格（WebCodecs，480p、上限 240 格），匯出照舊精準 seek。Chrome 實測：倒播段 60fps、匯出正常。第 2 期（同日）：拍間慢放、卡帶停、甩鏡加速、重複切片。
+10. **特效層與風格（2026-11-24）**：見 `beat-fx-plan.md`。點綴改成「特效層」（每層一條特效軌、可以疊、每層有時機 / 能量 / 機率），6 種內建風格、密度 / 強度、轉場權重；特效的節拍 / 剪接點觸發可以設機率（專案檔 `FxItem.trigger.chance / seed`）。`src/engine/autoEditStyles.ts`。
+11. **分工**：純邏輯（`src/engine/musicAnalysis.ts`、`src/engine/autoEdit.ts`＋測試）交給 Codex；套用、對話框、說明文字由 Claude 做。
+
+## 記住自動剪輯面板的設定
+
+狀態：**已實作**（2026-11-23，使用者同意：存本機、跨專案共用，照下表分法）。`autoEditSettings.ts` 的 `PERSISTED`。
+
+### 存哪裡、存什麼
+
+跟 `src/prefs.ts`（預設長度、我的組合）一樣存在瀏覽器的 localStorage（新的 key：`ybeat-autoedit`），**跨專案共用**——風格、要用哪些轉場 / 點綴這類是個人口味，換專案也想沿用。
+
+| 存 | 不存（跟這個專案 / 這首歌有關） |
+|---|---|
+| 風格與所有數字（`recipe`、`params`）、轉場 / 點綴的勾選（`trOff`、`fxOff`）、drop 強調、圖片推近、素材順序 | 音樂選擇（`audioId`）、範圍、素材清單（`segs`：素材 id 每個專案都不同） |
+| 主體跳出、跟拍變速的開關 / 種類 / 次數 / 強度 / 文字 | 能量曲線（`shape`：控制點是這首歌的位置） |
+| 分析影片內容、AI 導演開關與指示 | 分析結果、AI 導演結果（算出來的） |
+
+### 影響
+
+- 新的 localStorage key，不動專案檔、不動既有的 key；沒有舊資料要轉換。
+- 面板的「重設」照舊回到預設（也會寫回 localStorage）。
+- 復原紀錄照舊（設定改動可以 Ctrl+Z）；從 localStorage 載入不算一步。
+- 內建模組改名 / 刪除時，`trOff`、`fxOff` 裡不存在的 id 直接忽略（現在就是這樣）。

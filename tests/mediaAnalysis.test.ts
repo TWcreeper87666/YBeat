@@ -1,4 +1,4 @@
-import { analyzeSamples, bestIn, frameStats, grayOf, scoreWindow, type FrameSample, type MediaInfo } from '../src/engine/mediaAnalysis';
+import { analyzeSamples, bestIn, frameStats, grayOf, peopleIn, peopleScore, scoreWindow, type FrameSample, type MediaInfo } from '../src/engine/mediaAnalysis';
 
 let fails = 0;
 const ok = (condition: boolean, name: string) => {
@@ -32,6 +32,16 @@ const picked = bestIn(cutInfo, 3, 1, [], zero);
 ok(!(picked < 10.1 && picked + 3 > 9.9), 'best window avoids cut');
 const allCuts = { ...halves, cuts: Array.from({ length: 20 }, (_, i) => i + 0.5) };
 ok(Number.isFinite(bestIn(allCuts, 3, 0, [], zero)), 'all cuts fallback');
+
+// 找人：有人的那一半優先
+{
+  const people: MediaInfo = { step: 1, duration: 20, motion: Array(20).fill(0.5), quality: Array(20).fill(1), cuts: [],
+    people: Array.from({ length: 20 }, (_, i) => (i >= 12 ? 1 : 0)) };
+  const t = bestIn(people, 4, 0.5, [], () => 0.5);
+  ok(peopleIn(people, t, t + 4) === 1, `有人的片段優先（${t}）`);
+  ok(peopleIn(people, 12, 16) === 1 && peopleIn(people, 0, 4) === 0, 'peopleIn 平均');
+  ok(peopleScore([]) === 0 && peopleScore([{ h: 0.5 }]) === 1 && Math.abs(peopleScore([{ h: 0.05 }, { h: 0.1 }]) - 0.4) < 1e-9, 'peopleScore 看最大的臉');
+}
 
 console.log(fails ? `\n${fails} media analysis failures` : '\nMedia analysis passed');
 if (fails) process.exit(1);

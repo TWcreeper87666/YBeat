@@ -28,7 +28,53 @@ export function frameStats(gray: Float32Array, w: number, h: number, prev?: Floa
 }
 
 export interface FrameSample { t: number; luma: number; sharp: number; diff: number }
-export interface MediaInfo { step: number; duration: number; motion: number[]; quality: number[]; cuts: number[] }
+/** 一格畫面裡最大的那張臉（素材畫面 0..1：中心、高度） */
+export interface FaceBox { x: number; y: number; h: number }
+/**
+ * people：每個取樣點畫面裡有沒有人（0..1，臉越大越高）；faces：那一格最大的臉（沒有 = null）。
+ * 沒偵測 = 沒有這兩個欄位。
+ */
+export interface MediaInfo { step: number; duration: number; motion: number[]; quality: number[]; cuts: number[]; people?: number[]; faces?: (FaceBox | null)[] }
+
+/** 最大的那張臉 */
+export function bestFace(faces: { x: number; y: number; h: number }[]): FaceBox | null {
+  let best: FaceBox | null = null;
+  for (const f of faces) if (!best || f.h > best.h) best = { x: f.x, y: f.y, h: f.h };
+  return best;
+}
+
+/** t0..t1 裡臉的平均位置與大小（只算有臉的格；範圍裡沒有取樣點 = 最近那格）；沒有臉 = null */
+export function faceIn(info: MediaInfo, t0: number, t1: number): FaceBox | null {
+  const f = info.faces;
+  if (!f?.length) return null;
+  let x = 0, y = 0, h = 0, n = 0, any = false;
+  for (let i = 0; i < f.length; i++) {
+    const t = i * info.step;
+    if (t < t0 || t >= t1) continue;
+    any = true;
+    const b = f[i];
+    if (b) { x += b.x; y += b.y; h += b.h; n++; }
+  }
+  if (!any) return f[Math.min(f.length - 1, Math.max(0, Math.round((t0 + t1) / (2 * info.step))))] ?? null;
+  return n ? { x: x / n, y: y / n, h: h / n } : null;
+}
+
+/** 一格畫面的「有人」分數：最大那張臉的高度佔畫面 25% 以上 = 1 */
+export function peopleScore(faces: { h: number }[]): number {
+  return clamp01(Math.max(0, ...faces.map((f) => f.h)) / 0.25);
+}
+
+/** t0..t1 平均有多少人（沒偵測 = 0） */
+export function peopleIn(info: MediaInfo, t0: number, t1: number): number {
+  const p = info.people;
+  if (!p?.length) return 0;
+  let sum = 0, n = 0;
+  for (let i = 0; i < p.length; i++) {
+    const t = i * info.step;
+    if (t >= t0 && t < t1) { sum += p[i]; n++; }
+  }
+  return n ? sum / n : p[Math.min(p.length - 1, Math.max(0, Math.round((t0 + t1) / (2 * info.step))))];
+}
 
 const clamp01 = (v: number) => Math.max(0, Math.min(1, v));
 const median = (values: number[]): number => {
@@ -80,8 +126,12 @@ function windowScore(info: MediaInfo, t0: number, t1: number, wantMotion: number
     motion = info.motion[i] ?? 0;
     count = 1;
   }
-  return (count ? quality / count : 0) - Math.abs((count ? motion / count : 0) - wantMotion) * 0.6;
+  // 盡量挑有人的畫面
+  return (count ? quality / count : 0) - Math.abs((count ? motion / count : 0) - wantMotion) * 0.6 + peopleIn(info, t0, t1) * PEOPLE_BONUS;
 }
+
+/** 有人的畫面加分（品質 0..1、亮點 +0.5） */
+export const PEOPLE_BONUS = 0.6;
 
 export function scoreWindow(info: MediaInfo, t0: number, t1: number, wantMotion: number): number {
   return windowScore(info, t0, t1, wantMotion, true);

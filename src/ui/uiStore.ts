@@ -146,6 +146,8 @@ export type DropTarget =
   | { kind: 'clip'; clipId: string; action: 'transition' | 'transitionOut' | 'remap' | 'relink' | 'replace' | 'effect' | 'mask'; valid: boolean }
   /** stack = 疊加到這個特效方塊上（沒有 = 取代） */
   | { kind: 'effect'; fxId: string; stack?: boolean }
+  /** 自動剪輯分頁的「片段」：whole = 按住 Alt（整段加入，不選範圍） */
+  | { kind: 'autoEdit'; whole: boolean }
   | null;
 
 export interface DragState {
@@ -213,3 +215,7 @@ export function useEditorMode(landscape: boolean): 'stacked' | 'side' | null {
 
 /** 修剪片段時預覽暫時顯示的時間（拖結尾 = 最後一格、拖開頭 = 第一格）；null = 照播放頭。播放頭本身不動 */
 export const useTrimView = create<{ t: number | null }>(() => ({ t: null }));
+
+// ───────────── 在素材分頁選中某個素材（從別的面板跳過去） ─────────────
+
+export const useLibFocus = create<{ id: string | null; n: number }>(() => ({ id: null, n: 0 }));

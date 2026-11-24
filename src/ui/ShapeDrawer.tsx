@@ -11,6 +11,7 @@ import { drawTarget, timeInside, type DrawTarget } from './MaskEditor';
 import { GridButton, GridOverlay } from './GridOverlay';
 import { closePicker } from './Library';
 import { confirmDialog, toast, useConfirm, useLayout } from './uiStore';
+import { marqueeClamp } from './marqueeClamp';
 
 /**
  * 鋼筆工具：在目前的畫面上畫遮罩形狀（存進遮罩形狀庫的「自訂」，有對象時順便套用到那個遮罩）。
@@ -332,13 +333,15 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
       const keep = add ? selRef.current : [];
       const [x0, y0] = at(e, false);
       const c0x = e.clientX, c0y = e.clientY;
+      const clamp = marqueeClamp(e.currentTarget, stageRef.current);
       let moved = false;
       listen(
         (ev) => {
           if (!moved && Math.hypot(ev.clientX - c0x, ev.clientY - c0y) < 3) return;
           moved = true;
-          const [x1, y1] = at(ev, false);
-          setMarquee([c0x, c0y, ev.clientX, ev.clientY]); // 螢幕座標（跟時間軸一樣用 .marquee）
+          const [cx, cy] = clamp(ev.clientX, ev.clientY);
+          const [x1, y1] = at({ clientX: cx, clientY: cy }, false);
+          setMarquee([c0x, c0y, cx, cy]); // 螢幕座標（跟時間軸一樣用 .marquee）
           setSel([...keep, ...ptsInRect(cur.current.pts, x0, y0, x1, y1)]);
         },
         () => {

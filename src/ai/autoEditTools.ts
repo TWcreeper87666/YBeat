@@ -4,13 +4,15 @@
  * 這裡不 import projectTools（避免循環）；錯誤用傳進來的 fail 丟出。
  */
 import { $t, displayName } from '../i18n';
-import type { useStore } from '../store';
+import { uid, type useStore } from '../store';
 import { usePrefs } from '../prefs';
 import { mediaBeats } from '../engine/beats';
 import { categoryOf } from '../modules/categories';
-import { RECIPES, type Recipe, type RecipeId } from '../engine/autoEdit';
-import { accentOpt, comboAccentOpt, transitionOpt } from '../engine/autoEditPools';
-import { footage, musicClips, useAutoEdit, type AutoEditSettings } from '../engine/autoEditSettings';
+import { RECIPES, type FxRule, type Recipe, type RecipeId, type RuleWhen } from '../engine/autoEdit';
+import { transitionOpt } from '../engine/autoEditPools';
+import { footage, musicClips, myStyleSettings, styleSettings, useAutoEdit, wholeSeg, type AutoEditSettings } from '../engine/autoEditSettings';
+import { STYLE_IDS } from '../engine/autoEditStyles';
+import type { BeatEvery } from '../engine/trigger';
 import { FLAT_SHAPE, shapeMusic, type EnergyShape } from '../engine/energyShape';
 import { POP_VARIANTS, type PopVariant } from '../engine/subjectPop';
 import { SPEED_VARIANTS, type SpeedVariant } from '../engine/speedRamp';
@@ -21,7 +23,7 @@ export type AutoEditPatch = Partial<Omit<AutoEditSettings, 'analysis' | 'directi
 const num = (description: string) => ({ type: 'number', description });
 const PICK = (what: string) => ({
   type: 'object',
-  description: `Which ${what} to use. Items are ids from get_auto_edit, "category:<id>" (all of one category), or "all". ${what === 'accents' ? '"combos" = all My Combos. ' : ''}only = exactly these; enable / disable = change from the current set.`,
+  description: `Which ${what} to use. Items are ids from get_auto_edit, "category:<id>" (all of one category), or "all". only = exactly these; enable / disable = change from the current set.${what === 'transitions' ? ' Enabling keeps a weight above 0 (1 if it was 0); disabling sets weight 0.' : ''}`,
   properties: {
     only: { type: 'array', items: { type: 'string' } },
     enable: { type: 'array', items: { type: 'string' } },
@@ -32,7 +34,7 @@ const PICK = (what: string) => ({
 export const AUTO_EDIT_DECLS = [
   {
     name: 'get_auto_edit',
-    description: 'Read the Auto Edit panel settings (which music, range, style and numbers, which media / transitions / accents are on) and, when analysed, the music sections (beat ranges, kind, energy 0..1) and drops.',
+    description: 'Read the Auto Edit panel settings (which music, range, style and numbers, fx layers, transition weights, which media are on) and, when analysed, the music sections (beat ranges, kind, energy 0..1) and drops.',
     parameters: { type: 'object', properties: {} },
   },
   {
@@ -41,7 +43,22 @@ export const AUTO_EDIT_DECLS = [
     parameters: {
       type: 'object',
       properties: {
-        style: { type: 'string', enum: ['calm', 'rhythm', 'hype'], description: 'preset; resets the numbers before the overrides below' },
+        style: { type: 'string', description: `preset (${STYLE_IDS.join(', ')}; velocity = speed ramps + zoom / shake every beat) or the name of one of the user's saved styles (get_auto_edit.my_styles); resets the numbers, fx layers and transition weights before the overrides below` },
+        density: num('0..2, multiplies the chance of every fx layer (1 = as set)'),
+        intensity: num('0..1, strength of the effects in the fx layers (0.5 = normal)'),
+        fx_layers: {
+          type: 'array',
+          description: 'Replace the fx layers (stacked effects, each on its own fx track). effect: effect or combo id from get_auto_edit.effects; when: beat (every N beats), cut (on shot changes), accent (on strong hits), drop, section (whole section, for colour looks); every: 0.5 / 1 / 2 / 4 beats (when = beat); levels: energy levels to use it in (0 low, 1 mid, 2 high; ignored for drop); chance 0..1 per beat / cut / hit / section; beats: block length for accent / drop. Same-group effects (zoom, shake, flash, glitch, colour) never overlap: drop > accent > cut > beat > section, earlier layer wins ties.',
+          items: {
+            type: 'object',
+            properties: {
+              effect: { type: 'string' }, when: { type: 'string', enum: ['beat', 'cut', 'accent', 'drop', 'section'] },
+              every: num(''), levels: { type: 'array', items: { type: 'number' } }, chance: num(''), beats: num(''), on: { type: 'boolean' },
+            },
+            required: ['effect', 'when'],
+          },
+        },
+        transition_weights: { type: 'object', description: 'transition id -> relative weight 0..3 (0 = never, 1 = normal); only the listed ones change', additionalProperties: { type: 'number' } },
         beats_per_shot: { type: 'object', description: 'beats per shot at low / mid / high energy (1..32)', properties: { low: num(''), mid: num(''), high: num('') } },
         variation: num('0..1 chance a shot is halved / doubled'),
         min_shot_sec: num('shortest shot, seconds'),
@@ -49,15 +66,13 @@ export const AUTO_EDIT_DECLS = [
         transition_rate: num('0..1 chance of a transition at a regular cut'),
         section_transition_rate: num('0..1 chance at section boundaries / drops'),
         transition_beats: num('transition length in beats (0.25..4); doubled at sections'),
-        accents_per_32: num('accents per 32 beats (0..16)'),
         music: { type: 'string', description: 'audio clip id to cut to' },
         range: { type: 'string', enum: ['all', 'loop'], description: 'whole music clip or the loop range' },
         order: { type: 'string', enum: ['library', 'shuffle'] },
-        ken_burns: { type: 'boolean', description: 'slow push in / pull out on images' },
+        ken_burns: { type: 'boolean', description: 'slow push in / pull out on images; shots with a detected face (videos too) push in on the face' },
         analyze: { type: 'boolean', description: 'pick video segments by motion / quality / avoiding cuts already inside the source video' },
         director: { type: 'boolean', description: 'AI director: before cutting, an AI looks at frames of every media file and decides which sections each suits, its priority and best moments' },
         director_note: { type: 'string', description: 'instruction for the AI director, e.g. "open with the landscape shots, faces on the drop"; empty string clears it' },
-        drop_hit: { type: 'string', description: 'effect id or combo id hit on every drop; "none" to turn off' },
         energy: {
           type: 'object',
           description: 'Shape the energy curve that drives cut density and accents (energy ≥ 0.75 = high, < 0.45 = low). gain -0.5..0.5 shifts everything, contrast 0.5..2 spreads it around 0.6, points replace the control points: at = position 0..1 of the music clip, offset -1..1 (+1 ≈ +0.6 energy), linear in between (give at 0 and 1 too). reset: back to the analysed curve.',
@@ -68,16 +83,17 @@ export const AUTO_EDIT_DECLS = [
         },
         subject_pop: {
           type: 'object',
-          description: 'Subject pop: a cut-out image grows / flies in on the beats before a drop or section change, and the reveal beat cuts to the full image. on: master switch; variants: which kinds may be used (step = grows one step per beat, mono = colour subject over its black-and-white image, fly = flies in, shake = grows with a shake + flash per beat); per_32: at most this many per 32 beats (0..4).',
+          description: 'Subject pop: a cut-out image grows / flies in on the beats before a drop or section change, and the reveal beat cuts to the full image. on: master switch; variants: which kinds may be used (step = grows one step per beat, mono = colour subject over its black-and-white image, fly = flies in, shake = grows with a shake + flash per beat, crossShot = subject of one image grows over the NEXT image which is then revealed, textBehind = big text placed behind the subject (needs text), trail = echo copies per beat, grid = four copies in the quadrants, spin = rotated copies, dim = subject over its darkened image, halo = glowing outline per beat, blur = subject over its blurred image, silhouetteWindow = the next image shows through the growing silhouette of the subject, subjectHole = a subject-shaped hole opens wider each beat revealing the next image); per_32: at most this many per 32 beats (0..4); text: the words for textBehind.',
           properties: {
             on: { type: 'boolean' },
             variants: { type: 'array', items: { type: 'string', enum: POP_VARIANTS } },
             per_32: num(''),
+            text: { type: 'string' },
           },
         },
         speed_ramps: {
           type: 'object',
-          description: 'Beat-synced speed ramps on video shots (forward only for now). on: master switch; variants: beatPulse = fast through each beat, slow in between; hitRamp = accelerates into a hard cut at a drop / section change; drift = gentle slow motion in quiet parts; holdHit = brief freeze on an accent. per_32: at most this many per 32 beats (0..8); intensity 0..1.',
+          description: 'Beat-synced speed ramps on video shots. on: master switch; variants: beatPulse = fast through each beat, slow in between; hitRamp = accelerates into a hard cut at a drop / section change; drift = gentle slow motion in quiet parts; holdHit = brief freeze on an accent; rewindToCut = rewinds over the last beat or two into a cut / strong transition; reverseForwardB = the shot after a section change starts reversed and snaps forward on the next beat; rewindReturn = forward, rewind one beat, forward; beatBoomerang = every beat forward-back-forward; slowPocket = slow motion between beats, short burst on each beat; tapeStop = slows to a stop before a drop / section change; whooshRamp = speeds up into a whip / zoom transition; beatStutter = repeats a short slice on the last beat of the shot. Reverse kinds are only used on footage with motion. per_32: at most this many per 32 beats (0..8); intensity 0..1.',
           properties: {
             on: { type: 'boolean' },
             variants: { type: 'array', items: { type: 'string', enum: SPEED_VARIANTS } },
@@ -86,7 +102,6 @@ export const AUTO_EDIT_DECLS = [
         },
         media: PICK('media'),
         transitions: PICK('transitions'),
-        accents: PICK('accents'),
         generate: { type: 'boolean' },
         replace_last: { type: 'boolean' },
       },
@@ -102,7 +117,7 @@ function pools(s: S) {
   return {
     media: footage(s).map((m) => ({ id: m.id, name: m.name, cat: m.kind })),
     transitions: s.modules.filter((m) => m.kind === 'transition').map((m) => ({ id: m.id, name: displayName(m.name), cat: categoryOf(m) })),
-    accents: [
+    effects: [
       ...s.modules.filter((m) => m.kind === 'effect').map((m) => ({ id: m.id, name: displayName(m.name), cat: categoryOf(m) })),
       ...combos.map((c) => ({ id: c.id, name: c.name, cat: 'combo' })),
     ],
@@ -119,12 +134,7 @@ export function readAutoEdit(s: S): Record<string, unknown> {
   const info = raw && shapeMusic(raw, st.shape);
   const p = st.params;
   const P = pools(s);
-  const combos = usePrefs.getState().fxCombos;
   const trStrength = new Map(s.modules.filter((m) => m.kind === 'transition').map((m) => [m.id, transitionOpt(m).strength]));
-  const acc = new Map([
-    ...s.modules.filter((m) => m.kind === 'effect').map((m) => [m.id, accentOpt(m)] as const),
-    ...combos.map((c) => [c.id, comboAccentOpt(c, s.modules)] as const),
-  ]);
   return {
     music: {
       selected: audioId,
@@ -139,23 +149,24 @@ export function readAutoEdit(s: S): Record<string, unknown> {
     },
     range: st.range,
     has_loop_range: !!s.loop,
-    style: st.recipe,
+    style: st.recipe.startsWith('my:') ? st.myStyles.find((m) => `my:${m.id}` === st.recipe)?.name ?? 'custom' : st.recipe,
+    my_styles: st.myStyles.map((m) => m.name),
     beats_per_shot: { low: p.beatsPerShot[0], mid: p.beatsPerShot[1], high: p.beatsPerShot[2] },
     variation: p.jitter, min_shot_sec: p.minShotSec, max_shot_sec: p.maxShotSec,
     transition_rate: p.transitionRate, section_transition_rate: p.sectionTransitionRate, transition_beats: p.transitionBeats,
-    accents_per_32: p.accentsPer32,
-    order: st.order, ken_burns: st.kenBurns, drop_hit: st.dropHit ?? 'none',
+    density: st.density, intensity: st.intensity,
+    fx_layers: st.rules.map((r) => ({ effect: r.moduleId, when: r.when, ...(r.every ? { every: r.every } : {}), levels: r.levels, chance: r.chance, ...(r.beats ? { beats: r.beats } : {}), on: r.on })),
+    order: st.order, ken_burns: st.kenBurns,
     energy: { gain: st.shape.gain, contrast: st.shape.contrast, points: st.shape.points.map((p) => ({ at: r2(p.x), offset: r2(p.y) })) },
-    subject_pop: { on: st.popOn, variants: st.popVariants, per_32: st.popsPer32 },
+    subject_pop: { on: st.popOn, variants: st.popVariants, per_32: st.popsPer32, text: st.popText },
     speed_ramps: { on: st.speedOn, variants: st.speedVariants, per_32: st.speedsPer32, intensity: st.speedIntensity },
     analyze: st.analyze, director: st.director, director_note: st.directorNote,
     ...(st.direction ? { last_direction: st.direction } : {}),
-    media: P.media.map((m) => ({ ...m, on: !st.mediaOff.includes(m.id) })),
-    transitions: P.transitions.map((m) => ({ ...m, strength: trStrength.get(m.id), on: !st.trOff.includes(m.id) })),
-    accents: P.accents.map((m) => {
-      const a = acc.get(m.id);
-      return { ...m, type: a?.hit ? 'hit' : a?.everyBeat ? 'every_beat' : 'hold', mood: a?.mood, on: !st.fxOff.includes(m.id) };
-    }),
+    media: P.media.map((m) => ({ ...m, on: !st.segs.length || st.segs.some((g) => g.mediaId === m.id) })),
+    // 使用者在面板指定的片段（影片的範圍）；關掉素材 = 拿掉它的片段、打開 = 整段加入
+    ...(st.segs.length ? { segments: st.segs.map((g) => ({ media: g.mediaId, from_sec: r2(g.a), to_sec: r2(g.b), ...(g.name ? { name: g.name } : {}) })) } : {}),
+    transitions: P.transitions.map((m) => ({ ...m, strength: trStrength.get(m.id), weight: st.trWeights[m.id] ?? 1 })),
+    effects: P.effects,
   };
 }
 
@@ -196,11 +207,15 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
   const patch: AutoEditPatch = {};
   let changed = 0;
   let params: Recipe = { ...st.params };
+  let trWeights = st.trWeights;
   if (a.style !== undefined) {
     const id = String(a.style) as RecipeId;
-    if (!RECIPES[id]) fail(`unknown style ${String(a.style)}`);
-    params = { ...RECIPES[id] };
-    patch.recipe = id;
+    const my = st.myStyles.find((m) => m.name === String(a.style));
+    if (!RECIPES[id] && !my) fail(`unknown style ${String(a.style)}`);
+    const sty = my ? myStyleSettings(my) : styleSettings(id);
+    Object.assign(patch, sty);
+    params = { ...sty.params! };
+    trWeights = sty.trWeights!;
     changed++;
   }
   const n = (k: string, lo: number, hi: number): number | undefined => {
@@ -235,9 +250,11 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
   custom('transitionRate', n('transition_rate', 0, 1));
   custom('sectionTransitionRate', n('section_transition_rate', 0, 1));
   custom('transitionBeats', n('transition_beats', 0.25, 4));
-  custom('accentsPer32', n('accents_per_32', 0, 16));
+  const density = n('density', 0, 2);
+  if (density !== undefined) patch.density = density;
+  const intensity = n('intensity', 0, 1);
+  if (intensity !== undefined) patch.intensity = intensity;
   if (params.minShotSec > params.maxShotSec) fail('min_shot_sec must be ≤ max_shot_sec');
-  if (patch.recipe) patch.params = { ...params, id: patch.recipe };
 
   if (a.music !== undefined) {
     if (!musicClips(s).some((x) => x.id === a.music)) fail(`music: ${String(a.music)} is not an audio clip with beats`);
@@ -282,7 +299,7 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
     patch.shape = shape;
     changed++;
   }
-  const sp = a.subject_pop as { on?: unknown; variants?: unknown; per_32?: unknown } | undefined;
+  const sp = a.subject_pop as { on?: unknown; variants?: unknown; per_32?: unknown; text?: unknown } | undefined;
   if (sp && typeof sp === 'object') {
     if (sp.on !== undefined) patch.popOn = !!sp.on;
     if (sp.variants !== undefined) {
@@ -292,6 +309,7 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
       patch.popVariants = [...new Set(list)] as PopVariant[];
       if (sp.on === undefined && list.length) patch.popOn = true;
     }
+    if (sp.text !== undefined) patch.popText = String(sp.text).slice(0, 40);
     if (sp.per_32 !== undefined) {
       if (typeof sp.per_32 !== 'number' || !Number.isFinite(sp.per_32)) fail('subject_pop.per_32 must be a number');
       patch.popsPer32 = Math.min(4, Math.max(0, sp.per_32 as number));
@@ -330,24 +348,55 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
     changed++;
   }
   const P = pools(s);
-  if (a.drop_hit !== undefined) {
-    const v = String(a.drop_hit);
-    if (v === 'none' || v === '') patch.dropHit = null;
-    else if (P.accents.some((x) => x.id === v)) patch.dropHit = v;
-    else fail(`drop_hit: unknown id ${v}`);
+  if (a.fx_layers !== undefined) {
+    if (!Array.isArray(a.fx_layers)) fail('fx_layers must be an array');
+    const WHEN: RuleWhen[] = ['beat', 'cut', 'accent', 'drop', 'section'];
+    patch.rules = (a.fx_layers as Record<string, unknown>[]).map((x, i): FxRule => {
+      const effect = String(x.effect);
+      if (!P.effects.some((e) => e.id === effect)) fail(`fx_layers[${i}].effect: unknown id ${effect}`);
+      const when = String(x.when) as RuleWhen;
+      if (!WHEN.includes(when)) fail(`fx_layers[${i}].when must be one of ${WHEN.join(', ')}`);
+      const every = ([0.5, 1, 2, 4] as BeatEvery[]).includes(x.every as BeatEvery) ? (x.every as BeatEvery) : 1;
+      const levels = Array.isArray(x.levels)
+        ? [...new Set(x.levels.map(Number).filter((l) => l === 0 || l === 1 || l === 2))] as (0 | 1 | 2)[]
+        : [1, 2] as (0 | 1 | 2)[];
+      const chance = typeof x.chance === 'number' && Number.isFinite(x.chance) ? Math.min(1, Math.max(0, x.chance)) : 1;
+      const beats = typeof x.beats === 'number' && x.beats > 0 ? Math.min(16, x.beats) : undefined;
+      return { id: uid(), moduleId: effect, on: x.on !== false, when, ...(when === 'beat' ? { every } : {}), levels, chance, ...(beats ? { beats } : {}) };
+    });
+    patch.recipe = 'custom';
     changed++;
   }
-  const lists: [string, keyof AutoEditPatch, { id: string; cat: string }[], string[]][] = [
-    ['media', 'mediaOff', P.media, st.mediaOff],
-    ['transitions', 'trOff', P.transitions, st.trOff],
-    ['accents', 'fxOff', P.accents, st.fxOff],
-  ];
-  for (const [k, field, list, off] of lists) {
-    const next = pick(a[k], list, off, fail, k);
-    if (!next) continue;
-    if (k === 'media' && list.every((x) => next.includes(x.id))) fail('media: at least one item must stay on');
-    (patch as Record<string, unknown>)[field] = next;
+  const trPick = pick(a.transitions, P.transitions, P.transitions.filter((m) => (trWeights[m.id] ?? 1) <= 0).map((m) => m.id), fail, 'transitions');
+  const tw = a.transition_weights as Record<string, unknown> | undefined;
+  if (trPick || (tw && typeof tw === 'object')) {
+    const next = { ...trWeights };
+    if (trPick) for (const m of P.transitions) next[m.id] = trPick.includes(m.id) ? 0 : Math.max(1, next[m.id] ?? 1);
+    for (const [id, v] of Object.entries(tw ?? {})) {
+      if (!P.transitions.some((m) => m.id === id)) fail(`transition_weights: unknown id ${id}`);
+      if (typeof v !== 'number' || !Number.isFinite(v)) fail(`transition_weights.${id} must be a number`);
+      next[id] = Math.min(3, Math.max(0, v as number));
+    }
+    patch.trWeights = next;
+    patch.recipe = 'custom';
     changed++;
+  }
+  // 風格變「自訂」時把目前的數字一起帶過去（選了風格 = 風格的數字再加上覆寫）
+  if (patch.recipe) patch.params = { ...params, id: patch.recipe };
+  // 素材開關 → 片段清單：關掉 = 拿掉那個素材的所有片段；打開 = 整段加入（全部打開又沒有範圍 = 清空 = 用素材庫全部）
+  {
+    const used = new Set(st.segs.length ? st.segs.map((g) => g.mediaId) : P.media.map((m) => m.id));
+    const next = pick(a.media, P.media, P.media.filter((m) => !used.has(m.id)).map((m) => m.id), fail, 'media');
+    if (next) {
+      if (P.media.every((x) => next.includes(x.id))) fail('media: at least one item must stay on');
+      const base = st.segs.length ? st.segs : s.media.filter((m) => used.has(m.id)).map((m) => wholeSeg(m, uid()));
+      const segs = [
+        ...base.filter((g) => !next.includes(g.mediaId)),
+        ...s.media.filter((m) => P.media.some((x) => x.id === m.id) && !next.includes(m.id) && !used.has(m.id)).map((m) => wholeSeg(m, uid())),
+      ];
+      patch.segs = !next.length && segs.every((g) => { const m = s.media.find((x) => x.id === g.mediaId); return !!m && g.a === 0 && (m.kind !== 'video' || g.b >= m.duration) && !g.name; }) ? [] : segs;
+      changed++;
+    }
   }
   const generate = !!a.generate;
   if (!changed && !generate) fail('nothing to change');

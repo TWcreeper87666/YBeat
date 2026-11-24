@@ -1,8 +1,9 @@
 import type { MusicInfo } from './musicAnalysis';
-import { bestIn, type MediaInfo } from './mediaAnalysis';
+import { bestIn, faceIn, type FaceBox, type MediaInfo } from './mediaAnalysis';
 import type { SectionKind } from './musicAnalysis';
 import type { PlanPop, PopVariant } from './subjectPop';
 import { speedCurve, type PlanSpeed, type SpeedVariant } from './speedRamp';
+import type { BeatEvery } from './trigger';
 
 export interface Recipe {
   id: string;
@@ -16,14 +17,46 @@ export interface Recipe {
   /** 一般切點的轉場拍數；段落與 drop 加倍。 */
   transitionBeats: number;
 }
-export type RecipeId = 'calm' | 'rhythm' | 'hype';
+export type RecipeId = 'calm' | 'rhythm' | 'hype' | 'velocity' | 'glitch' | 'flash';
 export const RECIPES: Record<RecipeId, Recipe> = {
   calm: { id: 'calm', beatsPerShot: [8, 4, 4], jitter: 0.1, transitionRate: 0.25, sectionTransitionRate: 0.6, accentsPer32: 0.5, minShotSec: 1.2, maxShotSec: 8, transitionBeats: 1 },
   rhythm: { id: 'rhythm', beatsPerShot: [4, 2, 1], jitter: 0.2, transitionRate: 0.15, sectionTransitionRate: 0.8, accentsPer32: 2, minShotSec: 0.35, maxShotSec: 6, transitionBeats: 0.5 },
   hype: { id: 'hype', beatsPerShot: [2, 1, 1], jitter: 0.25, transitionRate: 0.1, sectionTransitionRate: 1, accentsPer32: 4, minShotSec: 0.2, maxShotSec: 4, transitionBeats: 0.5 },
+  velocity: { id: 'velocity', beatsPerShot: [2, 1, 1], jitter: 0.2, transitionRate: 0.2, sectionTransitionRate: 1, accentsPer32: 0, minShotSec: 0.2, maxShotSec: 4, transitionBeats: 0.5 },
+  glitch: { id: 'glitch', beatsPerShot: [4, 2, 1], jitter: 0.25, transitionRate: 0.2, sectionTransitionRate: 0.9, accentsPer32: 0, minShotSec: 0.25, maxShotSec: 5, transitionBeats: 0.5 },
+  flash: { id: 'flash', beatsPerShot: [4, 2, 1], jitter: 0.2, transitionRate: 0.2, sectionTransitionRate: 0.9, accentsPer32: 0, minShotSec: 0.25, maxShotSec: 5, transitionBeats: 0.5 },
 };
-/** strength：0 柔和，1 強烈。 */
-export interface TransitionOpt { id: string; strength: number }
+/** strength：0 柔和，1 強烈；weight：相對出現機會（沒有 = 1，0 = 不用）。 */
+export interface TransitionOpt { id: string; strength: number; weight?: number }
+
+/** 特效層的時機：每 N 拍 / 剪接點 / 重音 / drop / 整個段落 */
+export type RuleWhen = 'beat' | 'cut' | 'accent' | 'drop' | 'section';
+/** 衝突組：同一時間每組只留一個；ambient（顆粒、黑邊…）可以跟任何東西疊 */
+export type FxGroup = 'zoom' | 'shake' | 'flash' | 'glitch' | 'color' | 'ambient' | 'other';
+/** 特效層（風格的一部分；面板編輯、存在 localStorage） */
+export interface FxRule {
+  id: string;
+  /** 特效模組或「我的組合」的 id */
+  moduleId: string;
+  on: boolean;
+  when: RuleWhen;
+  /** when = beat：每幾拍 */
+  every?: BeatEvery;
+  /** 用在哪幾種能量（0 低、1 中、2 高） */
+  levels: (0 | 1 | 2)[];
+  /** 每個時機點出現的機率 0..1 */
+  chance: number;
+  /** when = accent / drop：方塊長幾拍（沒有 = 1；衝擊型特效套用時會再縮成模組的長度） */
+  beats?: number;
+}
+/** 給編排器的特效層：套用端已經算好組別、是不是衝擊型、參數（強度）、機率（乘過密度） */
+export interface RuleOpt extends Omit<FxRule, 'on'> {
+  group: FxGroup;
+  hit: boolean;
+  params?: Record<string, number | boolean>;
+}
+/** 計畫裡的觸發（套用成 FxItem.trigger）；chance < 1 = 只在挑中的時機點觸發 */
+export type PlanTrigger = { kind: 'beat'; every: BeatEvery; chance?: number; seed?: number } | { kind: 'cut'; chance?: number; seed?: number };
 /** hit 為單點；everyBeat 為逐拍觸發；其餘為持續型。 */
 export interface AccentOpt { id: string; hit: boolean; everyBeat?: boolean; mood: 'calm' | 'any' | 'intense'; beats?: number }
 export interface PlanOptions {
@@ -32,8 +65,10 @@ export interface PlanOptions {
   dropHit: string | null;
   kenBurns: boolean;
   order: 'library' | 'shuffle';
-  pops?: { variants: PopVariant[]; per32: number };
+  pops?: { variants: PopVariant[]; per32: number; text?: string };
   speed?: { variants: SpeedVariant[]; per32: number; intensity: number };
+  /** 特效層（依清單順序；同優先度時前面的贏） */
+  rules?: RuleOpt[];
 }
 export const DEFAULT_OPTIONS: PlanOptions = {
   transitions: [
@@ -64,13 +99,29 @@ export interface PlanMedia {
   weight?: number;
   /** 影片亮點秒數。 */
   highlights?: number[];
+  /** 整個素材平均有多少人（0..1；圖片 = 那一張）。 */
+  people?: number;
+  /** 圖片裡最大的臉。 */
+  face?: FaceBox | null;
   /** 圖片主體構圖。 */
-  pop?: { ok: boolean; centered: boolean; cx: number; cy: number };
+  pop?: { ok: boolean; centered: boolean; cx: number; cy: number; path?: string };
+  /** AI 導演評估的主體跳出適合度，範圍 0 至 1。 */
+  popSuit?: number;
 }
 export interface KenBurns { from: { scale: number; x: number; y: number }; to: { scale: number; x: number; y: number } }
 export interface PlanTransition { moduleId: string; beats: number }
-export interface PlanShot { b0: number; b1: number; mediaId: string; in: number; motion?: KenBurns; transition?: PlanTransition; speed?: PlanSpeed }
-export interface PlanOverlay { b0: number; b1: number; moduleId: string; params?: Record<string, number | boolean>; everyBeat?: boolean }
+/**
+ * face：這個鏡頭裡臉的平均位置（素材畫面 0..1）→ 片段打開臉部追蹤（特效的中心跟著臉）。
+ * push：推近到臉上（取代一般的推近 / 拉遠；套用端依畫面比例算縮放、位移）。
+ */
+export interface PlanShot { b0: number; b1: number; mediaId: string; in: number; motion?: KenBurns; transition?: PlanTransition; speed?: PlanSpeed; face?: FaceBox; push?: true }
+export interface PlanOverlay {
+  b0: number; b1: number; moduleId: string; params?: Record<string, number | boolean>; everyBeat?: boolean;
+  /** 特效層產生的：觸發方式 */
+  trigger?: PlanTrigger;
+  /** 特效層產生的：第幾層（options.rules 的索引；套用時每層一條特效軌）；沒有 = 舊的點綴 */
+  lane?: number;
+}
 export interface EditPlan { seed: number; recipe: string; shots: PlanShot[]; overlays: PlanOverlay[]; pops: PlanPop[] }
 export interface PlanInput {
   beats: { t: number; down: boolean }[];
@@ -91,6 +142,16 @@ function random(seed: number): () => number {
     x ^= x + Math.imul(x ^ (x >>> 7), x | 61);
     return ((x ^ (x >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/** 規則與拍號各自雜湊，不消耗主亂數。 */
+function ruleHash(seed: number, id: string, beat?: number): number {
+  let h = (seed ^ 0x811c9dc5) >>> 0;
+  for (let i = 0; i < id.length; i++) h = Math.imul(h ^ id.charCodeAt(i), 0x01000193) >>> 0;
+  if (beat !== undefined) h = Math.imul(h ^ beat, 0x01000193) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x7feb352d) >>> 0;
+  h = Math.imul(h ^ (h >>> 15), 0x846ca68b) >>> 0;
+  return (h ^ (h >>> 16)) >>> 0;
 }
 
 function beatTime(beats: { t: number }[], i: number): number {
@@ -124,7 +185,8 @@ export function planEdit(input: PlanInput): EditPlan {
   if (popOptions?.variants.length && popOptions.per32 > 0) {
     const popRng = random(seed ^ 0x504f5053);
     const enabled = [...new Set(popOptions.variants)].filter((v): v is PopVariant =>
-      v === 'step' || v === 'mono' || v === 'fly' || v === 'shake');
+      ['step', 'mono', 'fly', 'shake', 'crossShot', 'textBehind', 'trail', 'grid', 'spin', 'dim', 'halo', 'blur',
+        'silhouetteWindow', 'subjectHole'].includes(v));
     const drops = [...new Set(music.drops)].filter((b) => b > start && b < end);
     const rises = music.sections.slice(1).filter((s, i) =>
       s.energy > music.sections[i].energy + 0.1).map((s) => s.b0)
@@ -140,19 +202,35 @@ export function planEdit(input: PlanInput): EditPlan {
       const sectionKind = music.sections.find((s) => s.b0 <= b1 && b1 < s.b1)?.kind;
       const candidates = media.filter((m) => m.kind === 'image' && m.pop?.ok &&
         (m.weight !== 0 || !media.some((item) => item.weight !== 0)));
+      const subjects = candidates.some((m) => m.popSuit !== 0)
+        ? candidates.filter((m) => m.popSuit !== 0) : candidates;
       // 窗口至少需有另一個底軌素材。
       if (media.length < 2) continue;
-      const ranked = candidates.map((m) => ({ m, rank: (m.roles === undefined ? 0.5 : sectionKind && m.roles.includes(sectionKind) ? 1 : 0) +
-        (m.weight ?? 0.5) * 0.5 + popRng() * 0.01 })).sort((a, b) => b.rank - a.rank);
+      const ranked = subjects.map((m) => ({ m, rank: (m.roles === undefined ? 0.5 : sectionKind && m.roles.includes(sectionKind) ? 1 : 0) +
+        (m.weight ?? 0.5) * 0.5 + (m.popSuit ?? 0.5) + popRng() * 0.3 -
+        // 已經做過主體跳出的圖往後排，每次換一張
+        plan.pops.filter((p) => p.mediaId === m.id).length * 2 })).sort((a, b) => b.rank - a.rank);
       let picked: PlanPop | undefined;
       for (const { m } of ranked) {
-        const variants = enabled.filter((v) => (v !== 'step' && v !== 'shake' || m.pop!.centered) &&
+        const revealImages = media.filter((other) => other.kind === 'image' && other.id !== m.id &&
+          !plan.pops.some((p) => (p.mediaId === other.id || p.revealMediaId === other.id) &&
+            b1 - 4 < p.b1 && p.b0 < b1));
+        const revealImage = revealImages.find((other) => other.pop?.ok === false) ?? revealImages[0];
+        const variants = enabled.filter((v) => (!['step', 'shake', 'trail', 'grid', 'spin', 'halo'].includes(v) || m.pop!.centered) &&
+          (v !== 'crossShot' || !!revealImage && media.some((base) =>
+            base.id !== m.id && base.id !== revealImage.id &&
+            (base.weight !== 0 || !media.some((item) => item.weight !== 0)))) &&
+          (!['silhouetteWindow', 'subjectHole'].includes(v) || !!m.pop!.path?.trim() && !!revealImage) &&
+          (v !== 'textBehind' || !!popOptions.text?.trim()) &&
           b1 - (v === 'fly' ? 2 : 4) >= start);
         if (!variants.length) continue;
         const alternate = variants.filter((v) => v !== lastVariant);
         const pool = alternate.length ? alternate : variants;
         const variant = pool[Math.floor(popRng() * pool.length)];
         picked = { b0: b1 - (variant === 'fly' ? 2 : 4), b1, variant, mediaId: m.id, cx: m.pop!.cx, cy: m.pop!.cy,
+          ...(['crossShot', 'silhouetteWindow', 'subjectHole'].includes(variant) ? { revealMediaId: revealImage!.id } : {}),
+          ...(['silhouetteWindow', 'subjectHole'].includes(variant) ? { path: m.pop!.path } : {}),
+          ...(variant === 'textBehind' ? { text: popOptions.text!.trim() } : {}),
           ...(variant === 'fly' ? { side: popRng() < 0.5 ? -1 as const : 1 as const } : {}) };
         break;
       }
@@ -165,7 +243,89 @@ export function planEdit(input: PlanInput): EditPlan {
   }
   const reveal = new Map(plan.pops.map((p) => [p.b1, p]));
   const blockedMedia = (id: string, b0: number, b1: number) => plan.pops.some((p) =>
-    p.mediaId === id && b0 < p.b1 && p.b0 < b1);
+    (p.mediaId === id || p.revealMediaId === id) && b0 < p.b1 && p.b0 < b1);
+
+  const speedOptions = settings.speed;
+  const reserveReverse = !!speedOptions?.per32 && speedOptions.variants.some((v) =>
+    v === 'rewindToCut' || v === 'reverseForwardB' || v === 'rewindReturn');
+  const speedRng = reserveReverse ? random(seed ^ 0x53504545) : undefined;
+  const speedBudget = new Map<number, number>();
+  const speedCounts = new Map<number, number>();
+  const fixed = new Map<number, PlanShot>();
+  const usedReverse = new Map<string, { t0: number; t1: number }[]>();
+  if (reserveReverse && speedOptions && speedRng) {
+    const enabled = new Set(speedOptions.variants);
+    const events = [...new Set([...music.drops, ...music.sections.flatMap((s) => [s.b0, s.b1])])]
+      .filter((b) => b > start && b < end);
+    const downbeats = Array.from({ length: end - start }, (_, i) => start + i)
+      .filter((b) => beats[b]?.down && music.level[b] === 2);
+    const proposals: { b0: number; b1: number; variant: SpeedVariant; event: number }[] = [];
+    for (const b of events) {
+      const first = proposals.length;
+      const before = music.sections.find((s) => s.b0 <= b - 1 && b - 1 < s.b1);
+      const length = before && before.energy < 0.45 ? 4 : 3;
+      if (enabled.has('rewindToCut') && b - length >= start &&
+        !hardCuts.some((cut) => cut > b - length && cut < b))
+        proposals.push({ b0: b - length, b1: b, variant: 'rewindToCut', event: b });
+      if (enabled.has('reverseForwardB') && b + 3 <= end && !reveal.has(b) &&
+        !hardCuts.some((cut) => cut > b && cut < b + 3))
+        proposals.push({ b0: b, b1: b + 3, variant: 'reverseForwardB', event: b });
+      if (proposals.length === first + 2 && speedRng() < 0.5)
+        [proposals[first], proposals[first + 1]] = [proposals[first + 1], proposals[first]];
+    }
+    for (const b of downbeats) if (enabled.has('rewindReturn') && b + 4 <= end &&
+      Array.from({ length: 4 }, (_, i) => music.level[b + i]).every((level) => level === 2) &&
+      !hardCuts.some((cut) => cut > b && cut < b + 4))
+      proposals.push({ b0: b, b1: b + 4, variant: 'rewindReturn', event: b });
+    const chosenEvents: number[] = [];
+    // 還有開其他（非預留）種類時，倒播預留最多用掉一半的次數，不然全片都是倒播
+    const others = speedOptions.variants.some((v) => v !== 'rewindToCut' && v !== 'reverseForwardB' && v !== 'rewindReturn');
+    const reserveCounts = new Map<number, number>();
+    for (const proposal of proposals) {
+      const { b0, b1, variant, event } = proposal;
+      if (chosenEvents.some((b) => Math.abs(b - event) < 8) ||
+        [...fixed.values()].some((shot) => b0 < shot.b1 + 4 && shot.b0 < b1 + 4) ||
+        plan.pops.some((pop) => b0 < pop.b1 && pop.b0 < b1 || pop.b1 >= b0 && pop.b1 < b1)) continue;
+      const bucket = Math.floor((b0 - start) / 32);
+      if (!speedBudget.has(bucket)) speedBudget.set(bucket,
+        Math.floor(speedOptions.per32) + (speedRng() < speedOptions.per32 % 1 ? 1 : 0));
+      if ((speedCounts.get(bucket) ?? 0) >= speedBudget.get(bucket)!) continue;
+      if (others && (reserveCounts.get(bucket) ?? 0) >= Math.max(1, Math.ceil(speedBudget.get(bucket)! / 2))) continue;
+      const curve = speedCurve(variant, b0, b1, (b) => beatTime(beats, b), speedOptions.intensity);
+      if (!curve) continue;
+      const window = curve.sourceMax - curve.sourceMin;
+      const sectionKind = music.sections.find((s) => s.b0 <= b0 && b0 < s.b1)?.kind;
+      const candidates = media.filter((m) => m.kind === 'video' &&
+        (m.weight !== 0 || !media.some((item) => item.weight !== 0)))
+        .map((m) => {
+          const latest = m.duration - 0.02 - curve.sourceMax;
+          if (!(window > 0) || latest < -curve.sourceMin) return null;
+          const w0 = m.info
+            ? Math.min(bestIn(m.info, window, 1, usedReverse.get(m.id) ?? [], speedRng, m.highlights),
+              m.duration - 0.02 - window)
+            : speedRng() * Math.max(0, latest + curve.sourceMin);
+          const w1 = w0 + window;
+          const margin = (m.info?.step ?? 0.2) / 2;
+          const samples = m.info?.motion.slice(Math.max(0, Math.floor(w0 / m.info.step)),
+            Math.min(m.info.motion.length, Math.ceil(w1 / m.info.step)));
+          const motion = samples?.length ? samples.reduce((sum, value) => sum + value, 0) / samples.length : m.info ? 0 : 1;
+          if (w0 < -1e-8 || w1 > m.duration - 0.02 + 1e-8 || motion < 0.15 ||
+            m.info?.cuts.some((cut) => w0 < cut + margin && w1 > cut - margin)) return null;
+          const role = m.roles === undefined ? 0.5 : sectionKind && m.roles.includes(sectionKind) ? 1 : 0;
+          return { m, w0, w1, rank: motion + role * 0.1 + (m.weight ?? 0.5) * 0.05 };
+        }).filter((candidate): candidate is NonNullable<typeof candidate> => candidate !== null)
+        .sort((a, b) => b.rank - a.rank || a.m.id.localeCompare(b.m.id));
+      const choice = candidates[0];
+      if (!choice) continue;
+      fixed.set(b0, { b0, b1, mediaId: choice.m.id, in: choice.w0 - curve.sourceMin, speed: curve });
+      const regions = usedReverse.get(choice.m.id) ?? [];
+      regions.push({ t0: choice.w0, t1: choice.w1 });
+      usedReverse.set(choice.m.id, regions);
+      speedCounts.set(bucket, (speedCounts.get(bucket) ?? 0) + 1);
+      reserveCounts.set(bucket, (reserveCounts.get(bucket) ?? 0) + 1);
+      chosenEvents.push(event);
+    }
+  }
 
   // 每輪用完素材，依設定洗牌。
   let queue: PlanMedia[] = [];
@@ -187,14 +347,30 @@ export function planEdit(input: PlanInput): EditPlan {
       [queue[0], queue[i]] = [queue[i], queue[0]];
     }
   };
-  const usedVideo = new Map<string, { b0: number; b1: number }[]>();
+  const usedVideo = new Map<string, { b0: number; b1: number }[]>(
+    [...usedReverse].map(([id, regions]): [string, { b0: number; b1: number }[]] =>
+      [id, regions.map((region) => ({ b0: region.t0, b1: region.t1 }))]));
   let previousMotion = 0;
   let previousTransition = '';
   for (let b0 = start; b0 < end;) {
+    const fixedShot = fixed.get(b0);
+    if (fixedShot) {
+      if (!queue.length) refill();
+      const index = queue.findIndex((m) => m.id === fixedShot.mediaId);
+      if (index >= 0) queue.splice(index, 1);
+      plan.shots.push(fixedShot);
+      previousMedia = fixedShot.mediaId;
+      previousTransition = '';
+      b0 = fixedShot.b1;
+      continue;
+    }
     const level = music.level[b0] ?? 1;
     let length = Math.max(1, recipe.beatsPerShot[level]);
     if (rng() < recipe.jitter) length = rng() < 0.5 ? Math.max(1, Math.round(length / 2)) : length * 2;
-    const stop = hardCuts.find((b) => b > b0) ?? end;
+    const stop = reserveReverse
+      ? Math.min(hardCuts.find((b) => b > b0) ?? end,
+        [...fixed.keys()].filter((b) => b > b0).sort((a, b) => a - b)[0] ?? end)
+      : hardCuts.find((b) => b > b0) ?? end;
     let b1 = Math.min(stop, b0 + length);
     if (length >= 4 && b1 < stop && !beats[b1]?.down) {
       const aligned = [b1 - 1, b1 + 1, b1 - 2, b1 + 2].find((b) => b > b0 && b < stop && beats[b]?.down);
@@ -213,17 +389,18 @@ export function planEdit(input: PlanInput): EditPlan {
       const m = queue[i];
       if (blockedMedia(m.id, b0, b1) || m.id === previousMedia || m.kind === 'video' && m.duration + 1e-9 < shotSec) continue;
       const roleMatch = m.roles === undefined ? 0.5 : sectionKind && m.roles.includes(sectionKind) ? 1 : 0;
-      const score = roleMatch + (m.weight ?? 0.5) * 0.5 + rng() * 0.3;
+      // 有人的素材優先
+      const score = roleMatch + (m.weight ?? 0.5) * 0.5 + (m.people ?? 0) * 0.4 + rng() * 0.3;
       if (score > bestScore) { bestScore = score; choice = i; }
     }
-    if (reserved) choice = queue.findIndex((m) => m.id === reserved.mediaId);
+    if (reserved) choice = queue.findIndex((m) => m.id === (reserved.revealMediaId ?? reserved.mediaId));
     if (choice < 0 && !reserved) choice = queue.findIndex((m) => !blockedMedia(m.id, b0, b1) && m.id !== previousMedia);
     if (choice < 0 && !reserved) choice = queue.findIndex((m) => !blockedMedia(m.id, b0, b1));
     if (choice < 0 && !reserved) {
       refill();
       choice = queue.findIndex((m) => !blockedMedia(m.id, b0, b1));
     }
-    const item = reserved ? media.find((m) => m.id === reserved.mediaId)! : queue[choice] ?? queue[0];
+    const item = reserved ? media.find((m) => m.id === (reserved.revealMediaId ?? reserved.mediaId))! : queue[choice] ?? queue[0];
     if (choice >= 0) queue.splice(choice, 1);
     if (item.kind === 'video' && item.duration + 1e-9 < duration(b0, b1)) {
       while (b1 > b0 + 1 && duration(b0, b1) > item.duration + 1e-9) b1--;
@@ -255,13 +432,14 @@ export function planEdit(input: PlanInput): EditPlan {
         ? { from: { scale: 1, x: 0, y: 0 }, to: { scale: 1 + delta, x, y } }
         : { from: { scale: 1 + delta, x, y }, to: { scale: 1, x: 0, y: 0 } };
     }
-    if (plan.shots.length && settings.transitions.length && !reserved) {
+    if (plan.shots.length && settings.transitions.length && !reserved &&
+      plan.shots.at(-1)?.speed?.variant !== 'rewindToCut') {
       const special = hard.has(b0) && b0 !== start;
       if (rng() < (special ? recipe.sectionTransitionRate : recipe.transitionRate)) {
-        const options = settings.transitions.filter((option) => option.id !== previousTransition);
+        const options = settings.transitions.filter((option) => option.id !== previousTransition && (option.weight ?? 1) > 0);
         if (options.length) {
           const target = music.drops.includes(b0) ? 1 : special ? 0.8 : level / 2;
-          const weights = options.map(({ strength }) => Math.exp(-((strength - target) ** 2) / 0.08));
+          const weights = options.map(({ strength, weight }) => Math.exp(-((strength - target) ** 2) / 0.08) * (weight ?? 1));
           let pick = rng() * weights.reduce((sum, weight) => sum + weight, 0);
           let index = weights.findIndex((weight) => (pick -= weight) < 0);
           if (index < 0) index = options.length - 1;
@@ -318,11 +496,14 @@ export function planEdit(input: PlanInput): EditPlan {
   }
   const selected = [...flashes];
   const order = candidates.map((item) => ({ item, rank: rng() })).sort((a, b) => a.rank - b.rank);
+  const accentBudgets = new Map<number, number>();
   for (const { item } of order) {
     if (selected.some((other) => item.b0 < other.b1 + 4 && other.b0 < item.b1 + 4)) continue;
     const window = Math.floor((item.b0 - start) / 32);
     const budget = recipe.accentsPer32;
-    const allowed = Math.floor(budget) + (rng() < budget % 1 ? 1 : 0);
+    if (!accentBudgets.has(window)) accentBudgets.set(window,
+      Math.floor(budget) + (rng() < budget % 1 ? 1 : 0));
+    const allowed = accentBudgets.get(window)!;
     if (selected.filter((o) => !flashes.includes(o) && Math.floor((o.b0 - start) / 32) === window).length >= allowed) continue;
     selected.push(item);
   }
@@ -330,19 +511,21 @@ export function planEdit(input: PlanInput): EditPlan {
   plan.overlays = selected.filter((item, i) => (flashes.includes(item) || i === 0 || item.moduleId !== selected[i - 1].moduleId) &&
     !plan.pops.some((p) => item.b0 < p.b1 && p.b0 < item.b1));
 
-  const speedOptions = settings.speed;
   if (speedOptions?.variants.length && speedOptions.per32 > 0) {
-    const speedRng = random(seed ^ 0x53504545);
+    const assignmentRng = speedRng ?? random(seed ^ 0x53504545);
     const enabled = new Set(speedOptions.variants);
-    const speedBudget = new Map<number, number>();
-    const speedCounts = new Map<number, number>();
     const regions = new Map<string, { t0: number; t1: number }[]>();
     const regionOf = new Map<PlanShot, { t0: number; t1: number }>();
+    const strongTransitions = new Set(['tr-whip', 'tr-zoomblur', 'tr-crashzoom', 'tr-flash', 'tr-rgbsplit', 'tr-glitch']);
+    const whooshTransitions = new Set(['tr-whip', 'tr-zoomblur', 'tr-crashzoom', 'tr-push', 'tr-spin']);
+    const reverseVariants = new Set<SpeedVariant>(['rewindToCut', 'reverseForwardB', 'rewindReturn', 'beatBoomerang']);
     for (const shot of plan.shots) {
       const item = media.find((m) => m.id === shot.mediaId);
       if (item?.kind !== 'video') continue;
       const list = regions.get(item.id) ?? [];
-      const region = { t0: shot.in, t1: shot.in + duration(shot.b0, shot.b1) };
+      const region = shot.speed
+        ? { t0: shot.in + shot.speed.sourceMin, t1: shot.in + shot.speed.sourceMax }
+        : { t0: shot.in, t1: shot.in + duration(shot.b0, shot.b1) };
       list.push(region);
       regionOf.set(shot, region);
       regions.set(item.id, list);
@@ -350,11 +533,14 @@ export function planEdit(input: PlanInput): EditPlan {
     let lastEnd = -Infinity;
     for (let i = 0; i < plan.shots.length; i++) {
       const shot = plan.shots[i];
+      if (shot.speed) { lastEnd = shot.b1; continue; }
       const item = media.find((m) => m.id === shot.mediaId);
-      if (item?.kind !== 'video' || shot.b0 - lastEnd < 4) continue;
+      const nextFixed = reserveReverse ? plan.shots.slice(i + 1).find((s) => !!s.speed) : undefined;
+      if (item?.kind !== 'video' || shot.b0 - lastEnd < 4 ||
+        nextFixed && nextFixed.b0 - shot.b1 < 4) continue;
       const bucket = Math.floor((shot.b0 - start) / 32);
       if (!speedBudget.has(bucket)) speedBudget.set(bucket,
-        Math.floor(speedOptions.per32) + (speedRng() < speedOptions.per32 % 1 ? 1 : 0));
+        Math.floor(speedOptions.per32) + (assignmentRng() < speedOptions.per32 % 1 ? 1 : 0));
       if ((speedCounts.get(bucket) ?? 0) >= speedBudget.get(bucket)!) continue;
       const level = music.level[shot.b0] ?? 1;
       const length = shot.b1 - shot.b0;
@@ -363,14 +549,35 @@ export function planEdit(input: PlanInput): EditPlan {
       const hardEnd = shot.b1 < end && (music.drops.includes(shot.b1) ||
         music.sections.some((section) => section.b0 === shot.b1 || section.b1 === shot.b1)) &&
         !plan.shots[i + 1]?.transition;
+      const boundaryEnd = shot.b1 < end && (music.drops.includes(shot.b1) ||
+        music.sections.some((section) => section.b0 === shot.b1 || section.b1 === shot.b1));
+      const boundaryStart = music.drops.includes(shot.b0) ||
+        music.sections.some((section) => section.b0 === shot.b0 || section.b1 === shot.b0);
+      const nextStrong = strongTransitions.has(plan.shots[i + 1]?.transition?.moduleId ?? '');
+      const nextWhoosh = whooshTransitions.has(plan.shots[i + 1]?.transition?.moduleId ?? '');
+      const ownStrong = strongTransitions.has(shot.transition?.moduleId ?? '');
       const candidates: { variant: SpeedVariant; hitBeat?: number }[] = [];
       if (enabled.has('hitRamp') && level >= 1 && length >= 2 && hardEnd) candidates.push({ variant: 'hitRamp' });
       if (enabled.has('beatPulse') && level >= 1 && length >= 2) candidates.push({ variant: 'beatPulse' });
       if (enabled.has('drift') && level === 0 && length >= 4) candidates.push({ variant: 'drift' });
       if (enabled.has('holdHit') && level === 2 && length >= 3 && hits.length)
-        candidates.push({ variant: 'holdHit', hitBeat: hits[Math.floor(speedRng() * hits.length)] });
+        candidates.push({ variant: 'holdHit', hitBeat: hits[Math.floor(assignmentRng() * hits.length)] });
+      if (!reserveReverse && enabled.has('rewindToCut') && level >= 1 && length >= 3 &&
+        (boundaryEnd && !plan.shots[i + 1]?.transition || nextStrong)) candidates.push({ variant: 'rewindToCut' });
+      if (!reserveReverse && enabled.has('reverseForwardB') && level >= 1 && length >= 3 &&
+        (boundaryStart || ownStrong) && !reveal.has(shot.b0)) candidates.push({ variant: 'reverseForwardB' });
+      if (!reserveReverse && enabled.has('rewindReturn') && level === 2 && length >= 4) candidates.push({ variant: 'rewindReturn' });
+      if (enabled.has('beatBoomerang') && level === 2 && length >= 2 && length <= 4) candidates.push({ variant: 'beatBoomerang' });
+      if (enabled.has('slowPocket') && level === 1 && length >= 2) candidates.push({ variant: 'slowPocket' });
+      // 卡帶停：停住之後接硬切或轉場都可以；1 拍的鏡頭也放得下（減速 3/4 拍 + 停 1/4 拍）
+      if (enabled.has('tapeStop') && level >= 1 && length >= 1 && boundaryEnd)
+        candidates.push({ variant: 'tapeStop' });
+      if (enabled.has('whooshRamp') && level >= 1 && length >= 1 && nextWhoosh)
+        candidates.push({ variant: 'whooshRamp' });
+      if (enabled.has('beatStutter') && level === 2 && length >= 2)
+        candidates.push({ variant: 'beatStutter' });
       if (!candidates.length) continue;
-      const pick = candidates[Math.floor(speedRng() * candidates.length)];
+      const pick = candidates[Math.floor(assignmentRng() * candidates.length)];
       const speed = speedCurve(pick.variant, shot.b0, shot.b1, (b) => beatTime(beats, b),
         speedOptions.intensity, { hitBeat: pick.hitBeat });
       if (!speed) continue;
@@ -381,11 +588,16 @@ export function planEdit(input: PlanInput): EditPlan {
       const own = prior.indexOf(regionOf.get(shot)!);
       if (own >= 0) prior.splice(own, 1);
       const w0 = item.info
-        ? bestIn(item.info, window, level / 2, prior, speedRng, item.highlights)
-        : speedRng() * Math.max(0, latest + speed.sourceMin);
+        ? bestIn(item.info, window, level / 2, prior, assignmentRng, item.highlights)
+        : assignmentRng() * Math.max(0, latest + speed.sourceMin);
       const sourceEnd = w0 + window;
+      const margin = reverseVariants.has(pick.variant) ? (item.info?.step ?? 0.2) / 2 : 0.1;
+      const meanMotion = item.info ? item.info.motion
+        .slice(Math.max(0, Math.floor(w0 / item.info.step)), Math.min(item.info.motion.length, Math.ceil(sourceEnd / item.info.step)))
+        .reduce((sum, value, _, samples) => sum + value / samples.length, 0) : 1;
       const valid = w0 >= -1e-8 && sourceEnd <= item.duration - 0.02 + 1e-8 &&
-        !item.info?.cuts.some((cut) => w0 < cut + 0.1 && sourceEnd > cut - 0.1);
+        !item.info?.cuts.some((cut) => w0 < cut + margin && sourceEnd > cut - margin) &&
+        (!reverseVariants.has(pick.variant) && pick.variant !== 'beatStutter' || meanMotion >= 0.15);
       if (!valid) {
         prior.push(regionOf.get(shot)!);
         continue;
@@ -397,8 +609,109 @@ export function planEdit(input: PlanInput): EditPlan {
       lastEnd = shot.b1;
     }
   }
+  if (settings.rules?.length) {
+    const priorities: Record<RuleWhen, number> = { section: 0, beat: 1, cut: 2, accent: 3, drop: 4 };
+    const proposals: { overlay: PlanOverlay; rule: RuleOpt; lane: number }[] = [];
+    const addRule = (rule: RuleOpt, lane: number, b0: number, b1: number, trigger?: PlanTrigger) => {
+      b0 = Math.ceil(b0);
+      b1 = Math.floor(b1);
+      if (b1 - b0 < 1) return;
+      proposals.push({ rule, lane, overlay: { b0, b1, moduleId: rule.moduleId,
+        ...(rule.params ? { params: rule.params } : {}), ...(trigger ? { trigger } : {}), lane } });
+    };
+    // 變速：衝進剪接點這幾種的落點（下一個鏡頭的第一拍）當重音；變速期間不疊縮放類
+    const LANDING = new Set<SpeedVariant>(['hitRamp', 'whooshRamp', 'tapeStop', 'rewindToCut']);
+    const ramps = plan.shots.filter((shot) => shot.speed && LANDING.has(shot.speed.variant));
+    const landings = ramps.map((shot) => shot.b1).filter((b) => b >= start && b < end);
+    const inRamp = (b: number) => ramps.some((shot) => b >= shot.b0 && b < shot.b1);
+    for (const [lane, rule] of settings.rules.entries()) {
+      if (rule.chance <= 0) continue;
+      const ruleSeed = ruleHash(seed, rule.id);
+      const draw = (beat: number) => ruleHash(seed, rule.id, beat) / 4294967296;
+      if (rule.when === 'beat' || rule.when === 'cut' || rule.when === 'section') {
+        for (const section of music.sections) {
+          const b0 = Math.max(start, section.b0), b1 = Math.min(end, section.b1);
+          const level = section.energy < 0.45 ? 0 : section.energy >= 0.75 ? 2 : 1;
+          if (b1 - b0 < 1 || !rule.levels.includes(level)) continue;
+          if (rule.when === 'section') {
+            if (draw(section.b0) < rule.chance) addRule(rule, lane, b0, b1);
+          } else {
+            const chance = rule.chance < 1 ? { chance: rule.chance } : {};
+            const trigger: PlanTrigger = rule.when === 'beat'
+              ? { kind: 'beat', every: rule.every ?? 1, ...chance, seed: ruleSeed }
+              : { kind: 'cut', ...chance, seed: ruleSeed };
+            addRule(rule, lane, b0, b1, trigger);
+          }
+        }
+      } else if (rule.when === 'accent') {
+        const events = new Set(music.accents.filter((b) => b >= start && b < end));
+        for (let b = start; b < end; b++) if (b % 8 === 0 && beats[b]?.down) events.add(b);
+        for (const b of landings) events.add(b);
+        for (const b of events) {
+          const section = sectionAt(b);
+          // 變速落點不看能量（變速本身已經挑過）
+          if (section && (landings.includes(b) || rule.levels.includes(music.level[b] as 0 | 1 | 2)) && draw(b) < rule.chance)
+            addRule(rule, lane, b, Math.min(end, section.b1, b + (rule.beats ?? 1)));
+        }
+      } else {
+        for (const d of music.drops) if (d >= start && d < end && draw(d) < rule.chance)
+          addRule(rule, lane, d, Math.min(end, d + (rule.beats ?? 1)));
+      }
+    }
+    proposals.sort((a, b) => priorities[b.rule.when] - priorities[a.rule.when] || a.lane - b.lane || a.overlay.b0 - b.overlay.b0);
+    const occupied = new Map<string, Set<number>>();
+    const counts = new Map<number, number>();
+    const breath = settings.rules.some((rule) => rule.when === 'drop')
+      ? new Set(music.drops.filter((d) => d >= start && d < end).map((d) => d - 1)) : new Set<number>();
+    for (const { overlay, rule } of proposals) {
+      const ambient = rule.group === 'ambient';
+      const key = rule.group === 'other' ? `other:${rule.moduleId}` : rule.group;
+      const groupBeats = occupied.get(key) ?? new Set<number>();
+      let pieceStart = -1;
+      const finish = (beat: number) => {
+        if (pieceStart < 0) return;
+        plan.overlays.push({ ...overlay, b0: pieceStart, b1: beat });
+        for (let b = pieceStart; b < beat; b++) {
+          if (!ambient) {
+            groupBeats.add(b);
+            counts.set(b, (counts.get(b) ?? 0) + 1);
+          }
+        }
+        pieceStart = -1;
+      };
+      for (let b = overlay.b0; b < overlay.b1; b++) {
+        const allowed = (ambient || !groupBeats.has(b) && (counts.get(b) ?? 0) < 4) &&
+          (ambient || rule.when === 'drop' || !breath.has(b)) &&
+          (rule.group !== 'zoom' || rule.when === 'drop' || !inRamp(b)) &&
+          (ambient || rule.group === 'flash' || rule.group === 'color' ||
+            !plan.pops.some((p) => b >= p.b0 && b < p.b1 + 1));
+        if (allowed) {
+          if (pieceStart < 0) pieceStart = b;
+        } else finish(b);
+      }
+      finish(overlay.b1);
+      if (!ambient) occupied.set(key, groupBeats);
+    }
+    plan.overlays.sort((a, b) => a.b0 - b.b0 || (a.lane ?? -1) - (b.lane ?? -1));
+  }
+  // 有人的鏡頭：打開臉部追蹤；有開推近 / 拉遠就推近到臉上
+  for (const shot of plan.shots) {
+    const m = media.find((x) => x.id === shot.mediaId);
+    if (!m) continue;
+    const f = m.kind === 'image' ? m.face ?? null
+      : m.info ? faceIn(m.info, shot.in + (shot.speed?.sourceMin ?? 0), shot.in + (shot.speed?.sourceMax ?? duration(shot.b0, shot.b1))) : null;
+    if (!f || f.h < FACE_MIN_H) continue;
+    shot.face = f;
+    if (settings.kenBurns) {
+      delete shot.motion;
+      shot.push = true;
+    }
+  }
   return plan;
 }
+
+/** 臉至少要這麼大（素材高度的比例）才算有人 */
+const FACE_MIN_H = 0.03;
 
 /** 計畫的摘要特徵。 */
 export function planStats(plan: EditPlan): { shots: number; avgBeatsPerShot: number; transitions: number; overlays: number } {

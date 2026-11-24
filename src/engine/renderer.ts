@@ -1,19 +1,21 @@
 import { $t } from '../i18n';
 import { audioSignal, fromKey, type AudioSignal } from './audioReact';
-import { scrubFrameAt } from './scrubCache';
+import { holdScrub, scrubFrameAt } from './scrubCache';
+import { previewUrl } from './proxy';
+import { ensureReverseFrames, reverseFrameAt } from './reverseCache';
 import { fxLevel, type BlendMode, type TransitionRef, type AudioClip, type AudioDrive, type AudioFrom, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
 import { maskAt, type Mask } from './mask';
 import { FIELD_RANGE, getShapeField, maskFieldKey, type ShapeField } from './maskShapes';
 import { CLIP_MASK_ID } from '../modules/extra';
 import { renderText, textKey } from './text';
-import { fitScale, hexToRgb, isNumeric, paramAt, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
+import { fitScale, hexToRgb, isHitFx, isNumeric, paramAt, parseDuration, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
 import { clipSource, plainSpeed } from './remap';
 import { MATTE_SIZE, matteAt, requestMatte } from './matte';
 import { clipTransformAt } from './transform';
 import { evalKeys, type Keyframe } from './keyframes';
 import { fitOf, followOf, subjectRectInFrame, tracking, withOffset, type Follow, type FollowMap } from './follow';
 import { animFrameAt, animImage, animImageReady } from './animImage';
-import { cutPoints, cutTracks, fxWindow, triggerBeats, triggerWindow } from './trigger';
+import { chanceWindow, cutPoints, cutTracks, fxWindow, hasChance, hitWindow, triggerBeats, triggerWindow } from './trigger';
 
 export interface RenderCtx {
   clips: Clip[];
@@ -36,6 +38,10 @@ export type FrameInfo =
 const ADJ_EPS = 0.01;
 /** 播放時提前多少秒開始播放下一段影片 */
 const PREROLL = 0.4;
+/** 還沒開始的片段：多久之內才建立 <video>（太早建立的話，片段多時幾十個影片同時預載、搶解碼器） */
+const CREATE_AHEAD = 1.5;
+/** 整串都播完超過這麼久的 <video>：放掉（解碼器、記憶體）；倒回去時再建立 */
+const RELEASE_AFTER = 0.5;
 
 /** false = 直接覆寫；true = 一般疊加；或指定混合模式 */
 type Blend = boolean | BlendMode;
@@ -62,6 +68,42 @@ export function transitionWindow(prev: Clip | undefined, c: Clip, side: 'in' | '
   }
   const d = Math.min(c.transitionIn.duration, c.duration);
   return { t0: c.start, d, mode: 'head', max: c.duration };
+}
+
+/** 速度低於這個（含倒播）的那幾格改用倒播快取 */
+const REVERSE_RATE = 0.25;
+/** 變速曲線片段會用到的素材範圍（有倒播 / 極慢段才回傳）；依曲線快取 */
+const spanMemo = new WeakMap<object, { a: number; b: number } | null>();
+function curveSpan(clip: Clip, media: Media, ctx: Pick<RenderCtx, 'modules'>): { a: number; b: number } | null {
+  const keys = clip.remap.moduleId === 'remap-curve' ? clip.remap.keys : undefined;
+  if (!keys?.length || media.kind !== 'video') return null;
+  const memoKey = keys as unknown as object;
+  if (spanMemo.has(memoKey)) {
+    const m = spanMemo.get(memoKey)!;
+    // 同一條曲線換了 in（例如移動素材起點）：重算
+    if (!m || (m as { in?: number }).in === clip.in) return m;
+  }
+  const n = Math.max(8, Math.ceil(clip.duration * 30));
+  let a = Infinity, b = -Infinity, slow = false;
+  for (let k = 0; k <= n; k++) {
+    const { src, rate } = clipSource(clip, (k / n) * clip.duration, media, ctx.modules);
+    a = Math.min(a, src);
+    b = Math.max(b, src);
+    if (rate < REVERSE_RATE) slow = true;
+  }
+  const out = slow ? Object.assign({ a, b }, { in: clip.in }) : null;
+  spanMemo.set(memoKey, out);
+  return out;
+}
+/** 預覽：現在 ~ 4 秒後會播到的倒播片段，先把影格解好 */
+function prefetchReverse(ctx: RenderCtx, t: number) {
+  for (const list of ctx.videoTracks) for (const c of list) {
+    if (c.start > t + 4 || c.start + c.duration < t) continue;
+    const m = ctx.media.get(c.mediaId);
+    if (!m || m.missing) continue;
+    const sp = curveSpan(c, m, ctx);
+    if (sp) void ensureReverseFrames(m, sp.a, sp.b);
+  }
 }
 
 export function sortClips(clips: Clip[]) {
@@ -254,8 +296,12 @@ void main() {
     // 距離場：以「半寬」為單位；框外再加上到框的距離
     vec2 uv = p / half_;
     vec2 c = clamp(uv, -1.0, 1.0);
-    float df = (texture(u_shapeTex, vec2(c.x * 0.5 + 0.5, 0.5 - c.y * 0.5)).r - 0.5) * 2.0 * ${FIELD_RANGE.toFixed(1)};
-    d = (df + length(uv - c)) * min(half_.x, half_.y);
+    // p 是 y 向下；距離場貼圖第 0 列 = 形狀上緣（上傳時沒有翻轉）→ v 也是往下增加
+    float df = (texture(u_shapeTex, vec2(c.x * 0.5 + 0.5, 0.5 + c.y * 0.5)).r - 0.5) * 2.0 * ${FIELD_RANGE.toFixed(1)};
+    // 框外一定在形狀外：距離至少是到框的距離（形狀貼著框邊時，框外不會被當成在裡面而拖出一截）
+    // 不能用 length(uv - c) > 0 判斷：GPU 上框內也可能是極小的非零值
+    bool inBox = all(lessThanEqual(abs(uv), vec2(1.0)));
+    d = (inBox ? df : max(df, 0.0) + length(uv - c)) * min(half_.x, half_.y);
   } else {
     vec2 q = abs(p) - half_;
     d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
@@ -403,6 +449,15 @@ export class Renderer {
   }
 
   /** 取得模組的 shader；程式碼改變就重新編譯，失敗時沿用上一個可用版本 */
+  /** 衝擊特效打一下多長（@duration）；持續特效 = 0 */
+  private hitLens = new Map<string, number>();
+  private hitLen(m: Module | undefined): number {
+    if (!m) return 0;
+    let v = this.hitLens.get(m.code);
+    if (v === undefined) this.hitLens.set(m.code, (v = isHitFx(m) ? parseDuration(m.code, 0.5) : 0));
+    return v;
+  }
+
   private moduleProg(m: Module): Prog | null {
     let e = this.progs.get(m.id);
     if (e && e.code === m.code) return e.good;
@@ -673,17 +728,19 @@ export class Renderer {
     this.chain = { clips: ctx.clips, root };
   }
 
-  private videoFor(clip: Clip, media: Media) {
+  /** preview = 預覽：有代理檔就用代理檔（跳轉快）；匯出一律用原檔 */
+  private videoFor(clip: Clip, media: Media, preview: boolean) {
     const key = this.rootOf(clip.id);
     let v = this.videos.get(key);
-    if (!v || v.dataset.src !== media.url) {
+    const url = preview ? previewUrl(media) : media.url;
+    if (!v || v.dataset.src !== url) {
       v?.pause();
       v = document.createElement('video');
       v.muted = true;
       v.playsInline = true;
       v.preload = 'auto';
-      v.src = media.url;
-      v.dataset.src = media.url;
+      v.src = url;
+      v.dataset.src = url;
       const vv = v as HTMLVideoElement & { _dirty?: boolean; _mt?: number };
       vv._dirty = true;
       if ('requestVideoFrameCallback' in v) {
@@ -832,7 +889,16 @@ export class Renderer {
     else if (media?.kind === 'video') {
       const { src, rate } = clipSource(clip, local, media, ctx.modules);
       matteSrc = src;
-      const v = this.videoFor(clip, media);
+      const v = this.videoFor(clip, media, mode === 'preview');
+      // 變速曲線的倒播 / 極慢段：用預先解好的影格（<video> 往回 seek 太慢），不動 <video>
+      if (mode === 'preview' && rate < REVERSE_RATE && curveSpan(clip, media, ctx)) {
+        const rf = reverseFrameAt(media, src);
+        if (rf) {
+          if (!v.paused) v.pause();
+          this.drawTex(target, clip, local, this.bitmapTex('rev:' + clip.id, rf.bm), media, blend, undefined, clip.aiMatte ? this.matteTex(clip, media, rf.pts, ctx) : null);
+          return;
+        }
+      }
       if (mode === 'preview') {
         this.syncVideo(v, src, rate, playing);
         v.muted = true; // 聲音一律由 audio.ts（Web Audio）播放
@@ -1100,7 +1166,13 @@ export class Renderer {
       for (const fx of list) {
         // 觸發：特效內時間從最近一次觸發開始算
         const pts = fx.trigger ? (fx.trigger.kind === 'cut' ? cutsFor(fx) : triggerBeats(fx.trigger.every)) : null;
-        const w = pts ? triggerWindow(pts, fx.start, fx.start + fx.duration, t) : { t0: fx.start, d: fx.duration };
+        const raw = !pts ? { t0: fx.start, d: fx.duration }
+          : hasChance(fx.trigger) ? chanceWindow(fx.trigger!, pts, fx.start, fx.start + fx.duration, t)
+            : triggerWindow(pts, fx.start, fx.start + fx.duration, t);
+        // 衝擊特效每次觸發只打一下（長度 = 主特效的 @duration）
+        const w = pts ? hitWindow(raw, t, this.hitLen(ctx.modules.get(fx.moduleId))) : raw;
+        // 有機率的觸發：沒挑中的拍子不作用
+        if (!w) continue;
         // 主特效 + 疊加的特效，依序套用
         for (const f of [fx, ...(fx.stack ?? []).filter((x) => x.enabled !== false)]) {
           const m = ctx.modules.get(f.moduleId);
@@ -1182,7 +1254,11 @@ export class Renderer {
     }
 
     this.pass(null, this.blit, (p) => this.bindTex(p, 'u_tex', cur.tex, 0));
-    if (mode === 'preview') this.manageVideos(ctx, t, active, playing);
+    if (mode === 'preview') {
+      holdScrub(playing); // 播放中不抽拖曳用的影格（解碼器留給預覽）；代理檔照做（在 Worker 裡，而且做好了播放才會順）
+      this.manageVideos(ctx, t, active, playing);
+      prefetchReverse(ctx, t);
+    }
   }
 
   /** 暫停非作用中的影片、預先 seek 即將出現的片段、回收已刪除片段 */
@@ -1196,8 +1272,15 @@ export class Renderer {
       this.textures.delete(key);
     }
     const roots = new Set(ctx.clips.map((c) => this.rootOf(c.id)));
+    const activeRoots = new Set([...active].map((id) => this.rootOf(id)));
+    // 每串（共用同一個 <video> 的片段）最後結束的時間
+    const chainEnd = new Map<string, number>();
+    for (const c of ctx.clips) {
+      const k = this.rootOf(c.id);
+      chainEnd.set(k, Math.max(chainEnd.get(k) ?? -Infinity, c.start + c.duration));
+    }
     for (const [id, v] of this.videos) {
-      if (!roots.has(id)) {
+      if (!roots.has(id) || (!activeRoots.has(id) && (chainEnd.get(id) ?? Infinity) < t - RELEASE_AFTER)) {
         v.pause();
         v.removeAttribute('src');
         v.load();
@@ -1208,15 +1291,16 @@ export class Renderer {
       }
     }
     // 每個影片元素只處理一次：正在畫的跳過；其他的用串接裡「還沒播完、最早的那段」決定要預先 seek / 預播到哪
-    const activeRoots = new Set([...active].map((id) => this.rootOf(id)));
     const handled = new Set<string>();
     for (const c of [...ctx.clips].sort((a, b) => a.start - b.start)) {
       const key = this.rootOf(c.id);
       if (activeRoots.has(key) || handled.has(key) || c.start + c.duration <= t) continue;
+      // 還很遠的片段：先不建立 <video>（已經有的照常處理）
+      if (c.start - t > CREATE_AHEAD && !this.videos.has(key)) continue;
       handled.add(key);
       const media = ctx.media.get(c.mediaId);
       if (!media || media.missing || media.kind !== 'video') continue;
-      const v = this.videoFor(c, media);
+      const v = this.videoFor(c, media, true);
       v.muted = true;
       const ahead = c.start - t;
       // 播放中、下一段快到了：提前（靜音）開始播放，接上時影片已經在跑，不會因為 play() 的啟動延遲而卡一下
@@ -1295,7 +1379,7 @@ export class Renderer {
         continue;
       }
       if (media.kind !== 'video') continue;
-      const v = this.videoFor(c, media);
+      const v = this.videoFor(c, media, false);
       v.pause();
       if (v.readyState < 1) await waitEvent(v, 'loadedmetadata');
       const { src } = clipSource(c, local, media, ctx.modules);

@@ -213,7 +213,7 @@ function SettingsDialog({ close }: { close: () => void }) {
     const l = useLayout.getState(), p = usePrefs.getState();
     return {
       layout: { previewScale: l.previewScale, upperLayerAt: l.upperLayerAt, wheelScroll: l.wheelScroll, trackSize: l.trackSize, beatLead: l.beatLead, timeGrid: l.timeGrid },
-      prefs: { stillDur: p.stillDur, transDur: p.transDur, autosave: p.autosave },
+      prefs: { stillDur: p.stillDur, transDur: p.transDur, autosave: p.autosave, proxy: p.proxy },
       format: useStore.getState().format,
     };
   });
@@ -249,6 +249,9 @@ function SettingsDialog({ close }: { close: () => void }) {
         <div className="set-sec">{$t('預覽')}</div>
         <SetRow label={$t('預覽畫質')} desc={$t('調低編輯會比較順，不影響匯出')}>
           <Seg value={L.previewScale} on={(q) => L.set({ previewScale: q })} opts={QUALITIES.map((q) => ({ v: q, label: q === 1 ? $t('完整') : `${Math.round(q * 100)}%` }))} />
+        </SetRow>
+        <SetRow label={$t('預覽代理檔')} desc={$t('關鍵影格很稀的影片，預覽改用小副本，不影響匯出')} inline>
+          <Switch v={P.proxy} on={(v) => P.set({ proxy: v })} />
         </SetRow>
         <div className="set-sec">{$t('時間軸')}</div>
         <SetRow label={$t('上層軌道顯示在')} desc={$t('疊在上面的軌道放在時間軸的哪一邊')}>

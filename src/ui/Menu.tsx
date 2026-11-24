@@ -161,6 +161,8 @@ export function DragGhost() {
           ? $t('拖到時間軸上')
           : drag.payload.kind === 'mask'
             ? drag.target.kind === 'effect' ? $t('設為這個特效的遮罩形狀') : $t('設為片段的遮罩形狀')
+          : drag.target.kind === 'autoEdit'
+            ? drag.target.whole ? $t('加入整段') : $t('選範圍加入')
           : drag.target.kind === 'effect'
             ? drag.target.stack ? $t('疊加到這個特效') : $t('取代這個特效')
             : drag.target.kind === 'clip' && drag.target.action === 'effect'

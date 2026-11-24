@@ -187,3 +187,283 @@ export async function decodeRange(o: {
     if (dec.state !== 'closed') dec.close();
   }
 }
+
+// ───────────── 倒播預覽用：解出一段範圍的影格（VideoFrame 交給呼叫端處理、關閉） ─────────────
+
+/** 同一個檔案拆一次就好（倒播快取會對同一支影片要好幾段） */
+const demuxed = new Map<string, Promise<{ file: ReturnType<typeof createFile>; track: Track; samples: Sample[] }>>();
+function demuxUrl(url: string) {
+  let p = demuxed.get(url);
+  if (!p) {
+    p = fetch(url).then((r) => r.arrayBuffer()).then(demux);
+    p.catch(() => demuxed.delete(url));
+    demuxed.set(url, p);
+    // 只留最近的兩支（拆好的檔案含整個影片資料）
+    while (demuxed.size > 2) demuxed.delete(demuxed.keys().next().value!);
+  }
+  return p;
+}
+
+/**
+ * 解碼 from..to（素材秒數）的每一格，依解碼輸出順序呼叫 onFrame(pts, frame)；frame 由 onFrame 負責 close。
+ * 回傳影格率。alive() = false 就停。
+ */
+export async function decodeFrames(o: {
+  url: string;
+  from: number;
+  to: number;
+  onFrame: (pts: number, frame: VideoFrame) => void;
+  alive: () => boolean;
+}): Promise<number> {
+  if (typeof VideoDecoder === 'undefined') throw new Error('no WebCodecs');
+  const { file, track, samples } = await demuxUrl(o.url);
+  const ts = track.timescale;
+  const shift = editShift(track);
+  const ptsOf = (s: Sample) => s.cts / ts + shift;
+  const sorted = samples.map(ptsOf).sort((a, b) => a - b);
+  const gaps = sorted.slice(1).map((t, i) => t - sorted[i]).filter((d) => d > 1e-4).sort((a, b) => a - b);
+  const fd = gaps.length ? gaps[gaps.length >> 1] : 1 / 30;
+  const lo = o.from - fd * 0.5, hi = o.to + fd * 0.5;
+  const first = samples.findIndex((s) => ptsOf(s) >= lo);
+  if (first < 0) return 1 / fd;
+  let start = first;
+  while (start > 0 && !samples[start].is_sync) start--;
+  let end = samples.length - 1;
+  for (let i = first; i < samples.length; i++) if (ptsOf(samples[i]) > hi + fd * 8) { end = i; break; }
+  let decodeError: Error | null = null;
+  const dec = new VideoDecoder({
+    output: (frame) => {
+      const pts = frame.timestamp / 1e6;
+      if (pts >= lo && pts <= hi && o.alive()) o.onFrame(pts, frame);
+      else frame.close();
+    },
+    error: (e) => (decodeError = e instanceof Error ? e : new Error(String(e))),
+  });
+  const config: VideoDecoderConfig = {
+    codec: track.codec,
+    codedWidth: track.video?.width ?? track.track_width,
+    codedHeight: track.video?.height ?? track.track_height,
+    description: description(file, track),
+  };
+  if (!(await VideoDecoder.isConfigSupported(config)).supported) throw new Error(`codec not supported: ${track.codec}`);
+  dec.configure(config);
+  try {
+    for (let i = start; i <= end; i++) {
+      if (!o.alive()) return 1 / fd;
+      if (decodeError) throw decodeError;
+      const s = samples[i];
+      dec.decode(new EncodedVideoChunk({
+        type: s.is_sync ? 'key' : 'delta',
+        timestamp: Math.round(ptsOf(s) * 1e6),
+        duration: Math.round((s.duration / ts) * 1e6),
+        data: s.data!,
+      }));
+      while (dec.decodeQueueSize > 16 && !decodeError) await waitDequeue(dec);
+    }
+    await dec.flush();
+    if (decodeError) throw decodeError;
+  } finally {
+    if (dec.state !== 'closed') dec.close();
+  }
+  return 1 / fd;
+}
+
+// ───────────── 自動剪輯的素材抽樣：只解出指定時間點附近的格子 ─────────────
+
+/**
+ * 依序取 times（素材秒數）每個時間點最接近的一格，onFrame(第幾個時間點, frame)；frame 由 onFrame 負責 close。
+ * 為什麼快：附近（tol 秒內）有關鍵影格就只解那一格（關鍵影格不依賴別的格子）；
+ * 沒有的話從前一個關鍵影格解到那一格，同一段（GOP）裡的時間點一起解。不用一格一格 seek，也不受頁面在背景影響。
+ */
+export async function decodeAt(o: {
+  url: string;
+  times: number[];
+  tol: number;
+  /** 最多解幾格（大約）；超過就多用關鍵影格 */
+  budget?: number;
+  onFrame: (k: number, frame: VideoFrame) => void;
+  onProgress?: (done: number, total: number) => void;
+  alive: () => boolean;
+}): Promise<void> {
+  if (typeof VideoDecoder === 'undefined') throw new Error('no WebCodecs');
+  const { file, track, samples } = await demuxUrl(o.url);
+  const ts = track.timescale;
+  const shift = editShift(track);
+  const pts = samples.map((s) => s.cts / ts + shift);
+  // 呈現順序（找最接近的格子用）
+  const byPts = pts.map((_, i) => i).sort((a, b) => pts[a] - pts[b]);
+  const syncs = byPts.filter((i) => samples[i].is_sync);
+  const nearest = (list: number[], t: number) => {
+    let lo = 0, hi = list.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (pts[list[mid]] < t) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo > 0 && Math.abs(pts[list[lo - 1]] - t) <= Math.abs(pts[list[lo]] - t) ? list[lo - 1] : list[lo];
+  };
+  // 每個時間點要哪一格（解碼順序的 index），再依所屬的 GOP 分組
+  const syncBefore = (i: number) => { let s = i; while (s > 0 && !samples[s].is_sync) s--; return s; };
+  const plan = (tol: number) => {
+    const groups = new Map<number, { end: number; want: Map<number, number[]> }>();
+    o.times.forEach((t, k) => {
+      if (!byPts.length) return;
+      const ks = syncs.length ? nearest(syncs, t) : -1;
+      const idx = ks >= 0 && Math.abs(pts[ks] - t) <= tol ? ks : nearest(byPts, t);
+      const g0 = syncBefore(idx);
+      const g = groups.get(g0) ?? { end: g0, want: new Map() };
+      g.end = Math.max(g.end, idx);
+      const key = Math.round(pts[idx] * 1e6);
+      g.want.set(key, [...(g.want.get(key) ?? []), k]);
+      groups.set(g0, g);
+    });
+    let cost = 0;
+    for (const [g0, g] of groups) cost += g.end - g0 + 1;
+    return { groups, cost };
+  };
+  // 要解的格數超過上限就放寬「用關鍵影格代替」的距離（關鍵影格很稀的影片，最後全部用關鍵影格）
+  let { groups, cost } = plan(o.tol);
+  for (let f = 2; cost > (o.budget ?? Infinity) && f <= 64; f *= 2) ({ groups, cost } = plan(o.tol * f));
+
+  // 所有要的格子（時間戳記 → 時間點）；每一段都從關鍵影格開始送，段與段之間不用等解碼器清空
+  const want = new Map<number, number[]>();
+  for (const g of groups.values()) for (const [key, ks] of g.want) want.set(key, [...(want.get(key) ?? []), ...ks]);
+  let decodeError: Error | null = null;
+  const dec = new VideoDecoder({
+    output: (frame) => {
+      const ks = want.get(frame.timestamp);
+      if (!ks || !o.alive()) return frame.close();
+      want.delete(frame.timestamp);
+      ks.forEach((k, j) => o.onFrame(k, j === ks.length - 1 ? frame : frame.clone()));
+    },
+    error: (e) => (decodeError = e instanceof Error ? e : new Error(String(e))),
+  });
+  const config: VideoDecoderConfig = {
+    codec: track.codec,
+    codedWidth: track.video?.width ?? track.track_width,
+    codedHeight: track.video?.height ?? track.track_height,
+    description: description(file, track),
+  };
+  if (!(await VideoDecoder.isConfigSupported(config)).supported) throw new Error(`codec not supported: ${track.codec}`);
+  dec.configure(config);
+  try {
+    const list = [...groups.entries()].sort((a, b) => a[0] - b[0]);
+    for (let n = 0; n < list.length; n++) {
+      const [g0, g] = list[n];
+      for (let i = g0; i <= g.end; i++) {
+        if (!o.alive()) return;
+        if (decodeError) throw decodeError;
+        const s = samples[i];
+        dec.decode(new EncodedVideoChunk({
+          type: i === g0 ? 'key' : 'delta',
+          timestamp: Math.round(pts[i] * 1e6),
+          duration: Math.round((s.duration / ts) * 1e6),
+          data: s.data!,
+        }));
+        while (dec.decodeQueueSize > 16 && !decodeError) await waitDequeue(dec);
+      }
+      o.onProgress?.(n + 1, list.length);
+    }
+    await dec.flush();
+    if (decodeError) throw decodeError;
+  } finally {
+    if (dec.state !== 'closed') dec.close();
+  }
+}
+
+// ───────────── 預覽代理檔用 ─────────────
+
+/** 關鍵影格的最大間隔（秒）與影片長度；拆不開（不是 MP4 / MOV）就丟錯 */
+export async function keyframeInfo(url: string): Promise<{ maxGap: number; duration: number }> {
+  const { track, samples } = await demuxUrl(url);
+  const ts = track.timescale;
+  const shift = editShift(track);
+  const keys = samples.filter((s) => s.is_sync).map((s) => s.cts / ts + shift).sort((a, b) => a - b);
+  const all = samples.map((s) => s.cts / ts + shift);
+  const duration = all.length ? Math.max(...all) : 0;
+  let maxGap = keys.length ? keys[0] : duration;
+  for (let i = 1; i < keys.length; i++) maxGap = Math.max(maxGap, keys[i] - keys[i - 1]);
+  maxGap = Math.max(maxGap, duration - (keys.at(-1) ?? 0));
+  return { maxGap, duration };
+}
+
+/**
+ * 依序解出整支影片的每一格：onFrame(pts, frame) 回傳的 Promise 完成才繼續（frame 由 onFrame 負責 close）；
+ * 每送一批之前先 await wait()（例如時間軸播放中就先停著）。alive() = false 就停。回傳影格率。
+ */
+export async function decodeAllFrames(o: {
+  url: string;
+  onFrame: (pts: number, frame: VideoFrame) => Promise<void> | void;
+  wait: () => Promise<void>;
+  alive: () => boolean;
+  onProgress?: (frac: number) => void;
+  /** 解碼器要用硬體還是軟體（預設讓瀏覽器決定） */
+  accel?: HardwareAcceleration;
+}): Promise<number> {
+  if (typeof VideoDecoder === 'undefined') throw new Error('no WebCodecs');
+  const { file, track, samples } = await demuxUrl(o.url);
+  const ts = track.timescale;
+  const shift = editShift(track);
+  const ptsOf = (s: Sample) => s.cts / ts + shift;
+  const sorted = samples.map(ptsOf).sort((a, b) => a - b);
+  const gaps = sorted.slice(1).map((t, i) => t - sorted[i]).filter((d) => d > 1e-4).sort((a, b) => a - b);
+  const fd = gaps.length ? gaps[gaps.length >> 1] : 1 / 30;
+  const queue: { pts: number; frame: VideoFrame }[] = [];
+  let decodeError: Error | null = null;
+  const dec = new VideoDecoder({
+    output: (frame) => queue.push({ pts: frame.timestamp / 1e6, frame }),
+    error: (e) => (decodeError = e instanceof Error ? e : new Error(String(e))),
+  });
+  const config: VideoDecoderConfig = {
+    codec: track.codec,
+    codedWidth: track.video?.width ?? track.track_width,
+    codedHeight: track.video?.height ?? track.track_height,
+    description: description(file, track),
+    ...(o.accel ? { hardwareAcceleration: o.accel } : {}),
+  };
+  if (!(await VideoDecoder.isConfigSupported(config)).supported) throw new Error(`codec not supported: ${track.codec}`);
+  dec.configure(config);
+  const drain = async () => {
+    while (queue.length) {
+      const f = queue.shift()!;
+      if (!o.alive()) { f.frame.close(); continue; }
+      await o.onFrame(f.pts, f.frame);
+    }
+  };
+  try {
+    for (let i = 0; i < samples.length; i++) {
+      if (!o.alive()) return 1 / fd;
+      if (decodeError) throw decodeError;
+      if (i % 8 === 0) await o.wait();
+      const s = samples[i];
+      dec.decode(new EncodedVideoChunk({
+        type: s.is_sync ? 'key' : 'delta',
+        timestamp: Math.round(ptsOf(s) * 1e6),
+        duration: Math.round((s.duration / ts) * 1e6),
+        data: s.data!,
+      }));
+      // 解出來的格子先處理掉（解碼器的影格數有限，不 close 會卡住）
+      if (queue.length) await drain();
+      // 等解碼器消化：用它的 dequeue 事件（最多 20ms），不要忙等（會占住主執行緒，編碼器的回呼也跟著變慢）
+      while (dec.decodeQueueSize > 8 && !decodeError && o.alive()) {
+        await new Promise<void>((r) => { dec.addEventListener('dequeue', () => r(), { once: true }); setTimeout(r, 20); });
+        if (queue.length) await drain();
+      }
+      if (i % 30 === 0) o.onProgress?.(i / samples.length);
+    }
+    // 清空解碼器時也要一邊處理吐出來的格子（不 close 的話解碼器的緩衝用完，flush 永遠等不到）
+    let flushed = false;
+    const fl = dec.flush().finally(() => (flushed = true));
+    while (!flushed && !decodeError) {
+      if (queue.length) await drain();
+      else await new Promise((r) => setTimeout(r, 5));
+    }
+    await fl;
+    if (decodeError) throw decodeError;
+    await drain();
+  } finally {
+    queue.forEach((f) => f.frame.close());
+    if (dec.state !== 'closed') dec.close();
+  }
+  return 1 / fd;
+}

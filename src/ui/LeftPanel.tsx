@@ -41,13 +41,14 @@ const BLENDS = (): Record<BlendMode, string> => ({
 });
 import { useModuleThumb } from '../engine/thumbs';
 import { startLibraryDrag } from './dnd';
+import { useProxy } from '../engine/proxy';
 import { itemName } from './names';
 import { ensureMatte, matteCoverage, matteFrames, useMatte } from '../engine/matte';
 import { cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { closeSource, openSource, useSource } from './SourcePanel';
 import { useDock } from './Dock';
 import { aspectOf, formatBitrate, formatBytes, formatFps, probeMedia, type MediaProbe } from '../engine/mediaInfo';
-import { confirmDialog, openMenu, promptDialog, revealSelection, stopPreviewFx, toast, useColorPick, useLayout, usePreviewFx, type MenuItem } from './uiStore';
+import { confirmDialog, openMenu, promptDialog, revealSelection, stopPreviewFx, toast, useColorPick, useLayout, useLibFocus, usePreviewFx, type MenuItem } from './uiStore';
 import { DragNumber } from './DragNumber';
 import { ModuleCode } from './ModuleCode';
 import { newModule, openModuleEditor } from './CodePanel';
@@ -92,10 +93,21 @@ export function MediaPanel() {
     setSelectedIds((ids) => ids.filter((id) => visible.has(id)));
     if (anchorId && !visible.has(anchorId)) setAnchorId(null);
   }, [list, anchorId]);
+  // 別的面板要求選中某個素材（例如自動剪輯的片段清單）：清掉搜尋 / 分類，選中並捲到它
+  const focus = useLibFocus();
+  useEffect(() => {
+    if (!focus.id || !library.some((m) => m.id === focus.id)) return;
+    setQ('');
+    if (useLayout.getState().mediaFilter !== 'all') useLayout.getState().set({ mediaFilter: 'all' });
+    setSelectedIds([focus.id]);
+    setAnchorId(focus.id);
+    requestAnimationFrame(() => panelRef.current?.querySelector(`[data-media-id="${focus.id}"]`)?.scrollIntoView({ block: 'nearest' }));
+  }, [focus.n]); // eslint-disable-line react-hooks/exhaustive-deps
   const selected = new Set(selectedIds);
   const picked = selectedIds.map((id) => list.find((m) => m.id === id)).filter((m): m is Media => !!m);
   const missing = library.filter((m) => m.missing).length;
   const previewing = useSource((s) => (s.open ? s.mediaId : null));
+  const proxyProg = useProxy((s) => s.progress);
 
   const selectMedia = (e: React.MouseEvent, m: Media) => {
     panelRef.current?.focus();
@@ -152,6 +164,30 @@ export function MediaPanel() {
     toast($t('已移除 {0} 個素材', items.length));
   };
 
+  /** 另存素材檔案：支援的瀏覽器跳出「另存新檔」選位置，其他的直接下載 */
+  const saveMediaFile = async (m: Media) => {
+    try {
+      const blob = await (await fetch(m.url)).blob();
+      const w = window as Window & { showSaveFilePicker?: (o: { suggestedName: string }) => Promise<FileSystemFileHandle> };
+      if (w.showSaveFilePicker) {
+        let h: FileSystemFileHandle;
+        try { h = await w.showSaveFilePicker({ suggestedName: m.name }); } catch { return; } // 按了取消
+        const out = await h.createWritable();
+        await out.write(blob);
+        await out.close();
+      } else {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = m.name;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+      }
+      toast($t('已另存「{0}」', m.name));
+    } catch {
+      toast($t('無法另存這個檔案'), 'error');
+    }
+  };
+
   const itemMenu = (e: React.MouseEvent, m: Media) => {
     e.preventDefault();
     e.stopPropagation();
@@ -167,6 +203,7 @@ export function MediaPanel() {
       { label: items.length > 1 ? $t('插入選取的 {0} 個素材', items.length) : $t('插入到播放頭'), action: items.some(mediaUsable) ? () => insertPicked(items) : undefined },
       { label: m.missing ? $t('重新連結檔案…') : $t('替換檔案…'), action: items.length === 1 ? () => relinkWithPicker(m.id) : undefined },
       { label: $t('素材資訊'), action: items.length === 1 && !m.missing ? () => { openSource(m.id); useDock.getState().activatePanel('inspector'); } : undefined },
+      { label: $t('另存檔案…'), action: items.length === 1 && !m.missing && !m.color ? () => void saveMediaFile(m) : undefined },
       { separator: true },
       { label: items.length > 1 ? $t('移除選取的 {0} 個素材', items.length) : n ? $t('從素材庫移除（{0} 個片段使用中）', n) : $t('從素材庫移除'), action: () => removePicked(items), danger: true },
       { label: $t('從素材庫與時間軸移除'), action: inTimeline ? () => removePicked(items, true) : undefined, danger: true },
@@ -217,6 +254,7 @@ export function MediaPanel() {
           {list.map((m) => (
             <div
               key={m.id}
+              data-media-id={m.id}
               className={`lib-item ${m.missing ? 'missing' : ''} ${previewing === m.id ? 'previewing' : ''} ${selected.has(m.id) ? 'selected' : ''}`}
               onPointerDown={(e) => {
                 if (e.ctrlKey || e.metaKey || e.shiftKey || !mediaUsable(m)) return;
@@ -233,6 +271,7 @@ export function MediaPanel() {
                 {m.missing && <span className="miss"><TriangleAlert size={11} /> {$t('遺失')}</span>}
                 {view === 'grid' && m.kind !== 'image' && <span className="dur">{m.duration.toFixed(1)}s</span>}
                 {uses(m.id) > 0 && view === 'grid' && <span className="used" title={$t('已在時間軸上使用')}><CircleCheck size={11} /></span>}
+                {proxyProg[m.id] !== undefined && <span className="proxy-bar" title={$t('產生預覽代理檔')}><i style={{ width: `${Math.round(proxyProg[m.id] * 100)}%` }} /></span>}
               </div>
               <div className="lib-meta">
                 <div className="lib-name">{previewing === m.id && <Play size={10} fill="currentColor" />} {m.name}</div>
@@ -1649,12 +1688,27 @@ function EffectInspector({ id }: { id: string }) {
         {
           label: $t('重新播放'),
           node: (
-            <select className="select" value={triggerValue(fx.trigger)} onChange={(e) => updateEffect(id, { trigger: TRIGGERS.find((x) => x.v === e.target.value)?.trigger })}>
+            <select className="select" value={triggerValue(fx.trigger)} onChange={(e) => {
+              const next = TRIGGERS.find((x) => x.v === e.target.value)?.trigger;
+              const keep = fx.trigger?.chance !== undefined ? { chance: fx.trigger.chance, seed: fx.trigger.seed } : {};
+              updateEffect(id, { trigger: next && { ...next, ...keep } });
+            }}>
               {TRIGGERS.map((x) => <option key={x.v} value={x.v}>{x.label()}</option>)}
             </select>
           ),
         },
         ...(fx.trigger?.kind === 'cut' ? [{ label: $t('影片軌'), node: <CutTrackPick fx={fx} /> }] : []),
+        ...(fx.trigger ? [{
+          label: $t('機率'),
+          node: <DragNumber value={Math.round((fx.trigger.chance ?? 1) * 100)} min={0} max={100} step={5} decimals={0} suffix="%"
+            onChange={(v) => {
+              const tr = fx.trigger!;
+              const chance = Math.min(1, Math.max(0, v / 100));
+              // 100% = 拿掉機率；第一次設機率時給一個 seed（之後固定，挑中的拍子不會一直變）
+              const { chance: _c, seed: _s, ...rest } = tr;
+              updateEffect(id, { trigger: chance >= 1 ? rest : { ...rest, chance, seed: tr.seed ?? ((Math.random() * 2 ** 31) >>> 0) } });
+            }} />,
+        }] : []),
       ],
       onReset: () => updateEffect(id, { trigger: undefined }),
     },

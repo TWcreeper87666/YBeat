@@ -23,6 +23,10 @@ export class RateLimitError extends Error {
 }
 export class ApiKeyError extends Error {}
 export class BlockedError extends Error {}
+/** 暫時性的錯誤（伺服器忙碌 / 過載 / 5xx）：等一下再試通常就好 */
+export class BusyError extends Error {}
+
+const BUSY_MSG = /high demand|overloaded|unavailable|try again later|internal error|deadline/i;
 
 async function fail(res: Response): Promise<never> {
   let msg = `HTTP ${res.status}`;
@@ -37,6 +41,7 @@ async function fail(res: Response): Promise<never> {
     }
   } catch { /* 不是 JSON */ }
   if (res.status === 429) throw new RateLimitError(msg, retry);
+  if (res.status >= 500 || BUSY_MSG.test(msg)) throw new BusyError(msg);
   if (res.status === 400 && /api key/i.test(msg)) throw new ApiKeyError(msg);
   if (res.status === 401 || res.status === 403) throw new ApiKeyError(msg);
   throw new Error(msg);
@@ -83,11 +88,7 @@ export async function streamChat(o: Parameters<typeof streamTurn>[0]): Promise<s
   return (await streamTurn(o)).text;
 }
 
-/**
- * 串流一輪：回傳文字、原始 parts（要原樣送回去，思考型模型的 thoughtSignature 在裡面）、工具呼叫。
- * toolMode = 'NONE'：對話裡有工具回合但這輪不准再呼叫。
- */
-export async function streamTurn(o: {
+type TurnOpts = {
   key: string;
   model: string;
   system: string;
@@ -96,7 +97,46 @@ export async function streamTurn(o: {
   toolMode?: 'AUTO' | 'NONE';
   signal?: AbortSignal;
   onText?: (full: string) => void;
-}): Promise<{ text: string; parts: Part[]; calls: FnCall[] }> {
+  /** 暫時性錯誤、等一下要重試時通知（第幾次、等幾秒） */
+  onRetry?: (attempt: number, waitSec: number, reason: string) => void;
+};
+
+/** 重試的等待秒數（第 1、2、3、4 次） */
+const RETRY_WAIT = [1, 2, 4, 8];
+/** 限流要求等太久就不重試（直接回報，讓使用者決定） */
+const MAX_RATE_WAIT = 30;
+
+const sleep = (sec: number, signal?: AbortSignal) => new Promise<void>((res, rej) => {
+  if (signal?.aborted) return rej(new DOMException('aborted', 'AbortError'));
+  const t = setTimeout(res, sec * 1000);
+  signal?.addEventListener('abort', () => { clearTimeout(t); rej(new DOMException('aborted', 'AbortError')); }, { once: true });
+});
+
+/**
+ * 串流一輪：回傳文字、原始 parts（要原樣送回去，思考型模型的 thoughtSignature 在裡面）、工具呼叫。
+ * toolMode = 'NONE'：對話裡有工具回合但這輪不准再呼叫。
+ * 伺服器忙碌、網路斷線、短暫限流：還沒收到任何內容就自動重試（最多 4 次，等 1 / 2 / 4 / 8 秒）。
+ */
+export async function streamTurn(o: TurnOpts): Promise<{ text: string; parts: Part[]; calls: FnCall[] }> {
+  for (let attempt = 0; ; attempt++) {
+    let got = false;
+    try {
+      return await streamOnce({ ...o, onText: (t) => { got = true; o.onText?.(t); } });
+    } catch (e) {
+      if (o.signal?.aborted || got || attempt >= RETRY_WAIT.length) throw e;
+      let wait: number | null = null;
+      if (e instanceof BusyError) wait = RETRY_WAIT[attempt];
+      else if (e instanceof RateLimitError) wait = e.retryAfter !== null && e.retryAfter <= MAX_RATE_WAIT ? Math.max(e.retryAfter, RETRY_WAIT[attempt]) : null;
+      // 網路錯誤（fetch 失敗、串流中斷）
+      else if (e instanceof TypeError) wait = RETRY_WAIT[attempt];
+      if (wait === null) throw e;
+      o.onRetry?.(attempt + 1, wait, e instanceof Error ? e.message : String(e));
+      await sleep(wait, o.signal);
+    }
+  }
+}
+
+async function streamOnce(o: TurnOpts): Promise<{ text: string; parts: Part[]; calls: FnCall[] }> {
   const res = await fetch(`${BASE}/models/${encodeURIComponent(o.model)}:streamGenerateContent?alt=sse`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-goog-api-key': o.key },
@@ -125,7 +165,10 @@ export async function streamTurn(o: {
     if (!data || data === '[DONE]') return;
     let j: any;
     try { j = JSON.parse(data); } catch { return; }
-    if (j.error) throw new Error(j.error.message ?? 'error');
+    if (j.error) {
+      const m = String(j.error.message ?? 'error');
+      throw (j.error.code >= 500 || BUSY_MSG.test(m) ? new BusyError(m) : new Error(m));
+    }
     if (j.promptFeedback?.blockReason) blocked = j.promptFeedback.blockReason;
     const c = j.candidates?.[0];
     if (c?.finishReason) finish = c.finishReason;

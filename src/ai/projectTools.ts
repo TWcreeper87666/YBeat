@@ -621,7 +621,7 @@ function readTimeline(s: S, a: Record<string, unknown>) {
     }),
     effects: cut(effects).map((e) => ({
       id: e.id, track: e.track, start: r3(e.start), end: r3(e.start + e.duration), module: e.moduleId,
-      ...(e.trigger ? { trigger: e.trigger.kind === 'beat' ? `every ${e.trigger.every} beat` : 'cut' } : {}),
+      ...(e.trigger ? { trigger: (e.trigger.kind === 'beat' ? `every ${e.trigger.every} beat` : 'cut') + (e.trigger.chance !== undefined && e.trigger.chance < 1 ? ` (${Math.round(e.trigger.chance * 100)}%)` : '') } : {}),
       ...(e.stack?.length ? { stacked: e.stack.map((f) => f.moduleId) } : {}),
       ...pv(e.params),
     })),
@@ -840,7 +840,8 @@ function applyOp(op: Op): number {
       return 1;
     case 'add_items': {
       const ok = (id: string) => st.modules.some((m) => m.id === id);
-      const clips = op.clips.filter((c) => st.media.some((m) => m.id === c.mediaId && !m.missing));
+      // 文字片段沒有素材（mediaId 是空的）
+      const clips = op.clips.filter((c) => !!c.text || st.media.some((m) => m.id === c.mediaId && !m.missing));
       const effects = op.effects.filter((e) => ok(e.moduleId));
       if (!clips.length && !effects.length) return 0;
       // 影片軌：每一層一條，疊在最上面；只有一條空的影片軌時，基本層直接用它
@@ -850,19 +851,24 @@ function applyOp(op: Op): number {
       const base = reuse ? 0 : s.tracks.video.length;
       for (let k = reuse ? 1 : 0; k < layers; k++) st.addTrack('video', useStore.getState().tracks.video.length);
       s = useStore.getState();
-      // 特效軌：放在所有影片軌上方；已經有一條空的就用它
-      let ft = -1;
+      // 特效軌：effect.track = 第幾層（每層一條，層號小的先套用），放在所有影片軌上方；已經有空的就先用
+      const fts: number[] = [];
+      // 層號可能跳號（0、2）：照順序對到連續的特效軌
+      const layerIdx = [...new Set(effects.map((e) => Math.max(0, Math.round(e.track))))].sort((a, b) => a - b);
       if (effects.length) {
         const top = s.tracks.video.length;
-        ft = s.tracks.fx.findIndex((t, i) => !t.locked && fxLevel(s.tracks, i) >= top && !s.effects.some((e) => e.track === i));
-        if (ft < 0) {
-          st.addTrack('fx', s.tracks.fx.length, top);
-          ft = useStore.getState().tracks.fx.length - 1;
+        const need = new Set(effects.map((e) => Math.max(0, Math.round(e.track)))).size;
+        s.tracks.fx.forEach((t, i) => {
+          if (fts.length < need && !t.locked && fxLevel(s.tracks, i) >= top && !s.effects.some((e) => e.track === i)) fts.push(i);
+        });
+        while (fts.length < need) {
+          st.addTrack('fx', useStore.getState().tracks.fx.length, top);
+          fts.push(useStore.getState().tracks.fx.length - 1);
         }
       }
       useStore.setState((x) => ({
         clips: [...x.clips, ...clips.map((c) => ({ ...c, track: base + Math.max(0, Math.round(c.track)) }))],
-        effects: [...x.effects, ...effects.map((e) => ({ ...e, track: ft }))],
+        effects: [...x.effects, ...effects.map((e) => ({ ...e, track: fts[layerIdx.indexOf(Math.max(0, Math.round(e.track)))] }))],
       }));
       return clips.length + effects.length;
     }

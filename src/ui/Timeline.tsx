@@ -32,6 +32,7 @@ import { useSubjectStatus } from './subjectUi';
 import { sourceTime, tracking } from '../engine/follow';
 import { faceDone, useFaces } from '../engine/face';
 import { boxCoverage, useBoxTracks } from '../engine/boxTrack';
+import { marqueeClamp } from './marqueeClamp';
 
 const SNAP_PX = 8;
 /** 時間軸預設長度（秒）；專案比這個長才依專案長度延伸 */
@@ -1230,7 +1231,7 @@ function fxTriggerMarks(f: FxItem, trBlock: boolean): string {
     marks = cutPoints(s.clips, cutTracks(f, s.tracks), true).filter((p) => p >= f.start - 0.01 && p <= f.start + f.duration + 0.01);
   } else {
     const pts = f.trigger.kind === 'cut' ? cutPoints(s.clips, cutTracks(f, s.tracks)) : triggerBeats(f.trigger.every);
-    marks = triggerMarks(pts, f.start, f.start + f.duration);
+    marks = triggerMarks(pts, f.start, f.start + f.duration, f.trigger);
   }
   return marks.slice(0, 400).map((p) => (p - f.start).toFixed(4)).join(',');
 }
@@ -1609,14 +1610,21 @@ export function Timeline() {
     e.preventDefault();
     stopPreviewFx();
     const additive = e.ctrlKey || e.metaKey || e.shiftKey;
-    const base = additive ? useStore.getState().selected : [];
+    const st0 = useStore.getState();
+    const base = additive ? st0.selected : [];
+    const baseSel = (additive && base.find((k) => st0.selection && k === keyOf(st0.selection.type as ItemType, st0.selection.id))) || null;
     const x0 = e.clientX, y0 = e.clientY;
+    const clamp = marqueeClamp(e.currentTarget);
     let moved = false;
+    // 框到的先後順序；主要選取（屬性面板顯示的）固定用最早框到、還在框裡的那個，框框變大時面板才不會跳
+    const seen: string[] = [];
+    let lastSig: string | null = null;
     listen(
       (ev) => {
         if (!moved && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return;
         moved = true;
-        const r = { x0, y0, x1: ev.clientX, y1: ev.clientY };
+        const [x1, y1] = clamp(ev.clientX, ev.clientY);
+        const r = { x0, y0, x1, y1 };
         setMarquee(r);
         const L = Math.min(r.x0, r.x1), R = Math.max(r.x0, r.x1), T = Math.min(r.y0, r.y1), B = Math.max(r.y0, r.y1);
         const hits: string[] = [];
@@ -1624,7 +1632,17 @@ export function Timeline() {
           const b = el.getBoundingClientRect();
           if (b.right >= L && b.left <= R && b.bottom >= T && b.top <= B) hits.push(el.dataset.key!);
         });
-        useStore.getState().selectKeys(Array.from(new Set([...base, ...hits])));
+        const sig = hits.join('|');
+        if (sig === lastSig) return;
+        lastSig = sig;
+        for (const k of hits) if (!seen.includes(k)) seen.push(k);
+        const keys = Array.from(new Set([...base, ...hits]));
+        const primary = baseSel && keys.includes(baseSel) ? baseSel : seen.find((k) => hits.includes(k));
+        const s = useStore.getState();
+        // 主要選取放最後（store 用最後一個決定作用中軌道）
+        s.selectKeys(primary ? [...keys.filter((k) => k !== primary), primary] : keys);
+        const after = useStore.getState();
+        if (primary && after.selected.includes(primary)) useStore.setState({ selection: parseKey(primary) });
       },
       () => {
         setMarquee(null);

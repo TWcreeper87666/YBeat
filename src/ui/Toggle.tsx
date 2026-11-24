@@ -8,6 +8,44 @@
  */
 import React from 'react';
 
+/**
+ * 拖曳連續切換（Check、SegToggles）：按下第一個 = 切換它，按著滑過其他項目 = 設成跟第一個一樣的狀態。
+ * 鍵盤觸發的 click（detail = 0）照常切換；滑鼠的 click 已經在按下時處理，吞掉。
+ */
+let paint: boolean | null = null;
+if (typeof window !== 'undefined') {
+  const stop = () => { paint = null; };
+  window.addEventListener('pointerup', stop);
+  window.addEventListener('pointercancel', stop);
+}
+/** 按在項目裡的輸入框 / 按鈕 / 連結上（不是開關本身）：照它自己的行為，不拖曳切換 */
+const ownControl = (e: React.PointerEvent) => {
+  const el = (e.target as HTMLElement).closest('input, button, select, textarea, a');
+  return !!el && el !== e.currentTarget && !el.closest('.switch');
+};
+function paintProps(v: boolean, on: (v: boolean) => void) {
+  return {
+    onPointerDown: (e: React.PointerEvent) => {
+      if (e.button !== 0 || ownControl(e)) return;
+      e.preventDefault(); // 不要選取文字、不要搶焦點
+      // 觸控會自動捕捉指標（滑過別的項目收不到 pointerenter）→ 放掉
+      (e.target as Element).releasePointerCapture?.(e.pointerId);
+      paint = !v;
+      on(!v);
+    },
+    onPointerEnter: () => {
+      if (paint !== null && v !== paint) on(paint);
+    },
+    onClickCapture: (e: React.MouseEvent) => {
+      if (e.detail === 0) return;
+      const el = (e.target as HTMLElement).closest('input, button, select, textarea, a');
+      if (el && el !== e.currentTarget && !el.closest('.switch')) return;
+      e.preventDefault();
+      e.stopPropagation();
+    },
+  };
+}
+
 export const Switch = ({ v, on, title }: { v: boolean; on: (v: boolean) => void; title?: string }) => (
   <label className="switch" title={title}>
     <input type="checkbox" checked={v} onChange={(e) => on(e.target.checked)} />
@@ -16,8 +54,8 @@ export const Switch = ({ v, on, title }: { v: boolean; on: (v: boolean) => void;
 );
 
 export const Check = ({ v, on, children, title }: { v: boolean; on: (v: boolean) => void; children: React.ReactNode; title?: string }) => (
-  <div className="check" title={title}>
-    <span className="check-label" onClick={() => on(!v)}>{children}</span>
+  <div className="check" title={title} {...paintProps(v, on)}>
+    <span className="check-label">{children}</span>
     <Switch v={v} on={on} />
   </div>
 );
@@ -38,7 +76,7 @@ export interface SegToggle { key: string; v: boolean; on: (v: boolean) => void; 
 
 export const SegToggles = ({ items, className }: { items: SegToggle[]; className?: string }) => (
   <div className={`seg ${className ?? ''}`}>
-    {items.map((i) => <button key={i.key} className={i.v ? 'on' : ''} title={i.title} onClick={() => i.on(!i.v)}>{i.label}</button>)}
+    {items.map((i) => <button key={i.key} className={i.v ? 'on' : ''} title={i.title} {...paintProps(i.v, i.on)} onClick={(e) => e.detail === 0 && i.on(!i.v)}>{i.label}</button>)}
   </div>
 );
 

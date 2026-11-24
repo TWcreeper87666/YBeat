@@ -58,6 +58,8 @@ const MAP: Record<string, string> = {
   'fx-letterbox': 'frame',
   'fx-speedlines': 'style',
   'fx-outline': 'style',
+  'fx-matteoutline': 'style',
+  'fx-blur': 'style',
   'fx-chromakey': 'color',
   'fx-clipmask': 'frame',
   'tr-crossfade': 'basic',

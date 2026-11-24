@@ -18,6 +18,7 @@ import { openMenu, useKeySel, useLayout, useTrimView, type KeyRef, type MenuItem
 import { beatHits, HIT_MIN, normalizeHits, overwriteHits, type BeatEvery, type FxTiming, type Hit } from '../engine/trigger';
 import { beatSnapPoints } from './beatGrid';
 import { AudioLines, ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Timer } from 'lucide-react';
+import { marqueeClamp } from './marqueeClamp';
 
 // ───────────────────────── 資料介面 ─────────────────────────
 
@@ -695,12 +696,14 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
     const additive = e.shiftKey || e.ctrlKey || e.metaKey;
     const base = additive && mine ? ksel.keys : [];
     const x0 = e.clientX, y0 = e.clientY;
+    const clamp = marqueeClamp(e.currentTarget);
     let moved = false;
     listen(
       (ev) => {
         if (!moved && Math.hypot(ev.clientX - x0, ev.clientY - y0) < 4) return;
         moved = true;
-        const r = { x0, y0, x1: ev.clientX, y1: ev.clientY };
+        const [x1, y1] = clamp(ev.clientX, ev.clientY);
+        const r = { x0, y0, x1, y1 };
         setMarquee(r);
         const L = Math.min(r.x0, r.x1), R = Math.max(r.x0, r.x1), T = Math.min(r.y0, r.y1), B = Math.max(r.y0, r.y1);
         const hits: KeyRef[] = [...base];

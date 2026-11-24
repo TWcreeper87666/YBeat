@@ -1,23 +1,32 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, RotateCcw, Wand2, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Pencil, RotateCcw, Save, Trash2, Wand2, X } from 'lucide-react';
 import { $t, displayName } from '../i18n';
-import { useStore } from '../store';
+import { uid, useStore } from '../store';
 import { usePrefs } from '../prefs';
 import { mediaBeats } from '../engine/beats';
 import { categoryOf, CATEGORIES } from '../modules/categories';
-import { isHitFx } from '../engine/params';
-import { RECIPES, type Recipe, type RecipeId } from '../engine/autoEdit';
+import { type FxRule, type Recipe, type RecipeId } from '../engine/autoEdit';
+import { STYLE_IDS } from '../engine/autoEditStyles';
+import { deleteMyStyle, myStyleSettings, renameMyStyle, saveMyStyle, styleSettings, type StyleKey } from '../engine/autoEditSettings';
 import type { MusicInfo } from '../engine/musicAnalysis';
 import { FLAT_SHAPE, LOW_MAX, MID_MAX, isFlat, offsetAt, shapeMusic, type EnergyShape } from '../engine/energyShape';
-import { analyzeSource, canReplaceLast, cancelAutoEdit, footage, generateAutoEdit, musicClips, musicSource, useAutoEdit, useAutoEditRun, type AutoEditSettings } from '../engine/autoEditApply';
+import { presample } from '../engine/mediaSampler';
+import { aeFootage, analyzeSource, canReplaceLast, cancelAutoEdit, footage, generateAutoEdit, musicClips, musicSource, useAutoEdit, useAutoEditRun, type AutoEditSettings } from '../engine/autoEditApply';
 import { useHistory } from '../engine/history';
 import { useAiSettings } from '../ai/assistant';
 import { Check, Seg, SegToggles, Switch } from './Toggle';
 import { POP_VARIANTS, type PopVariant } from '../engine/subjectPop';
 import { SPEED_VARIANTS, type SpeedVariant } from '../engine/speedRamp';
 import { DragNumber } from './DragNumber';
+import { AeRangeDialog, SegList, roleName } from './AeSegments';
+import { useDrag } from './uiStore';
 
 const set = (p: Partial<AutoEditSettings>) => useAutoEdit.getState().set(p);
+/** 改特效層 / 轉場權重 = 風格變「自訂」（數字照舊） */
+const setCustom = (p: Partial<AutoEditSettings>) => {
+  const st = useAutoEdit.getState();
+  set({ ...p, recipe: 'custom', params: { ...st.params, id: 'custom' } });
+};
 
 // ───────────── 版面零件（跟屬性面板同一套 .ec 樣式） ─────────────
 
@@ -44,34 +53,34 @@ const Row = ({ label, children, sub, title }: { label: React.ReactNode; children
   </div>
 );
 
-/** 一串可以勾選的項目（依分類收合）；off = 不用的 id */
-function PickList({ groups, off, onOff, open, toggle }: {
-  groups: { id: string; label: string; items: { id: string; label: React.ReactNode; title?: string }[] }[];
-  off: string[]; onOff: (off: string[]) => void; open: Set<string>; toggle: (id: string) => void;
+/** 轉場權重（依分類收合）：0 = 不用、1 = 一般、3 = 常出現 */
+function WeightList({ groups, weights, open, toggle }: {
+  groups: { id: string; label: string; items: { id: string; label: React.ReactNode }[] }[];
+  weights: Record<string, number>; open: Set<string>; toggle: (id: string) => void;
 }) {
-  const offSet = new Set(off);
+  const w = (id: string) => weights[id] ?? 1;
+  const setW = (ids: string[], v: number) => setCustom({ trWeights: { ...useAutoEdit.getState().trWeights, ...Object.fromEntries(ids.map((id) => [id, v])) } });
   return (
     <>
       {groups.filter((g) => g.items.length).map((g) => {
-        const on = g.items.filter((i) => !offSet.has(i.id)).length;
+        const on = g.items.filter((i) => w(i.id) > 0).length;
         const isOpen = open.has(g.id);
-        const setAll = (v: boolean) => {
-          const ids = new Set(g.items.map((i) => i.id));
-          onOff(v ? off.filter((x) => !ids.has(x)) : [...new Set([...off, ...ids])]);
-        };
         return (
           <React.Fragment key={g.id}>
             <div className="ec-row sub ae-group">
               <div className="ec-left ec-plain">
                 <span className="twirl small" onClick={() => toggle(g.id)}>{isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}</span>
                 <span className="ec-label" onClick={() => toggle(g.id)}>{g.label}<span className="ae-count">{on}/{g.items.length}</span></span>
-                <div className="ec-node"><Switch v={on > 0} on={setAll} /></div>
+                <div className="ec-node"><Switch v={on > 0} on={(v) => setW(g.items.map((i) => i.id), v ? 1 : 0)} /></div>
               </div>
             </div>
             {isOpen && (
               <div className="ae-picks">
                 {g.items.map((i) => (
-                  <Check key={i.id} v={!offSet.has(i.id)} title={i.title} on={(v) => onOff(v ? off.filter((x) => x !== i.id) : [...off, i.id])}>{i.label}</Check>
+                  <div key={i.id} className={'check' + (w(i.id) > 0 ? '' : ' ae-dim')}>
+                    <span className="check-label">{i.label}</span>
+                    <DragNumber value={w(i.id)} min={0} max={3} step={0.5} decimals={1} suffix="×" onChange={(v) => setW([i.id], Math.round(v * 2) / 2)} />
+                  </div>
                 ))}
               </div>
             )}
@@ -82,11 +91,83 @@ function PickList({ groups, off, onOff, open, toggle }: {
   );
 }
 
-const roleName = (k: string) => ({ intro: $t('開頭'), build: $t('鋪陳'), drop: $t('高潮'), body: $t('主體'), outro: $t('結尾') } as Record<string, string>)[k] ?? k;
+/** 特效層的時機（select 的值 → 規則） */
+const WHENS: { v: string; label: () => string; rule: Pick<FxRule, 'when' | 'every'> }[] = [
+  { v: 'b0.5', label: () => $t('每半拍'), rule: { when: 'beat', every: 0.5 } },
+  { v: 'b1', label: () => $t('每拍'), rule: { when: 'beat', every: 1 } },
+  { v: 'b2', label: () => $t('每 2 拍'), rule: { when: 'beat', every: 2 } },
+  { v: 'b4', label: () => $t('每小節'), rule: { when: 'beat', every: 4 } },
+  { v: 'cut', label: () => $t('每個剪接點'), rule: { when: 'cut' } },
+  { v: 'accent', label: () => $t('重音'), rule: { when: 'accent' } },
+  { v: 'drop', label: () => 'drop', rule: { when: 'drop' } },
+  { v: 'section', label: () => $t('整個段落'), rule: { when: 'section' } },
+];
+const whenValue = (r: FxRule) => (r.when === 'beat' ? 'b' + (r.every ?? 1) : r.when);
+const LEVELS = [{ l: 0 as const, label: () => $t('低能量') }, { l: 1 as const, label: () => $t('中能量') }, { l: 2 as const, label: () => $t('高能量') }];
 
-const popName = (v: PopVariant) => ({ step: $t('逐拍放大'), mono: $t('黑白背景'), fly: $t('飛入'), shake: $t('震閃') })[v];
+type PickGroup = { id: string; label: string; items: { id: string; label: React.ReactNode }[] };
 
-const speedName = (v: SpeedVariant) => ({ beatPulse: $t('每拍快慢'), hitRamp: $t('衝入剪接'), drift: $t('緩速'), holdHit: $t('重音定格') })[v];
+/** 特效層清單：每層一條特效軌，疊在一起 */
+function RuleList({ fxGroups }: { fxGroups: PickGroup[] }) {
+  const rules = useAutoEdit((x) => x.rules);
+  const upd = (id: string, p: Partial<FxRule>) => setCustom({ rules: useAutoEdit.getState().rules.map((r) => (r.id === id ? { ...r, ...p } : r)) });
+  const known = new Set(fxGroups.flatMap((g) => g.items.map((i) => i.id)));
+  return (
+    <div className="ae-layers">
+      {!rules.length && <div className="ae-empty">{$t('沒有特效層')}</div>}
+      {rules.map((r) => (
+        <div key={r.id} className={'ae-layer' + (r.on ? '' : ' ae-dim')}>
+          <div className="ae-line">
+            <Switch v={r.on} on={(v) => upd(r.id, { on: v })} />
+            <select className="select ae-grow" value={r.moduleId} onChange={(e) => upd(r.id, { moduleId: e.target.value })}>
+              {!known.has(r.moduleId) && <option value={r.moduleId}>{$t('（素材遺失）')}</option>}
+              {fxGroups.filter((g) => g.items.length).map((g) => (
+                <optgroup key={g.id} label={g.label}>{g.items.map((i) => <option key={i.id} value={i.id}>{i.label}</option>)}</optgroup>
+              ))}
+            </select>
+            <button className="ec-icon" title={$t('移除')} onClick={() => setCustom({ rules: useAutoEdit.getState().rules.filter((x) => x.id !== r.id) })}><X size={13} /></button>
+          </div>
+          <div className="ae-line ae-layer-sub">
+            <select className="select" value={whenValue(r)} onChange={(e) => {
+              const w = WHENS.find((x) => x.v === e.target.value)!.rule;
+              upd(r.id, { when: w.when, every: w.every });
+            }}>
+              {WHENS.map((x) => <option key={x.v} value={x.v}>{x.label()}</option>)}
+            </select>
+            {r.when !== 'drop' && (
+              <SegToggles items={LEVELS.map(({ l, label }) => ({
+                key: String(l), label: label(), v: r.levels.includes(l),
+                on: (on: boolean) => {
+                  const cur = useAutoEdit.getState().rules.find((x) => x.id === r.id)?.levels ?? [];
+                  upd(r.id, { levels: on ? [...new Set([...cur, l])].sort() : cur.filter((x) => x !== l) });
+                },
+              }))} />
+            )}
+            <span className="spacer" />
+            <DragNumber value={Math.round(r.chance * 100)} min={0} max={100} step={5} decimals={0} suffix="%" onChange={(v) => upd(r.id, { chance: Math.min(1, Math.max(0, v / 100)) })} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+const popName = (v: PopVariant) => ({
+  step: $t('逐拍放大'), mono: $t('黑白背景'), fly: $t('飛入'), shake: $t('震閃'),
+  crossShot: $t('跨畫面'), textBehind: $t('文字在後'), trail: $t('殘影'), grid: $t('四格'),
+  spin: $t('旋轉分身'), dim: $t('暗背景'), halo: $t('描邊光暈'), blur: $t('背景模糊'),
+  silhouetteWindow: $t('剪影窗'), subjectHole: $t('主體挖洞'),
+})[v];
+
+const styleName = (v: RecipeId) => ({
+  calm: $t('穩'), rhythm: $t('節奏'), hype: $t('炸'), velocity: $t('速度感'), glitch: $t('故障'), flash: $t('閃光'),
+})[v];
+
+const speedName = (v: SpeedVariant) => ({
+  beatPulse: $t('每拍快慢'), hitRamp: $t('衝入剪接'), drift: $t('緩速'), holdHit: $t('重音定格'),
+  rewindToCut: $t('剪前倒抽'), reverseForwardB: $t('倒播回正'), rewindReturn: $t('正倒正'), beatBoomerang: $t('逐拍來回'),
+  slowPocket: $t('拍間慢放'), tapeStop: $t('卡帶停'), whooshRamp: $t('甩鏡加速'), beatStutter: $t('重複切片'),
+})[v];
 
 const KIND_COLOR: Record<string, string> = { intro: '#3d4a66', build: '#8a6d2c', drop: '#c2413f', outro: '#3d4a66', body: '#2b7d74' };
 
@@ -180,10 +261,24 @@ export function AutoEditPanel() {
   useHistory((h) => h.ver); // 「再一版」能不能用
   const music = useMemo(() => musicClips({ ...useStore.getState(), audios, clips, media }), [audios, clips, media]);
   const feet = useMemo(() => footage({ ...useStore.getState(), media }), [media]);
+  // 分頁開著就先在背景分析影片（匯入素材後按「產生」不用再等）
+  const analyze = useAutoEdit((x) => x.analyze);
+  const director = useAutoEdit((x) => x.director);
+  const segs = useAutoEdit((x) => x.segs);
+  const using = useMemo(() => aeFootage({ ...useStore.getState(), media }, useAutoEdit.getState()), [media, segs]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const list = using.filter((m) => analyze || director);
+    if (!list.length) return;
+    let stop = false;
+    const t = setTimeout(() => void presample(list, () => stop || useAutoEditRun.getState().running), 800);
+    return () => { stop = true; clearTimeout(t); };
+  }, [using, analyze, director]);
   const audioId = st.audioId && music.some((a) => a.id === st.audioId) ? st.audioId : music[0]?.id ?? null;
 
   // 細節區塊預設收起（很少動）
   const [open, setOpen] = useState<Set<string>>(() => new Set());
+  // 另存 / 改名自己的風格：名稱輸入框
+  const [naming, setNaming] = useState<{ mode: 'save' | 'rename'; text: string } | null>(null);
   const toggle = (id: string) => setOpen((o) => { const n = new Set(o); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
   // 音樂分析（段落條）
@@ -213,29 +308,30 @@ export function AutoEditPanel() {
     { id: 'effect:combo', label: $t('我的組合'), items: combos.map((c) => ({ id: c.id, label: c.name })) },
     ...groupsOf('effect', fxMods),
   ];
-  const trOn = trMods.filter((m) => !st.trOff.includes(m.id)).length;
-  const fxOn = fxMods.filter((m) => !st.fxOff.includes(m.id)).length + combos.filter((c) => !st.fxOff.includes(c.id)).length;
-  const mediaOn = feet.filter((m) => !st.mediaOff.includes(m.id)).length;
+  const trOn = trMods.filter((m) => (st.trWeights[m.id] ?? 1) > 0).length;
   const hasKey = useAiSettings((x) => !!x.key);
-  const dir = st.director ? st.direction : null;
-  const hits = [...combos.map((c) => ({ id: c.id, name: c.name })), ...fxMods.filter(isHitFx).map((m) => ({ id: m.id, name: displayName(m.name) }))];
-  const allNone = (ids: string[], key: 'trOff' | 'fxOff' | 'mediaOff') => (
+  const allNone = (ids: string[]) => (
     <>
-      <button className="link" onClick={() => set({ [key]: st[key].filter((x) => !ids.includes(x)) })}>{$t('全選')}</button>
-      <button className="link" onClick={() => set({ [key]: [...new Set([...st[key], ...ids])] })}>{$t('全不選')}</button>
+      <button className="link" onClick={() => setCustom({ trWeights: { ...st.trWeights, ...Object.fromEntries(ids.map((id) => [id, Math.max(1, st.trWeights[id] ?? 1)])) } })}>{$t('全選')}</button>
+      <button className="link" onClick={() => setCustom({ trWeights: { ...st.trWeights, ...Object.fromEntries(ids.map((id) => [id, 0])) } })}>{$t('全不選')}</button>
     </>
   );
+  const addRule = () => setCustom({ rules: [...useAutoEdit.getState().rules, { id: uid(), moduleId: 'fx-shake', on: true, when: 'beat', every: 1, levels: [2], chance: 1 }] });
+  const rulesOn = st.rules.filter((r) => r.on).length;
+  const mine = st.myStyles.find((x) => `my:${x.id}` === st.recipe);
 
+  const dropOver = useDrag((x) => x.drag?.target?.kind === 'autoEdit');
   const run = useAutoEditRun();
-  const canGo = !run.running && !!audioId && mediaOn > 0 && (st.range === 'all' || !!loop);
+  const canGo = !run.running && !!audioId && using.length > 0 && (st.range === 'all' || !!loop);
   const replace = canReplaceLast();
   const knob = (label: string, node: React.ReactNode) => <label className="ae-knob"><span>{label}</span>{node}</label>;
   const pct = (v: number, on: (v: number) => void, max = 100) => <DragNumber value={Math.round(v * 100)} min={0} max={max} step={5} decimals={0} suffix="%" onChange={(x) => on(x / 100)} />;
   const beatsKnob = (i: number) => <DragNumber value={p.beatsPerShot[i]} min={1} max={32} step={1} decimals={0} suffix={$t(' 拍')} onChange={(v) => setLevel(i, Math.round(v))} />;
 
   return (
-    <div className="auto-edit-panel">
-      {/* 常用：產生、音樂與能量曲線、風格、智慧挑選 */}
+    <div className={`auto-edit-panel ae-segs-drop ${dropOver ? 'drop-here' : ''}`}>
+      <AeRangeDialog />
+      {/* 常用：產生、音樂與能量曲線、智慧挑選、素材、風格 */}
       <div className="ae-bar">
         <button className="btn primary ae-go" disabled={!canGo} onClick={() => void generateAutoEdit(false)}><Wand2 size={15} />{$t('產生')}</button>
         <button className="btn" disabled={!canGo || !replace} onClick={() => void generateAutoEdit(true)}>{$t('再一版')}</button>
@@ -257,6 +353,9 @@ export function AutoEditPanel() {
         </div>
       )}
 
+      {/* 寬的時候左右兩欄：左 = 音樂、素材；右 = 剪法 */}
+      <div className="ae-cols">
+        <div className="ae-col">
       <div className="ae-card">
         <div className="ae-card-head">
           <span>{$t('音樂')}</span>
@@ -292,30 +391,93 @@ export function AutoEditPanel() {
       </div>
 
       <div className="ae-card">
-        <div className="ae-card-head"><span>{$t('風格')}</span></div>
-        <Seg className="ae-style" value={st.recipe} on={(v: RecipeId | 'custom') => v !== 'custom' && set({ recipe: v, params: { ...RECIPES[v] } })}
-          opts={[{ v: 'calm', label: $t('穩') }, { v: 'rhythm', label: $t('節奏') }, { v: 'hype', label: $t('炸') }, ...(st.recipe === 'custom' ? [{ v: 'custom' as const, label: $t('自訂') }] : [])]} />
+        <div className="ae-card-head"><span>{$t('智慧挑選')}</span></div>
+        <Check v={st.analyze} on={(v) => set({ analyze: v })} title={$t('依運動量、畫質、有沒有人、原本的剪接點挑片段')}>{$t('分析影片內容')}</Check>
+        <Check v={st.director && hasKey} on={(v) => hasKey && set({ director: v })} title={hasKey ? undefined : $t('AI 導演需要 API 金鑰')}>{$t('AI 導演')}</Check>
+        {st.director && hasKey && (
+          <input className="text-input" value={st.directorNote} placeholder={$t('給導演的指示')} onChange={(e) => set({ directorNote: e.target.value })} />
+        )}
+      </div>
+
+      <div className="ae-card">
+        <div className="ae-card-head">
+          <span className="ae-fold" onClick={() => toggle('feet-hide')}>
+            {open.has('feet-hide') ? <ChevronRight size={13} /> : <ChevronDown size={13} />}{$t('素材')}
+          </span>
+          <span className="ae-head-actions">
+            <span className="ae-stat">{segs.length ? $t('{0} 段', segs.length) : $t('全部素材（{0}）', feet.length)}</span>
+            {segs.length > 0 && <button className="link" onClick={() => set({ segs: [] })}>{$t('清除')}</button>}
+          </span>
+        </div>
+        {!open.has('feet-hide') && <SegList />}
+      </div>
+
+        </div>
+        <div className="ae-col">
+      <div className="ae-card">
+        <div className="ae-card-head">
+          <span>{$t('風格')}</span>
+          <span className="ae-head-actions">
+            <button className="ec-icon" title={$t('另存風格')} onClick={() => setNaming({ mode: 'save', text: mine?.name ?? '' })}><Save size={13} /></button>
+            {mine && <button className="ec-icon" title={$t('重新命名')} onClick={() => setNaming({ mode: 'rename', text: mine.name })}><Pencil size={13} /></button>}
+            {mine && <button className="ec-icon" title={$t('刪除')} onClick={() => deleteMyStyle(mine.id)}><Trash2 size={13} /></button>}
+          </span>
+        </div>
+        {naming && (
+          <input className="text-input" autoFocus value={naming.text} placeholder={$t('風格名稱')}
+            onChange={(e) => setNaming({ ...naming, text: e.target.value })}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') setNaming(null);
+              if (e.key !== 'Enter') return;
+              if (naming.mode === 'save') saveMyStyle(naming.text);
+              else if (mine) renameMyStyle(mine.id, naming.text);
+              setNaming(null);
+            }}
+            onBlur={() => setNaming(null)} />
+        )}
+        <Seg className="ae-style ae-grid4" value={st.recipe} on={(v: StyleKey) => {
+          if (v === 'custom') return;
+          const m = st.myStyles.find((x) => `my:${x.id}` === v);
+          set(m ? myStyleSettings(m) : styleSettings(v as RecipeId));
+        }}
+          opts={[
+            ...STYLE_IDS.map((v) => ({ v: v as StyleKey, label: styleName(v) })),
+            ...st.myStyles.map((m) => ({ v: `my:${m.id}` as StyleKey, label: m.name, title: m.name })),
+            ...(st.recipe === 'custom' ? [{ v: 'custom' as StyleKey, label: $t('自訂') }] : []),
+          ]} />
         <div className="ae-grid3">
           {knob($t('低能量鏡頭'), beatsKnob(0))}
           {knob($t('中能量鏡頭'), beatsKnob(1))}
           {knob($t('高能量鏡頭'), beatsKnob(2))}
           {knob($t('轉場'), pct(p.transitionRate, (v) => setParam('transitionRate', v)))}
-          {knob($t('點綴'), <DragNumber value={p.accentsPer32} min={0} max={16} step={0.5} decimals={1} suffix={$t(' / 32 拍')} onChange={(v) => setParam('accentsPer32', v)} />)}
+          {knob($t('密度'), pct(st.density, (v) => set({ density: v }), 200))}
+          {knob($t('強度'), pct(st.intensity, (v) => set({ intensity: v })))}
           {knob($t('隨機變化'), pct(p.jitter, (v) => setParam('jitter', v)))}
         </div>
+      </div>
+
+      <div className="ae-card">
+        <div className="ae-card-head">
+          <span>{$t('特效層')}<span className="ae-count">{rulesOn}/{st.rules.length}</span></span>
+          <button className="link" onClick={addRule}>{$t('新增')}</button>
+        </div>
+        <RuleList fxGroups={fxGroups} />
       </div>
 
       <div className={`ae-card ${st.popOn ? '' : 'off'}`}>
         <div className="ae-card-head"><span>{$t('主體跳出')}</span><Switch v={st.popOn} on={(v) => set({ popOn: v })} /></div>
         {st.popOn && (
           <>
-            <SegToggles className="ae-style" items={POP_VARIANTS.map((v) => ({
+            <SegToggles className="ae-style ae-grid4" items={POP_VARIANTS.map((v) => ({
               key: v, label: popName(v), v: st.popVariants.includes(v),
-              on: (on: boolean) => set({ popVariants: on ? [...st.popVariants, v] : st.popVariants.filter((x) => x !== v) }),
+              on: (on: boolean) => { const l = useAutoEdit.getState().popVariants; set({ popVariants: on ? [...l.filter((x) => x !== v), v] : l.filter((x) => x !== v) }); },
             }))} />
             <div className="ae-grid3">
               {knob($t('次數'), <DragNumber value={st.popsPer32} min={0} max={4} step={0.5} decimals={1} suffix={$t(' / 32 拍')} onChange={(v) => set({ popsPer32: v })} />)}
             </div>
+            {st.popVariants.includes('textBehind') && (
+              <input className="text-input" value={st.popText} placeholder={$t('主體後面的文字')} onChange={(e) => set({ popText: e.target.value })} />
+            )}
           </>
         )}
       </div>
@@ -324,9 +486,9 @@ export function AutoEditPanel() {
         <div className="ae-card-head"><span>{$t('跟拍變速')}</span><Switch v={st.speedOn} on={(v) => set({ speedOn: v })} /></div>
         {st.speedOn && (
           <>
-            <SegToggles className="ae-style" items={SPEED_VARIANTS.map((v) => ({
+            <SegToggles className="ae-style ae-grid4" items={SPEED_VARIANTS.map((v) => ({
               key: v, label: speedName(v), v: st.speedVariants.includes(v),
-              on: (on: boolean) => set({ speedVariants: on ? [...st.speedVariants, v] : st.speedVariants.filter((x) => x !== v) }),
+              on: (on: boolean) => { const l = useAutoEdit.getState().speedVariants; set({ speedVariants: on ? [...l.filter((x) => x !== v), v] : l.filter((x) => x !== v) }); },
             }))} />
             <div className="ae-grid3">
               {knob($t('次數'), <DragNumber value={st.speedsPer32} min={0} max={8} step={0.5} decimals={1} suffix={$t(' / 32 拍')} onChange={(v) => set({ speedsPer32: v })} />)}
@@ -336,56 +498,24 @@ export function AutoEditPanel() {
         )}
       </div>
 
-      <div className="ae-card">
-        <div className="ae-card-head"><span>{$t('智慧挑選')}</span></div>
-        <Check v={st.analyze} on={(v) => set({ analyze: v })} title={$t('依運動量、畫質、原本的剪接點挑片段')}>{$t('分析影片內容')}</Check>
-        <Check v={st.director && hasKey} on={(v) => hasKey && set({ director: v })} title={hasKey ? undefined : $t('AI 導演需要 API 金鑰')}>{$t('AI 導演')}</Check>
-        {st.director && hasKey && (
-          <input className="text-input" value={st.directorNote} placeholder={$t('給導演的指示')} onChange={(e) => set({ directorNote: e.target.value })} />
-        )}
-      </div>
-
       {/* 細節：預設收起 */}
       <div className="ec plain ae-more">
         <Section id="shots" title={$t('鏡頭')} open={open.has('shots')} toggle={toggle}>
           <Row label={$t('鏡頭最短')} sub><DragNumber value={p.minShotSec} min={0.1} max={10} step={0.05} decimals={2} suffix="s" onChange={(v) => setParam('minShotSec', Math.min(v, p.maxShotSec))} /></Row>
           <Row label={$t('鏡頭最長')} sub><DragNumber value={p.maxShotSec} min={0.5} max={30} step={0.5} decimals={1} suffix="s" onChange={(v) => setParam('maxShotSec', Math.max(v, p.minShotSec))} /></Row>
-          <Row label={$t('圖片推近 / 拉遠')} sub><Switch v={st.kenBurns} on={(v) => set({ kenBurns: v })} /></Row>
-        </Section>
-
-        <Section id="media" title={$t('素材')} count={`${mediaOn}/${feet.length}`} open={open.has('media')} toggle={toggle} actions={allNone(feet.map((m) => m.id), 'mediaOff')}>
-          <Row label={$t('順序')} sub>
-            <Seg value={st.order} on={(v) => set({ order: v })} opts={[{ v: 'library', label: $t('素材庫順序') }, { v: 'shuffle', label: $t('隨機') }]} />
+          <Row label={$t('推近 / 拉遠')} sub><Switch v={st.kenBurns} on={(v) => set({ kenBurns: v })} /></Row>
+          <Row label={$t('素材順序')} sub>
+            <Seg value={st.order} on={(v) => set({ order: v })} opts={[{ v: 'library', label: $t('清單順序') }, { v: 'shuffle', label: $t('隨機') }]} />
           </Row>
-          {feet.length ? (
-            <div className="ae-picks">
-              {feet.map((m) => (
-                <Check key={m.id} v={!st.mediaOff.includes(m.id)} title={m.name} on={(v) => set({ mediaOff: v ? st.mediaOff.filter((x) => x !== m.id) : [...st.mediaOff, m.id] })}>
-                  <span className={`ae-media ${dir?.[m.id]?.weight === 0 ? 'dim' : ''}`}>
-                    {m.thumb && <img src={m.thumb} alt="" />}<span>{m.name}</span>
-                    {dir?.[m.id] && <em className="ae-role" title={dir[m.id].note}>{dir[m.id].weight === 0 ? $t('不用') : dir[m.id].roles.map(roleName).join(' · ')}</em>}
-                  </span>
-                </Check>
-              ))}
-            </div>
-          ) : <div className="empty">{$t('沒有可用的素材')}</div>}
         </Section>
 
-        <Section id="tr" title={$t('轉場')} count={`${trOn}/${trMods.length}`} open={open.has('tr')} toggle={toggle} actions={allNone(trMods.map((m) => m.id), 'trOff')}>
+        <Section id="tr" title={$t('轉場')} count={`${trOn}/${trMods.length}`} open={open.has('tr')} toggle={toggle} actions={allNone(trMods.map((m) => m.id))}>
           <Row label={$t('段落交界 / drop')} sub>{pct(p.sectionTransitionRate, (v) => setParam('sectionTransitionRate', v))}</Row>
           <Row label={$t('轉場長度')} sub><DragNumber value={p.transitionBeats} min={0.25} max={4} step={0.25} decimals={2} suffix={$t(' 拍')} onChange={(v) => setParam('transitionBeats', v)} /></Row>
-          <PickList groups={groupsOf('transition', trMods)} off={st.trOff} onOff={(trOff) => set({ trOff })} open={open} toggle={toggle} />
+          <WeightList groups={groupsOf('transition', trMods)} weights={st.trWeights} open={open} toggle={toggle} />
         </Section>
-
-        <Section id="fx" title={$t('點綴')} count={`${fxOn}/${fxMods.length + combos.length}`} open={open.has('fx')} toggle={toggle} actions={allNone([...fxMods.map((m) => m.id), ...combos.map((c) => c.id)], 'fxOff')}>
-          <Row label={$t('drop 強調')} sub>
-            <select className="select" value={st.dropHit ?? ''} onChange={(e) => set({ dropHit: e.target.value || null })}>
-              <option value="">{$t('無')}</option>
-              {hits.map((h) => <option key={h.id} value={h.id}>{h.name}</option>)}
-            </select>
-          </Row>
-          <PickList groups={fxGroups} off={st.fxOff} onOff={(fxOff) => set({ fxOff })} open={open} toggle={toggle} />
-        </Section>
+      </div>
+        </div>
       </div>
     </div>
   );

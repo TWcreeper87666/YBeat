@@ -6,7 +6,7 @@ import type { Module } from '../modules/builtin';
 import type { FxCombo } from '../prefs';
 import { categoryOf } from '../modules/categories';
 import { isHitFx } from './params';
-import type { AccentOpt, TransitionOpt } from './autoEdit';
+import type { AccentOpt, FxGroup, TransitionOpt } from './autoEdit';
 
 /** 轉場強度：0 柔和 … 1 強烈 */
 const TR_STRENGTH: Record<string, number> = {
@@ -37,7 +37,7 @@ const FX_ACCENT: Record<string, Omit<AccentOpt, 'id'>> = {
 
 /** 不適合自動放的工具型特效（去背、遮罩、跟隨、調色…）：預設不勾 */
 export const ACCENT_OFF_BY_DEFAULT = new Set([
-  'fx-chromakey', 'fx-clipmask', 'fx-mosaic', 'fx-followzoom', 'fx-grade', 'fx-entrance', 'fx-outline', 'fx-kaleido', 'fx-mirror', 'fx-tilezoom', 'fx-hue',
+  'fx-chromakey', 'fx-clipmask', 'fx-mosaic', 'fx-followzoom', 'fx-grade', 'fx-entrance', 'fx-outline', 'fx-kaleido', 'fx-mirror', 'fx-tilezoom', 'fx-hue', 'fx-matteoutline', 'fx-blur',
 ]);
 
 export function transitionOpt(m: Module): TransitionOpt {
@@ -58,4 +58,37 @@ export function comboAccentOpt(c: FxCombo, modules: Module[]): AccentOpt {
   if (c.fx.trigger?.kind === 'beat') return { id: c.id, hit: false, everyBeat: true, mood: 'intense' };
   if (main && isHitFx(main)) return { id: c.id, hit: true, mood: 'any' };
   return { id: c.id, hit: false, mood: main ? accentOpt(main).mood : 'any', beats: 4 };
+}
+
+/** 特效層的衝突組：先照分類推，再用這張表修正（分類太粗：晃動、縮放都在「運鏡」） */
+const FX_GROUP: Record<string, FxGroup> = {
+  'fx-crashzoom': 'zoom', 'fx-zoompulse': 'zoom', 'fx-chromazoom': 'zoom', 'fx-spinkick': 'zoom', 'fx-squash': 'zoom', 'fx-tilt3d': 'zoom',
+  'fx-blurpulse': 'zoom', 'fx-zoomecho': 'zoom', 'fx-tilezoom': 'zoom', 'fx-lens': 'zoom', 'fx-wave': 'zoom', 'fx-twirl': 'zoom', 'fx-shockwave': 'zoom',
+  'fx-shake': 'shake', 'fx-shakeblur': 'shake', 'fx-handheld': 'shake', 'fx-twitch': 'shake', 'fx-motionblur': 'shake',
+  'fx-flash': 'flash', 'fx-strobe': 'flash', 'fx-invert': 'flash',
+  'fx-rgb': 'glitch', 'fx-glitch': 'glitch', 'fx-pixelate': 'glitch', 'fx-slice': 'glitch',
+  'fx-bw': 'color', 'fx-duotone': 'color', 'fx-hue': 'color', 'fx-grade': 'color',
+  'fx-grain': 'ambient', 'fx-vhs': 'ambient', 'fx-lightleak': 'ambient', 'fx-glow': 'ambient', 'fx-letterbox': 'ambient',
+};
+const CAT_GROUP: Record<string, FxGroup> = { motion: 'zoom', distort: 'zoom', light: 'flash', color: 'color', glitch: 'glitch' };
+
+export function fxGroup(m: Module): FxGroup {
+  return FX_GROUP[m.id] ?? CAT_GROUP[categoryOf(m)] ?? 'other';
+}
+
+/** 「強度」0..1 調的參數：特效 → [參數, 強度 0 的值, 強度 1 的值]（其他參數維持預設；沒列的特效不受影響） */
+const INTENSITY: Record<string, [string, number, number]> = {
+  'fx-crashzoom': ['amount', 0.15, 1.2], 'fx-zoompulse': ['amount', 0.04, 0.28],
+  'fx-shake': ['strength', 0.015, 0.1], 'fx-shakeblur': ['strength', 0.02, 0.12],
+  'fx-flash': ['intensity', 0.3, 1.8], 'fx-strobe': ['depth', 0.25, 0.9],
+  'fx-rgb': ['amount', 0.008, 0.06], 'fx-glitch': ['amount', 0.2, 0.9], 'fx-twitch': ['amount', 0.2, 0.9],
+  'fx-shockwave': ['strength', 0.02, 0.12], 'fx-chromazoom': ['amount', 0.03, 0.2], 'fx-blurpulse': ['amount', 0.008, 0.08],
+  'fx-duotone': ['strength', 0.25, 1], 'fx-lightleak': ['intensity', 0.2, 1.3], 'fx-grain': ['amount', 0.03, 0.2],
+};
+
+export function intensityParams(id: string, v: number): Record<string, number> | undefined {
+  const x = INTENSITY[id];
+  if (!x) return undefined;
+  const k = Math.min(1, Math.max(0, v));
+  return { [x[0]]: x[1] + (x[2] - x[1]) * k };
 }

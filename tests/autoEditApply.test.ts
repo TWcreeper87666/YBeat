@@ -4,9 +4,10 @@
 console.warn = () => {};
 import { makeClip, useStore, type Media } from '../src/store';
 import { beginHistoryTransaction, endHistoryTransaction, redo, resetHistory, settleHistory, undo } from '../src/engine/history';
-import { useAutoEdit } from '../src/engine/autoEditSettings';
+import { aeFootage, useAutoEdit } from '../src/engine/autoEditSettings';
 import { applyProposals } from '../src/ai/projectTools';
-import { planItems, type MusicSource } from '../src/engine/autoEditApply';
+import { facePush, planItems, type MusicSource } from '../src/engine/autoEditApply';
+import { mediaToFrame } from '../src/engine/follow';
 import { fxLevel } from '../src/engine/tracks';
 import type { EditPlan } from '../src/engine/autoEdit';
 import { speedCurve } from '../src/engine/speedRamp';
@@ -126,6 +127,12 @@ ok(S().tracks.video.length === 4 && tr(base.id) === 1 && tr(top1.id) === 2 && tr
 reset();
 applyProposals([{ summary: '', op: { op: 'add_items', clips: [base, top1], effects: [] } }]);
 ok(S().tracks.video.length === 2 && tr(base.id) === 0 && tr(top1.id) === 1, '空時間軸：基本層用原本的軌，上面加一條');
+{
+  reset();
+  const txt = makeClip({ mediaId: '', start: 0, duration: 1, track: 1, text: { text: 'BEAT' } as any });
+  applyProposals([{ summary: '', op: { op: 'add_items', clips: [makeClip({ mediaId: 'i', start: 0, duration: 1 }), txt], effects: [] } }]);
+  ok(S().clips.some((c) => c.text?.text === 'BEAT' && c.track === 1), '文字片段（沒有素材）也會放上去');
+}
 
 // 面板設定也能復原（能量曲線、數字），而且跟時間軸在同一條紀錄裡
 reset();
@@ -158,6 +165,40 @@ endHistoryTransaction(true);
 ok(S().clips.length === 3, '巢狀交易裡的變更有套上');
 undo();
 ok(S().clips.length === 0 && useAutoEdit.getState().kenBurns, '巢狀交易一步復原（含面板設定）');
+
+// 指定片段：虛擬素材（長度 = 片段長度），放上時間軸換回原素材、入點加上片段起點
+{
+  reset();
+  const long: Media = { ...media[0], id: 'L', duration: 60 };
+  useStore.setState({ media: [...media, long] });
+  const st = { ...useAutoEdit.getState(), segs: [{ id: 's1', mediaId: 'L', a: 10, b: 13 }, { id: 's2', mediaId: 'L', a: 40, b: 50 }, { id: 's3', mediaId: 'i', a: 0, b: 0 }, { id: 's4', mediaId: 'gone', a: 0, b: 1 }] };
+  const feet = aeFootage(S(), st);
+  ok(feet.length === 3 && feet[0].id === 'L@s1' && feet[0].duration === 3 && feet[0].from === 10 && feet[0].srcId === 'L' && feet[2].id === 'i', '片段 → 虛擬素材；圖片用原素材；不存在的素材略過');
+  ok(aeFootage(S(), { ...st, segs: [] }).length === 3, '沒有片段 → 素材庫全部');
+  const segPlan: EditPlan = { seed: 1, recipe: 'rhythm', overlays: [], shots: [
+    { b0: 0, b1: 4, mediaId: 'L@s1', in: 2 },
+    { b0: 4, b1: 8, mediaId: 'L@s2', in: 1 },
+  ] };
+  const r = planItems(segPlan, src, S(), feet);
+  ok(r.clips[0].mediaId === 'L' && r.clips[0].in === 11, '入點 = 片段起點 + 片段內的入點（不超出片段：3 秒片段、2 秒鏡頭 → 1）');
+  ok(r.clips[1].mediaId === 'L' && r.clips[1].in === 41, '同一支影片的另一段');
+}
+
+// 推近到臉：臉往畫面中間移、放大、不露黑邊
+{
+  const m = { width: 1920, height: 1080 };
+  const aspect = 16 / 9;
+  const clip = makeClip({ mediaId: 'x', start: 0, duration: 2 });
+  clip.keys = facePush({ x: 0.5, y: 0.4, h: 0.15 }, m, aspect, 2);
+  const [fx, fy] = mediaToFrame(clip, m, 2, aspect, 0.5, 0.4);
+  ok(Math.abs(fx - 0.5) < 1e-6 && Math.abs(fy - 0.5) < 1e-6, `臉到畫面中間（${fx.toFixed(3)}, ${fy.toFixed(3)}）`);
+  const k = clip.keys!.scaleX!;
+  ok(k[0].v < k[1].v && k[1].v <= 1.45 && k[1].v >= 1.12, '從寬推近，縮放 1.12..1.45');
+  clip.keys = facePush({ x: 0.02, y: 0.02, h: 0.1 }, m, aspect, 2);
+  const s1 = clip.keys!.scaleX![1].v;
+  const [l, t] = mediaToFrame(clip, m, 2, aspect, 0, 0);
+  ok(l <= 1e-6 && t <= 1e-6 && s1 > 1, '臉在角落：不露黑邊');
+}
 
 if (fails) {
   console.log(`\n${fails} 個失敗`);

@@ -14,6 +14,7 @@ import { applyMediaBatch, planMediaBatch } from '../engine/mediaBatch';
 import { TEXT_PRESETS } from '../engine/text';
 import { moveKey } from './sortKeys';
 import { setClipMask, setEffectMask } from './MaskPanel';
+import { dropToAutoEdit } from './AeSegments';
 import { confirmDialog, revealSelection, toast, useDrag, useSnapLine, type DragPayload, type DragState, type DropTarget } from './uiStore';
 
 const SNAP_PX = 10;
@@ -73,6 +74,11 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
   const clipEl = els.find((e) => e.dataset.key?.startsWith('clip:'));
   const clip = clipEl ? s.clips.find((c) => c.id === clipEl.dataset.key!.slice(5)) : undefined;
 
+  // 拖到自動剪輯分頁：加入指定片段（影片 / 圖片）
+  if ((payload.kind === 'media' || payload.kind === 'mediaBatch') && els.some((e) => e.classList?.contains('ae-segs-drop'))) {
+    const ids = payload.kind === 'media' ? [payload.id] : payload.ids;
+    return ids.some((id) => { const m = s.media.find((x) => x.id === id); return mediaUsable(m) && m.kind !== 'audio'; }) ? { kind: 'autoEdit', whole: alt } : null;
+  }
   // 拖到「屬性」面板：套用到目前選取的項目（特效 → 片段特效 / 取代特效軌上的特效；轉場 → 進場；變速 → 時間重映射）
   const insp = els.find((e) => e.classList?.contains('panel-inspector'));
   document.querySelector('.panel-inspector')?.classList.toggle('drop-here', false);
@@ -248,6 +254,10 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
   const s = useStore.getState();
   if (!target) {
     if (files) await importMany(files);
+    return;
+  }
+  if (target.kind === 'autoEdit') {
+    if (payload.kind === 'media' || payload.kind === 'mediaBatch') dropToAutoEdit(payload.kind === 'media' ? [payload.id] : payload.ids, target.whole);
     return;
   }
   if (payload.kind === 'mediaBatch') {

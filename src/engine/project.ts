@@ -16,10 +16,13 @@ let dbp: Promise<IDBDatabase> | null = null;
 
 function db() {
   dbp ??= new Promise((res, rej) => {
-    const r = indexedDB.open(DB_NAME, 1);
+    const r = indexedDB.open(DB_NAME, 2);
     r.onupgradeneeded = () => {
-      r.result.createObjectStore('media');
-      r.result.createObjectStore('project');
+      const have = r.result.objectStoreNames;
+      if (!have.contains('media')) r.result.createObjectStore('media');
+      if (!have.contains('project')) r.result.createObjectStore('project');
+      // 預覽代理檔（proxy.ts）：key = 素材 id
+      if (!have.contains('proxy')) r.result.createObjectStore('proxy');
     };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
@@ -46,6 +49,9 @@ async function run<T>(store: string, mode: IDBTransactionMode, fn: (os: IDBObjec
 export const saveMediaBlob = (id: string, blob: Blob) => run('media', 'readwrite', (os) => os.put(blob, id));
 export const deleteMediaBlob = (id: string) => run('media', 'readwrite', (os) => os.delete(id)).catch(() => {});
 export const loadMediaBlob = (id: string) => run<Blob | undefined>('media', 'readonly', (os) => os.get(id));
+export const saveProxyBlob = (id: string, blob: Blob) => run('proxy', 'readwrite', (os) => os.put(blob, id));
+export const deleteProxyBlob = (id: string) => run('proxy', 'readwrite', (os) => os.delete(id)).catch(() => {});
+export const loadProxyBlob = (id: string) => run<Blob | undefined>('proxy', 'readonly', (os) => os.get(id));
 
 interface Saved {
   media: Media[];
@@ -147,6 +153,8 @@ async function loadProject() {
         const keep = new Set(data.media.map((m) => m.id));
         const keys = await run<IDBValidKey[]>('media', 'readonly', (os) => os.getAllKeys());
         for (const id of keys) if (typeof id === 'string' && !keep.has(id)) await deleteMediaBlob(id);
+        const pk = await run<IDBValidKey[]>('proxy', 'readonly', (os) => os.getAllKeys());
+        for (const id of pk) if (typeof id === 'string' && !keep.has(id)) await deleteProxyBlob(id);
       } catch (e) { console.warn($t('素材清理失敗'), e); }
       const media: Media[] = [];
       const referenced = new Set([...(data.clips ?? []), ...(data.audios ?? [])].map((c) => c.mediaId));
@@ -203,6 +211,7 @@ export async function newProject() {
   });
   resetHistory();
   await run('media', 'readwrite', (os) => os.clear()).catch(() => {});
+  await run('proxy', 'readwrite', (os) => os.clear()).catch(() => {});
   await saveNow();
 }
 

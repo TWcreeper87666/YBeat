@@ -1405,7 +1405,17 @@ body.panning, body.panning * { cursor: grabbing !important; }
 .cue-text { width: 100%; resize: vertical; min-height: 30px; font-size: 14px; line-height: 1.4; }
 
 /* 自動剪輯面板：上面是常用的卡片，下面是收起的細節（沿用屬性面板的 .ec 列） */
-.auto-edit-panel { display: flex; flex-direction: column; gap: 8px; min-height: 100%; padding-bottom: 12px; }
+/* 分頁本身不捲動：上方工具列固定，下面的內容自己捲（寬的時候左右兩欄各自捲） */
+.auto-edit-panel { display: flex; flex-direction: column; gap: 8px; min-height: 0; overflow: hidden; container-type: inline-size; }
+.ae-cols { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; min-width: 0; padding-bottom: 12px; }
+.ae-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+/* 分頁夠寬：左右兩欄（左 = 音樂、素材；右 = 剪法），各自捲動 */
+@container (min-width: 760px) {
+  .ae-cols { flex-direction: row; overflow: hidden; padding: 0 8px; gap: 10px; }
+  .ae-col { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 12px; }
+  .ae-col > .ae-card { margin: 0; }
+  .ae-col > .ae-more { margin-top: 0; border: 1px solid #ffffff0d; border-radius: 8px; overflow: hidden; }
+}
 .ae-bar { position: sticky; top: 0; z-index: 4; display: flex; align-items: center; gap: 6px; padding: 8px 10px; background: #15171d; border-bottom: 1px solid var(--line); }
 .ae-bar .btn { display: inline-flex; align-items: center; gap: 6px; }
 .ae-go { padding: 6px 18px; }
@@ -1454,6 +1464,8 @@ body.panning, body.panning * { cursor: grabbing !important; }
 .ae-handle:last-of-type { margin-left: -10px; }
 .ae-handle:active { cursor: grabbing; }
 .ae-card-head .switch { margin-left: auto; }
+.ae-fold { display: inline-flex; align-items: center; gap: 2px; cursor: pointer; user-select: none; }
+.ae-fold svg { align-self: center; }
 .ae-card.off .ae-card-head > span { color: var(--muted); }
 .ae-progress { margin: 0 8px; display: flex; flex-direction: column; gap: 5px; }
 .ae-progress-line { display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -1466,3 +1478,47 @@ body.panning, body.panning * { cursor: grabbing !important; }
 .ae-result span { flex: 1; min-width: 0; }
 .ae-result.ok { background: #29d3c214; color: var(--accent2); }
 .ae-result.err { background: #ff7d9314; color: #ff9aac; }
+/* 照內容長高（不被 .panel-host > * 壓成面板高度），工具列才能一直黏在頂端 */
+.panel-host:has(> .auto-edit-panel) { overflow: hidden; }
+.ae-curve-tools { flex-wrap: wrap; row-gap: 6px; }
+.ae-curve-tools .ae-knob > span { overflow: visible; }
+.seg.ae-grid4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.seg.ae-grid4 button { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* 自動剪輯：指定片段 */
+.ae-head-actions { display: inline-flex; align-items: baseline; gap: 8px; font-weight: 400; letter-spacing: 0; }
+.ae-segs { display: flex; flex-direction: column; gap: 2px; border-radius: 6px; }
+.ae-segs:empty { display: none; }
+.auto-edit-panel.drop-here { box-shadow: inset 0 0 0 2px var(--accent2); background: #29d3c20d; }
+.ae-seg { display: flex; align-items: center; gap: 6px; min-width: 0; padding: 2px 4px; font-size: 12px; border-radius: 4px; cursor: pointer; }
+.ae-seg:hover { background: #ffffff08; }
+.ae-seg.on { background: #29d3c214; }
+.ae-seg.dim { opacity: .45; }
+/* 自動剪輯：特效層 */
+.ae-layers { display: flex; flex-direction: column; }
+.ae-layer { display: flex; flex-direction: column; gap: 4px; padding: 6px 0; border-top: 1px solid #ffffff07; }
+.ae-layer:first-child { border-top: 0; }
+.ae-layer-sub { padding-left: 38px; }
+.ae-dim { opacity: .45; }
+.ae-seg input.ae-seg-name { height: 22px; padding: 0 6px; }
+.ae-seg-btns { display: inline-flex; flex: none; }
+.ae-seg:not(:hover) .ae-seg-btns .ec-icon { opacity: .45; }
+.ae-range-video { position: relative; }
+.ae-range-video canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; display: none; pointer-events: none; border-radius: 6px; background: #000; }
+.src-range { position: absolute; top: 0; bottom: 0; background: #ffffff40; }
+.ae-seg img { width: 32px; height: 18px; object-fit: cover; border-radius: 2px; flex: none; }
+.ae-seg-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ae-seg .ae-stat { flex: none; font-variant-numeric: tabular-nums; }
+.ae-range h3 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ae-range video { display: block; width: 100%; max-height: 50vh; background: #000; border-radius: 6px; cursor: pointer; }
+.ae-range .ae-stat { font-variant-numeric: tabular-nums; }
+.ae-range-bar { position: relative; height: 28px; border-radius: 4px; background: #111318; cursor: pointer; touch-action: none; }
+.ae-range-bar i { position: absolute; top: 0; bottom: 0; pointer-events: none; }
+.ae-range-bar i.other { background: #ffffff14; }
+.ae-range-bar i.sel { background: #29d3c233; box-shadow: inset 0 0 0 1px var(--accent2); }
+.ae-range-bar i.head { width: 2px; margin-left: -1px; background: #fff; }
+.ae-range-bar b { position: absolute; top: -3px; bottom: -3px; width: 8px; margin-left: -4px; border-radius: 3px; background: var(--accent2); cursor: ew-resize; }
+
+/* 素材卡片：預覽代理檔產生中 */
+.lib-thumb .proxy-bar { position: absolute; left: 0; right: 0; bottom: 0; height: 3px; background: #0006; }
+.lib-thumb .proxy-bar i { display: block; height: 100%; background: var(--accent2); transition: width .3s linear; }

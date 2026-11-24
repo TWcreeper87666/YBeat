@@ -10,7 +10,7 @@ import { imagePart, streamTurn, ApiKeyError, type Part } from './gemini';
 import { useAiSettings } from './assistant';
 import { DEFAULT_MODEL } from './gemini';
 
-export interface Direction { roles: SectionKind[]; weight: number; highlights: number[]; note: string }
+export interface Direction { roles: SectionKind[]; weight: number; highlights: number[]; note: string; pop?: number }
 
 const KINDS: SectionKind[] = ['intro', 'build', 'drop', 'body', 'outro'];
 /** 每個素材最多幾張圖（素材很多時降到 1 張，控制請求大小） */
@@ -19,9 +19,10 @@ const MAX_IMAGES = 48;
 const SYSTEM = `You are the director of a short music video that is cut automatically to the beat.
 You get the song's sections and a few frames from each media file. Decide how to use each file.
 Reply with ONLY a JSON object, no prose, no code fence:
-{"media":[{"id":"<id>","roles":["intro"|"build"|"drop"|"body"|"outro", ...],"weight":0..1,"highlights":[seconds, ...],"note":"<at most 8 words>"}]}
+{"media":[{"id":"<id>","roles":["intro"|"build"|"drop"|"body"|"outro", ...],"weight":0..1,"highlights":[seconds, ...],"pop":0..1,"note":"<at most 8 words>"}]}
 - roles: the sections the file suits. intro/outro = calm, establishing, wide or ending shots; build = rising tension; drop = the most striking, energetic, impactful shots; body = everything else that is fine.
 - weight: how much to use it. 1 = hero shot, 0.5 = normal, 0.1 = filler, 0 = do not use (blurry, broken, black, off-topic, near-duplicate of a better one).
+- pop: for images only, how good the image is for a "subject pop" (the main subject is cut out and grows on the beat before the full image appears): 1 = one clear, striking subject (person, animal, product) separated from the background; 0 = no single subject, busy scene, text, landscape.
 - highlights: for videos only, timestamps (seconds, within the file) of the best moments, using the frame times given. Empty if nothing stands out.
 - Include every id exactly once. Follow the user's instruction if one is given.`;
 
@@ -31,7 +32,7 @@ export const directionKey = (music: MusicInfo, media: Media[], note: string) =>
   `${media.map((m) => m.id).join(',')}|${music.sections.map((s) => `${s.b0}-${s.b1}${s.kind}`).join(',')}|${note.trim()}`;
 export const cachedDirection = (key: string) => cache.get(key);
 
-export async function directMedia(music: MusicInfo, media: Media[], sampled: Map<string, Sampled>, note: string, signal?: AbortSignal): Promise<Map<string, Direction>> {
+export async function directMedia(music: MusicInfo, media: Media[], sampled: Map<string, Sampled>, note: string, signal?: AbortSignal, onRetry?: (attempt: number, waitSec: number) => void): Promise<Map<string, Direction>> {
   const key = directionKey(music, media, note);
   const hit = cache.get(key);
   if (hit) return hit;
@@ -48,7 +49,7 @@ export async function directMedia(music: MusicInfo, media: Media[], sampled: Map
     parts.push({ text: `\nid=${m.id} ${m.kind}${m.kind === 'video' ? ` ${m.duration.toFixed(1)}s, frames at ${pick.map((x) => `${x.t.toFixed(1)}s`).join(', ')}` : ''} name="${m.name}"` });
     for (const x of pick) parts.push(imagePart(x.shot));
   }
-  const r = await streamTurn({ key: ai.key, model: ai.model || DEFAULT_MODEL, system: SYSTEM, turns: [{ role: 'user', text: '', parts }], signal });
+  const r = await streamTurn({ key: ai.key, model: ai.model || DEFAULT_MODEL, system: SYSTEM, turns: [{ role: 'user', text: '', parts }], signal, onRetry: (n, w) => onRetry?.(n, w) });
   const out = parseDirection(r.text, media);
   cache.set(key, out);
   return out;
@@ -68,7 +69,8 @@ export function parseDirection(text: string, media: { id: string; kind: string; 
     const roles = (Array.isArray(x.roles) ? x.roles : []).map(String).filter((k): k is SectionKind => KINDS.includes(k as SectionKind));
     const w = typeof x.weight === 'number' && Number.isFinite(x.weight) ? Math.min(1, Math.max(0, x.weight)) : 0.5;
     const hl = m.kind === 'video' ? (Array.isArray(x.highlights) ? x.highlights : []).filter((t): t is number => typeof t === 'number' && t >= 0 && t <= m.duration) : [];
-    out.set(m.id, { roles, weight: w, highlights: hl, note: typeof x.note === 'string' ? x.note.slice(0, 80) : '' });
+    const pop = m.kind === 'image' && typeof x.pop === 'number' && Number.isFinite(x.pop) ? Math.min(1, Math.max(0, x.pop)) : undefined;
+    out.set(m.id, { roles, weight: w, highlights: hl, note: typeof x.note === 'string' ? x.note.slice(0, 80) : '', ...(pop !== undefined ? { pop } : {}) });
   }
   return out;
 }

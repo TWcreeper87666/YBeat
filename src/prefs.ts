@@ -32,15 +32,17 @@ interface Prefs {
   transDur: number;
   /** 專案有變更就自動存檔（關掉 = 只有 Ctrl+S 才存） */
   autosave: boolean;
+  /** 預覽代理檔（proxy.ts）：關鍵影格很稀的影片，預覽改用背景產生的小副本 */
+  proxy: boolean;
   textStyles: UserTextStyle[];
   fxCombos: FxCombo[];
   set(p: Partial<Omit<Prefs, 'set'>>): void;
 }
 
 export const usePrefs = create<Prefs>()(
-  persist((set) => ({ stillDur: 2, transDur: 0.4, autosave: true, textStyles: [], fxCombos: [], set: (p) => set(p) }), {
+  persist((set) => ({ stillDur: 2, transDur: 0.4, autosave: true, proxy: true, textStyles: [], fxCombos: [], set: (p) => set(p) }), {
     name: 'ybeat-prefs',
-    partialize: (s) => ({ stillDur: s.stillDur, transDur: s.transDur, autosave: s.autosave, textStyles: s.textStyles, fxCombos: s.fxCombos }),
+    partialize: (s) => ({ stillDur: s.stillDur, transDur: s.transDur, autosave: s.autosave, proxy: s.proxy, textStyles: s.textStyles, fxCombos: s.fxCombos }),
   }),
 );
 

@@ -416,6 +416,51 @@ vec4 effect(vec2 uv) {
 }
 `;
 
+const matteOutline = `// 主體描邊（去背用）：依透明度找主體邊緣，在外圍畫一圈線 / 光暈；透明的地方保持透明
+// 一般描邊（Outline）看亮度、會把整個畫面填滿，套在去背的片段上請用這個
+// @param width: float = 6 (1..30) "粗細（px）"
+// @param lineColor: color = #ffffff "顏色"
+// @param glow: float = 0.8 (0..2) "光暈"
+// @param intensity: float = 1 (0..2) "強度"
+// @param pulse: bool = false "隨進度淡出"
+vec4 effect(vec2 uv) {
+  vec4 c = tex(uv);
+  vec2 px = 1.0 / u_resolution;
+  float ringA = 0.0;
+  float haloA = 0.0;
+  for (int i = 0; i < 16; i++) {
+    float ang = float(i) * 0.39269908;
+    vec2 d = vec2(cos(ang), sin(ang)) * px;
+    ringA = max(ringA, tex(uv + d * width).a);
+    haloA += tex(uv + d * width * 2.5).a;
+  }
+  haloA /= 16.0;
+  float k = intensity * (pulse ? 1.0 - u_progress : 1.0);
+  float ring = clamp(ringA - c.a, 0.0, 1.0);
+  float halo = clamp(haloA * glow - c.a, 0.0, 1.0) * 0.6;
+  float a = clamp(max(ring, halo) * k, 0.0, 1.0);
+  // premultiplied：線畫在主體後面（只補透明的部分）
+  return vec4(c.rgb + lineColor * a * (1.0 - c.a), c.a + a * (1.0 - c.a));
+}
+`;
+
+const steadyBlur = `// 模糊（持續）：整段保持模糊，透明度跟著原畫面（去背的片段也能用）
+// @param amount: float = 10 (0..40) "模糊（px）"
+vec4 effect(vec2 uv) {
+  vec2 px = amount / u_resolution / 3.0;
+  vec4 acc = vec4(0.0);
+  float w = 0.0;
+  for (int x = -3; x <= 3; x++) {
+    for (int y = -3; y <= 3; y++) {
+      float k = exp(-float(x * x + y * y) / 8.0);
+      acc += tex(uv + vec2(float(x), float(y)) * px) * k;
+      w += k;
+    }
+  }
+  return acc / w;
+}
+`;
+
 // ───────── 轉場 ─────────
 
 const pixelTr = `// 像素化轉場
@@ -637,6 +682,8 @@ export const EXTRA_MODULES: Module[] = [
   mk('fx-lightleak', 'effect', '漏光 Light Leak', lightLeak, 2),
   mk('fx-grain', 'effect', '底片顆粒 Grain', grainFx),
   mk('fx-outline', 'effect', '描邊 Outline', outline),
+  mk('fx-matteoutline', 'effect', '主體描邊 Subject Outline', matteOutline),
+  mk('fx-blur', 'effect', '模糊 Blur', steadyBlur),
   mk('fx-chromakey', 'effect', '去背 Chroma Key', chromaKey),
   mk(CLIP_MASK_ID, 'effect', '片段遮罩 Clip Mask', clipMask),
   mk('tr-pixelate', 'transition', '像素化 Pixelate', pixelTr),

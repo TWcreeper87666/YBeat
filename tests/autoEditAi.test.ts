@@ -5,7 +5,7 @@ console.warn = () => {};
 import { useStore, type Media } from '../src/store';
 import { resetHistory } from '../src/engine/history';
 import { applyProposals, isEditTool, runProjectTool, type Proposal } from '../src/ai/projectTools';
-import { useAutoEdit } from '../src/engine/autoEditSettings';
+import { deleteMyStyle, renameMyStyle, saveMyStyle, useAutoEdit } from '../src/engine/autoEditSettings';
 import { RECIPES } from '../src/engine/autoEdit';
 import { usePrefs } from '../src/prefs';
 import { parseDirection } from '../src/ai/director';
@@ -29,21 +29,49 @@ useAutoEdit.getState().reset();
 ok(!isEditTool('get_auto_edit') && isEditTool('set_auto_edit'), 'get 是讀取、set 是修改');
 const g = run('get_auto_edit', {});
 ok(g.style === 'rhythm' && g.media.length === 2 && g.media.every((m: any) => m.on), '讀到預設設定與素材');
-ok(g.transitions.some((t: any) => t.id === 'tr-crossfade' && typeof t.strength === 'number' && t.on), '轉場附強度');
-ok(g.accents.some((a: any) => a.id === 'combo:x' && a.type === 'hit' && a.on), '我的組合列在點綴裡');
-ok(g.accents.some((a: any) => a.id === 'fx-chromakey' && !a.on), '工具型特效預設關');
+ok(g.transitions.some((t: any) => t.id === 'tr-crossfade' && typeof t.strength === 'number' && t.weight > 0), '轉場附強度與權重');
+ok(g.effects.some((a: any) => a.id === 'combo:x') && g.fx_layers.length > 0, '列出可用特效（含我的組合）與特效層');
 
-// 提議：風格 + 數字覆寫 + 只用某分類的轉場 + 關掉 combo
+// 提議：風格 + 數字覆寫 + 只用某分類的轉場 + 換特效層
 const list: Proposal[] = [];
-const r = run('set_auto_edit', { style: 'hype', beats_per_shot: { high: 2 }, transitions: { only: ['category:basic'] }, accents: { disable: ['combos'] }, drop_hit: 'none' }, list);
+const r = run('set_auto_edit', { style: 'hype', beats_per_shot: { high: 2 }, transitions: { only: ['category:basic'] }, fx_layers: [{ effect: 'combo:x', when: 'cut', levels: [2], chance: 0.5 }], density: 1.5 }, list);
 ok(r.ok && list.length === 1 && list[0].op.op === 'auto_edit', `提議成功：${r.proposed}`);
 ok(useAutoEdit.getState().recipe === 'rhythm', '按套用前不會改');
 applyProposals(list);
 const st = useAutoEdit.getState();
 ok(st.recipe === 'custom' && st.params.beatsPerShot[2] === 2 && st.params.beatsPerShot[0] === RECIPES.hype.beatsPerShot[0], '風格先套預設、再覆寫數字 → 自訂');
 const after = run('get_auto_edit', {});
-ok(after.transitions.filter((t: any) => t.on).every((t: any) => t.cat === 'basic') && after.transitions.some((t: any) => t.on), '只留基本類轉場');
-ok(st.fxOff.includes('combo:x') && st.dropHit === null, '關掉組合、drop 強調關掉');
+ok(after.transitions.filter((t: any) => t.weight > 0).every((t: any) => t.cat === 'basic') && after.transitions.some((t: any) => t.weight > 0), '只留基本類轉場');
+ok(st.rules.length === 1 && st.rules[0].moduleId === 'combo:x' && st.rules[0].when === 'cut' && st.rules[0].chance === 0.5 && st.density === 1.5, '特效層換掉、密度');
+ok('error' in run('set_auto_edit', { fx_layers: [{ effect: 'fx-nope', when: 'beat' }] }), '不存在的特效 → 錯誤');
+const sv: Proposal[] = [];
+run('set_auto_edit', { style: 'velocity' }, sv);
+applyProposals(sv);
+ok(useAutoEdit.getState().recipe === 'velocity' && useAutoEdit.getState().rules.some((x) => x.moduleId === 'fx-zoompulse') && useAutoEdit.getState().speedsPer32 === 4, '選速度感：特效層、變速一起換');
+const tw: Proposal[] = [];
+run('set_auto_edit', { transition_weights: { 'tr-whip': 0 } }, tw);
+applyProposals(tw);
+ok(useAutoEdit.getState().trWeights['tr-whip'] === 0, '轉場權重');
+
+// 自己的風格
+{
+  saveMyStyle('我的');
+  const mine = useAutoEdit.getState().myStyles[0];
+  ok(!!mine && useAutoEdit.getState().recipe === `my:${mine.id}` && mine.trWeights['tr-whip'] === 0, '另存風格並選中');
+  saveMyStyle('我的');
+  ok(useAutoEdit.getState().myStyles.length === 1, '同名覆蓋');
+  const ms: Proposal[] = [];
+  run('set_auto_edit', { style: 'calm' }, ms);
+  run('set_auto_edit', { style: '我的' }, ms);
+  applyProposals(ms);
+  ok(useAutoEdit.getState().recipe === `my:${mine.id}` && run('get_auto_edit', {}).style === '我的', 'AI 可以選自己的風格');
+  renameMyStyle(mine.id, '改名');
+  ok(useAutoEdit.getState().myStyles[0].name === '改名', '改名');
+  useAutoEdit.getState().reset();
+  ok(useAutoEdit.getState().myStyles.length === 1, '重設不會清掉自己的風格');
+  deleteMyStyle(mine.id);
+  ok(!useAutoEdit.getState().myStyles.length, '刪除');
+}
 
 // 錯誤
 ok('error' in run('set_auto_edit', { transitions: { only: ['tr-nope'] } }), '不存在的 id → 錯誤');

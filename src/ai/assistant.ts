@@ -5,7 +5,7 @@ import { $t } from '../i18n';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { ModuleKind } from '../store';
-import { ApiKeyError, BlockedError, RateLimitError, imagePart, listModels, pickDefaultModel, streamTurn, type ModelInfo, type Turn } from './gemini';
+import { ApiKeyError, BlockedError, BusyError, RateLimitError, imagePart, listModels, pickDefaultModel, streamTurn, type ModelInfo, type Turn } from './gemini';
 import { moduleShots, previewShot } from './frames';
 import { parseDuration } from '../engine/params';
 import { chatSystem, moduleSystem, withCustom } from './prompt';
@@ -57,12 +57,13 @@ export async function refreshModels(key = useAiSettings.getState().key): Promise
 
 // ───────────── 錯誤 ─────────────
 
-export interface AiError { kind: 'key' | 'rate' | 'blocked' | 'network' | 'other'; message: string; retryAfter?: number | null }
+export interface AiError { kind: 'key' | 'rate' | 'blocked' | 'network' | 'busy' | 'other'; message: string; retryAfter?: number | null }
 
 export function toAiError(e: unknown): AiError {
   if (e instanceof RateLimitError) return { kind: 'rate', message: e.message, retryAfter: e.retryAfter };
   if (e instanceof ApiKeyError) return { kind: 'key', message: e.message };
   if (e instanceof BlockedError) return { kind: 'blocked', message: e.message };
+  if (e instanceof BusyError) return { kind: 'busy', message: e.message };
   if (e instanceof TypeError) return { kind: 'network', message: e.message };
   return { kind: 'other', message: String((e as Error)?.message ?? e) };
 }
@@ -74,6 +75,7 @@ export function aiErrorText(e: AiError): string {
   if (e.kind === 'rate') return e.retryAfter ? $t('請求太頻繁，{0} 秒後再試', e.retryAfter) : $t('已達額度上限');
   if (e.kind === 'blocked') return $t('回覆被安全機制擋下');
   if (e.kind === 'network') return $t('無法連線');
+  if (e.kind === 'busy') return $t('AI 伺服器忙碌，已重試 4 次，請稍後再試');
   return e.message.slice(0, 120);
 }
 
@@ -141,6 +143,8 @@ async function runWithFixes(o: {
       key, model, system: o.system, turns: [...o.turns, ...added], signal: o.signal,
       tools, toolMode: rounds < MAX_TOOL_ROUNDS ? 'AUTO' : 'NONE',
       onText: o.onText && ((t) => o.onText!(join(before, t))),
+      // 伺服器忙碌、自動重試中：先在回覆的位置顯示狀態（收到回覆就會蓋掉）
+      onRetry: o.onText && ((n, wait) => o.onText!(join(before, $t('AI 忙碌，{0} 秒後重試（第 {1} 次）', wait, n)))),
     });
     if (r.calls.length && rounds < MAX_TOOL_ROUNDS) {
       rounds++;

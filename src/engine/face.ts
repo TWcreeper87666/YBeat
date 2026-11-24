@@ -124,6 +124,16 @@ function infer(rgba: Uint8ClampedArray, inW: number, inH: number, imgW: number, 
   });
 }
 
+/** 單張畫面偵測臉（不進快取；自動剪輯分析素材時找有人的畫面用）；w × h = 畫面大小 */
+export function detectFaces(src: CanvasImageSource, w: number, h: number): Promise<Face[]> {
+  const box = inputBox(w, h);
+  const g = new OffscreenCanvas(box.w, box.h).getContext('2d', { willReadFrequently: true })!;
+  g.fillStyle = '#000';
+  g.fillRect(0, 0, box.w, box.h);
+  g.drawImage(src, 0, 0, box.dw, box.dh);
+  return infer(g.getImageData(0, 0, box.w, box.h).data, box.w, box.h, box.dw, box.dh);
+}
+
 /** 偵測用的畫布：INPUT × INPUT，素材保持比例畫在左上角 dw × dh */
 export function inputBox(w: number, h: number) {
   const k = INPUT / Math.max(w || 1, h || 1);

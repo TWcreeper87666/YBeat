@@ -8,8 +8,28 @@ import { fxLevel } from './tracks';
 
 /** 每幾拍觸發一次：0.5 = 每半拍、4 = 每小節（以重拍對齊） */
 export type BeatEvery = 0.5 | 1 | 2 | 4;
-/** cut：tracks = 看哪幾條影片軌的剪接點（沒有 = 這條特效軌下面的所有影片軌） */
-export type FxTrigger = { kind: 'beat'; every: BeatEvery } | { kind: 'cut'; tracks?: number[] };
+/**
+ * cut：tracks = 看哪幾條影片軌的剪接點（沒有 = 這條特效軌下面的所有影片軌）。
+ * chance：只在挑中的觸發點播（0..1，沒有 = 每個都播）；seed 決定挑哪些，同一個 seed 每次都挑一樣的。
+ */
+export type FxTrigger =
+  | { kind: 'beat'; every: BeatEvery; chance?: number; seed?: number }
+  | { kind: 'cut'; tracks?: number[]; chance?: number; seed?: number };
+
+/** 有設機率（< 1） */
+export const hasChance = (t?: FxTrigger): t is FxTrigger & { chance: number } => t?.chance !== undefined && t.chance < 1;
+
+/** 觸發點的雜湊鍵：節拍用拍號（不受節拍提前影響）、剪接點用時間（改了別的片段也不會變） */
+const pointKey = (t: FxTrigger, pts: number[], i: number) => (t.kind === 'beat' ? i : Math.round(pts[i] * 1000));
+
+/** 這個觸發點有沒有被挑中（0..1 的雜湊 < chance） */
+export function picked(t: FxTrigger, pts: number[], i: number): boolean {
+  if (!hasChance(t)) return true;
+  let h = (Math.imul((t.seed ?? 0) ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(pointKey(t, pts, i), 0xc2b2ae35)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x7feb352d) >>> 0;
+  h = Math.imul(h ^ (h >>> 15), 0x846ca68b) >>> 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296 < t.chance;
+}
 
 /** 剪接點觸發看哪幾條影片軌 */
 export function cutTracks(fx: { track: number; trigger?: FxTrigger }, tracks: Tracks): number[] {
@@ -61,10 +81,31 @@ export function triggerWindow(pts: number[], start: number, end: number, t: numb
   return { t0, d: Math.max(1e-3, t1 - t0) };
 }
 
-/** 方塊裡所有的觸發點（含開頭；時間軸上畫細線用） */
-export function triggerMarks(pts: number[], start: number, end: number): number[] {
+/**
+ * 有機率的觸發：t 落在哪一次挑中的觸發；沒挑中的觸發點到下一個觸發點之間不作用（null）。
+ * 每次最長到下一個原本的觸發點，跳過的點不會讓特效播得比較慢。方塊開頭不算觸發點。
+ */
+export function chanceWindow(trigger: FxTrigger, pts: number[], start: number, end: number, t: number): { t0: number; d: number } | null {
+  const i = lowerBound(pts, t + EPS) - 1;
+  if (i < 0 || pts[i] < start - EPS || !picked(trigger, pts, i)) return null;
+  const t1 = Math.min(i + 1 < pts.length ? pts[i + 1] : end, end);
+  return t < t1 ? { t0: pts[i], d: Math.max(1e-3, t1 - pts[i]) } : null;
+}
+
+/**
+ * 衝擊特效（@hit）的一次觸發最長播 len 秒（模組的 @duration），播完就停到下一次觸發；
+ * 拍子比 len 短就照拍子。不然每拍觸發的 Shake 會一路晃到下一拍、失去衝擊感。
+ */
+export function hitWindow(w: { t0: number; d: number } | null, t: number, len: number): { t0: number; d: number } | null {
+  if (!w || !(len > 0) || w.d <= len) return w;
+  return t - w.t0 < len ? { t0: w.t0, d: len } : null;
+}
+
+/** 方塊裡所有的觸發點（含開頭；有機率 = 只有挑中的；時間軸上畫細線用） */
+export function triggerMarks(pts: number[], start: number, end: number, trigger?: FxTrigger): number[] {
   const out: number[] = [];
-  for (let i = lowerBound(pts, start + EPS); i < pts.length && pts[i] < end - EPS; i++) out.push(pts[i]);
+  const chance = hasChance(trigger);
+  for (let i = lowerBound(pts, (chance ? start - EPS : start + EPS)); i < pts.length && pts[i] < end - EPS; i++) if (!chance || picked(trigger, pts, i)) out.push(pts[i]);
   return out;
 }
 

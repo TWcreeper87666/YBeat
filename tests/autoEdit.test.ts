@@ -2,6 +2,7 @@ import { DEFAULT_OPTIONS, planEdit, planStats, RECIPES, type PlanMedia, type Pla
 import type { MusicInfo } from '../src/engine/musicAnalysis';
 import type { MediaInfo } from '../src/engine/mediaAnalysis';
 import { SPEED_VARIANTS } from '../src/engine/speedRamp';
+import type { PopVariant } from '../src/engine/subjectPop';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -112,6 +113,12 @@ ok(popped.shots.filter((s) => s.b0 < 64 && s.b1 > 60).every((s) => s.mediaId !==
 ok(popped.overlays.filter((o) => o.b0 < 64 && o.b1 > 60).length === 0 &&
   popped.overlays.some((o) => o.b0 === 64 && o.moduleId === 'fx-flash'), 'pop window clears accents but keeps drop hit');
 ok(popped.pops.every((p, i) => i === 0 || p.b1 - popped.pops[i - 1].b1 >= 16), 'pop reveals spaced sixteen beats');
+{
+  const three: PlanMedia[] = [...popMedia.filter((m) => m.id !== 'subject'),
+    ...['s1', 's2', 's3'].map((id) => ({ id, kind: 'image' as const, duration: 0, pop: { ok: true, centered: true, cx: 0, cy: 0 } }))];
+  const multi = planEdit({ ...input, media: three, options: popOptions });
+  ok(multi.pops.length >= 2 && new Set(multi.pops.map((p) => p.mediaId)).size === multi.pops.length, `每次主體跳出換一張圖：${multi.pops.map((p) => p.mediaId)}`);
+}
 const noPops = planEdit({ ...input, options: options({ pops: { variants: [], per32: 4 } }) });
 ok(plan.pops.length === 0 && noPops.pops.length === 0 && JSON.stringify(plan.shots) === JSON.stringify(noPops.shots), 'disabled pops preserve shots');
 const flyOnly = planEdit({ ...input, media: popMedia, options: options({ pops: { variants: ['fly'], per32: 4 } }) });
@@ -121,6 +128,63 @@ const offCentre = planEdit({ ...input, media: [{ ...popMedia[0], pop: { ok: true
 ok(offCentre.pops.length === 0, 'off centre media rejects step and shake');
 ok(JSON.stringify(popped) === JSON.stringify(planEdit({ ...input, media: popMedia, options: popOptions })), 'pops deterministic');
 
+const popImages: PlanMedia[] = [
+  { id: 'A', kind: 'image', duration: 0, pop: { ok: true, centered: true, cx: 0.1, cy: 0 } },
+  { id: 'B', kind: 'image', duration: 0, pop: { ok: false, centered: false, cx: 0, cy: 0 } },
+  { id: 'base', kind: 'video', duration: 60 },
+];
+const variantPlan = (variants: PopVariant[],
+  mediaItems = popImages, text?: string) => planEdit({ ...input, media: mediaItems,
+    options: options({ pops: { variants, per32: 4, text } }) });
+const crossPlan = variantPlan(['crossShot']);
+ok(crossPlan.pops.length > 0 && crossPlan.pops.every((p) => p.revealMediaId === 'B' && p.mediaId === 'A' &&
+  crossPlan.shots.some((shot) => shot.b0 === p.b1 && shot.mediaId === 'B') &&
+  crossPlan.shots.filter((shot) => shot.b0 < p.b1 && shot.b1 > p.b0)
+    .every((shot) => shot.mediaId !== 'A' && shot.mediaId !== 'B')), 'crossShot 揭露 B 且窗口避開 A、B');
+ok(variantPlan(['textBehind'], popImages, '  ').pops.length === 0 &&
+  variantPlan(['textBehind'], popImages, '  主標  ').pops.every((p) => p.text === '主標'),
+  'textBehind 需要非空文字並去除空白');
+const offCentrePop = popImages.map((m) => m.id === 'A' ? { ...m, pop: { ...m.pop!, centered: false } } : m);
+for (const variant of ['step', 'shake', 'trail', 'grid', 'spin', 'halo'] as const) {
+  ok(variantPlan([variant], offCentrePop).pops.length === 0, `${variant} 只接受置中主體`);
+}
+for (const variant of ['mono', 'fly', 'crossShot', 'textBehind', 'dim', 'blur'] as const) {
+  ok(variantPlan([variant], offCentrePop, '標題').pops.length > 0, `${variant} 接受非置中主體`);
+}
+const suited: PlanMedia[] = [
+  { ...popImages[0], id: 'low', popSuit: 0 },
+  { ...popImages[0], id: 'high', popSuit: 1 },
+  popImages[2],
+];
+ok(variantPlan(['step'], suited).pops.every((p) => p.mediaId === 'high'), 'popSuit 零分不選主體');
+const rankedSuit = suited.map((m) => m.id === 'low' ? { ...m, popSuit: 0.1 } : m);
+ok(Array.from({ length: 20 }, (_, seed) => planEdit({ ...input, seed, media: rankedSuit,
+  options: options({ pops: { variants: ['step'], per32: 4 } }) })).every((p) =>
+    p.pops.find((pop) => pop.b1 === 64)?.mediaId === 'high'),
+  'popSuit 高分優先');
+ok(JSON.stringify(crossPlan) === JSON.stringify(variantPlan(['crossShot'])), '新種類規劃結果固定');
+ok(JSON.stringify(popped) === JSON.stringify(planEdit({ ...input, media: popMedia,
+  options: options({ pops: { variants: ['step'], per32: 4, text: undefined } }) })), '舊種類輸出維持一致');
+
+const tracedImages: PlanMedia[] = popImages.map((m) => m.id === 'A'
+  ? { ...m, pop: { ...m.pop!, path: 'M20 20L180 20L180 180Z' } } : m);
+for (const variant of ['silhouetteWindow', 'subjectHole'] as const) {
+  const traced = variantPlan([variant], tracedImages);
+  ok(traced.pops.length > 0 && traced.pops.every((p) => p.variant === variant && p.mediaId === 'A' &&
+    p.revealMediaId === 'B' && p.path === tracedImages[0].pop!.path && p.b1 - p.b0 === 4 &&
+    traced.shots.some((shot) => shot.b0 === p.b1 && shot.mediaId === 'B') &&
+    traced.shots.filter((shot) => shot.b0 < p.b1 && shot.b1 > p.b0)
+      .every((shot) => shot.mediaId !== 'A' && shot.mediaId !== 'B')),
+  `${variant} 揭露 B 且窗口避開 A、B`);
+  ok(variantPlan([variant]).pops.length === 0 &&
+    variantPlan([variant], [{ ...tracedImages[0], pop: { ...tracedImages[0].pop!, path: '  ' } },
+      tracedImages[1], tracedImages[2]]).pops.length === 0 &&
+    variantPlan([variant], [tracedImages[0], tracedImages[2]]).pops.length === 0,
+  `${variant} 需要非空路徑和第二張圖片`);
+  ok(JSON.stringify(traced) === JSON.stringify(variantPlan([variant], tracedImages)),
+    `${variant} 規劃結果固定`);
+}
+
 const speedRecipe: Recipe = { ...RECIPES.rhythm, beatsPerShot: [4, 4, 4], jitter: 0, minShotSec: 0.1, maxShotSec: 20 };
 const speedSettings = options({ speed: { variants: SPEED_VARIANTS, per32: 3.5, intensity: 0.7 } });
 const speedMedia: PlanMedia[] = [{ id: 'speedVideo', kind: 'video', duration: 80 }, { id: 'speedImage', kind: 'image', duration: 0 }];
@@ -129,8 +193,9 @@ const speedPlan = planEdit({ ...speedInput, options: speedSettings });
 const plainSpeedPlan = planEdit({ ...speedInput, options: options({}) });
 ok(JSON.stringify(plainSpeedPlan) === JSON.stringify(planEdit({ ...speedInput, options: options({ speed: undefined }) })) &&
   plainSpeedPlan.shots.every((s) => s.speed === undefined), 'disabled speed preserves existing plan');
-ok(speedPlan.shots.every((s, i) => s.mediaId === plainSpeedPlan.shots[i].mediaId && s.b0 === plainSpeedPlan.shots[i].b0 && s.b1 === plainSpeedPlan.shots[i].b1),
-  'speed decisions preserve shot order');
+ok(speedPlan.shots[0].b0 === 0 && speedPlan.shots.at(-1)?.b1 === 128 &&
+  speedPlan.shots.every((s, i) => i === 0 || s.b0 === speedPlan.shots[i - 1].b1),
+  'speed reservations preserve continuous coverage');
 const speedShots = speedPlan.shots.filter((s) => s.speed);
 ok(speedShots.length > 0 && speedShots.every((s) => speedMedia.find((m) => m.id === s.mediaId)?.kind === 'video' &&
   SPEED_VARIANTS.includes(s.speed!.variant)), 'speed only on videos with enabled variants');
@@ -150,6 +215,132 @@ const cutSpeed = planEdit({ ...speedInput, media: [{ ...speedMedia[0], info: cut
 ok(cutSpeed.shots.some((s) => s.speed) && cutSpeed.shots.filter((s) => s.speed).every((s) =>
   cutInfo.cuts.every((cut) => !(s.in + s.speed!.sourceMin < cut + 0.1 && s.in + s.speed!.sourceMax > cut - 0.1))),
   'analyzed speed windows avoid cuts');
+
+const reverseIds = ['rewindToCut', 'reverseForwardB', 'rewindReturn', 'beatBoomerang'];
+const reverseSettings = options({ speed: { variants: SPEED_VARIANTS, per32: 16, intensity: 0.8 } });
+const reversePlans = Array.from({ length: 30 }, (_, seed) => planEdit({ ...speedInput, seed, options: reverseSettings }));
+const reverseShots = reversePlans.flatMap((p) => p.shots.filter((s) => s.speed && reverseIds.includes(s.speed.variant))
+  .map((s) => ({ s, next: p.shots[p.shots.indexOf(s) + 1] })));
+const strong = new Set(['tr-whip', 'tr-zoomblur', 'tr-crashzoom', 'tr-flash', 'tr-rgbsplit', 'tr-glitch']);
+const boundary = (b: number) => music.drops.includes(b) || music.sections.some((section) => section.b0 === b || section.b1 === b);
+ok(reverseShots.length > 0, 'reverse variants are selectable');
+ok(reverseShots.every(({ s, next }) => {
+  const length = s.b1 - s.b0;
+  const level = music.level[s.b0];
+  if (s.speed!.variant === 'rewindToCut') return length >= 3 &&
+    (boundary(s.b1) && !next?.transition || strong.has(next?.transition?.moduleId ?? ''));
+  if (s.speed!.variant === 'reverseForwardB') return length >= 3 &&
+    (boundary(s.b0) || strong.has(s.transition?.moduleId ?? ''));
+  if (s.speed!.variant === 'rewindReturn') return level === 2 && length >= 4;
+  return level === 2 && length >= 2 && length <= 4;
+}), 'reverse variants follow shot rules');
+ok(reversePlans.every((p) => p.shots.filter((s) => s.speed).every((s) =>
+  s.in + s.speed!.sourceMin >= -1e-8 && s.in + s.speed!.sourceMax <= 80 - 0.02 + 1e-8)),
+  'reverse windows stay within video');
+const staticInfo: MediaInfo = { step: 0.5, duration: 80, motion: Array(160).fill(0.1), quality: Array(160).fill(1), cuts: [] };
+const staticPlans = Array.from({ length: 12 }, (_, seed) => planEdit({ ...speedInput, seed,
+  media: [{ id: 'speedVideo', kind: 'video', duration: 80, info: staticInfo }], options: reverseSettings }));
+ok(staticPlans.every((p) => p.shots.every((s) => !s.speed || !reverseIds.includes(s.speed.variant))),
+  'static footage excludes reverse');
+const phaseOneVariants = SPEED_VARIANTS.slice(0, 4);
+const phaseOneSettings = options({ speed: { variants: phaseOneVariants, per32: 16, intensity: 0.8 } });
+const phaseOnePlan = planEdit({ ...speedInput, options: phaseOneSettings });
+ok(phaseOnePlan.shots.every((s) => !s.speed || phaseOneVariants.includes(s.speed.variant)) &&
+  JSON.stringify(phaseOnePlan) === JSON.stringify(planEdit({ ...speedInput, options: phaseOneSettings })),
+  'phase one only remains deterministic');
+ok(JSON.stringify(reversePlans[0]) === JSON.stringify(planEdit({ ...speedInput, seed: 0, options: reverseSettings })),
+  'reverse planning deterministic');
+
+const reserveBeats = Array.from({ length: 84 }, (_, i) => ({ t: i * 0.5, down: i % 4 === 0 }));
+const reserveMusic: MusicInfo = {
+  energy: Array.from({ length: 84 }, (_, i) => i < 16 ? 0.2 : i < 28 ? 0.55 : i < 40 ? 0.7 : i < 68 ? 0.95 : 0.3),
+  level: Array.from({ length: 84 }, (_, i) => i < 16 || i >= 68 ? 0 : i < 40 ? 1 : 2),
+  sections: [
+    { b0: 0, b1: 16, energy: 0.2, kind: 'intro' },
+    { b0: 16, b1: 28, energy: 0.55, kind: 'body' },
+    { b0: 28, b1: 40, energy: 0.7, kind: 'build' },
+    { b0: 40, b1: 68, energy: 0.95, kind: 'drop' },
+    { b0: 68, b1: 84, energy: 0.3, kind: 'outro' },
+  ], drops: [36, 40], accents: [16, 28, 36, 40, 52, 68],
+};
+const longInfo: MediaInfo = { step: 0.5, duration: 90, motion: Array(180).fill(0.9),
+  quality: Array(180).fill(1), cuts: [] };
+const reserveMedia: PlanMedia[] = [
+  { id: 'v1', kind: 'video', duration: 90, info: longInfo },
+  { id: 'v2', kind: 'video', duration: 90, info: longInfo },
+  { id: 'pop', kind: 'image', duration: 0, pop: { ok: true, centered: true, cx: 0, cy: 0 } },
+];
+const reserveInput = { beats: reserveBeats, music: reserveMusic, media: reserveMedia, recipe: RECIPES.rhythm };
+const reserveBoundary = (b: number) => reserveMusic.drops.includes(b) ||
+  reserveMusic.sections.some((section) => section.b0 === b || section.b1 === b);
+for (const variant of ['rewindToCut', 'reverseForwardB', 'rewindReturn'] as const) {
+  const settings = options({ speed: { variants: [variant], per32: 6, intensity: 0.8 },
+    pops: { variants: ['step'], per32: 2 } });
+  const plans = Array.from({ length: 10 }, (_, seed) => planEdit({ ...reserveInput, seed, options: settings }));
+  const appearances = plans.filter((p) => p.shots.some((s) => s.speed?.variant === variant)).length;
+  ok(appearances >= 6, `${variant} appears in most seeds`);
+  ok(plans.every((p) => p.shots.filter((s) => s.speed?.variant === variant).every((s) => {
+    const item = reserveMedia.find((m) => m.id === s.mediaId)!;
+    const legal = item.kind === 'video' && s.in + s.speed!.sourceMin >= -1e-8 &&
+      s.in + s.speed!.sourceMax <= item.duration - 0.02 + 1e-8;
+    const clearPop = p.pops.every((pop) => !(s.b0 < pop.b1 && pop.b0 < s.b1) &&
+      !(s.b0 <= pop.b1 && pop.b1 < s.b1));
+    if (variant === 'rewindToCut') return legal && clearPop && s.b1 - s.b0 >= 3 && reserveBoundary(s.b1);
+    if (variant === 'reverseForwardB') return legal && clearPop && s.b1 - s.b0 === 3 && reserveBoundary(s.b0);
+    return legal && clearPop && s.b1 - s.b0 === 4 && reserveMusic.level[s.b0] === 2 && reserveBeats[s.b0].down;
+  })), `${variant} keeps its boundary, pop, and source window rules`);
+  ok(plans.every((p, seed) => JSON.stringify(p) === JSON.stringify(planEdit({ ...reserveInput, seed, options: settings }))),
+    `${variant} reservations deterministic`);
+  const still = { ...longInfo, motion: Array(180).fill(0.05) };
+  ok(Array.from({ length: 10 }, (_, seed) => planEdit({ ...reserveInput, seed, options: settings,
+    media: reserveMedia.slice(0, 2).map((m) => ({ ...m, info: still })) }))
+    .every((p) => p.shots.every((s) => s.speed?.variant !== variant)), `${variant} rejects static footage`);
+}
+const nonReverse = options({ speed: { variants: ['beatPulse', 'beatBoomerang'], per32: 6, intensity: 0.8 } });
+const noReverseBase = Array.from({ length: 10 }, (_, seed) => planEdit({ ...reserveInput, seed,
+  options: options({ ...nonReverse, speed: undefined }) }));
+ok(noReverseBase.every((p, seed) => {
+  const withSpeed = planEdit({ ...reserveInput, seed, options: nonReverse });
+  // 變速會改素材起點（in），比較切法與素材順序就好
+  const layout = (x: typeof p) => JSON.stringify(x.shots.map((s) => [s.b0, s.b1, s.mediaId]));
+  return layout(withSpeed) === layout(p);
+}), '沒開倒播類：鏡頭切法與素材順序跟不開變速一樣');
+
+const phaseTwoMedia: PlanMedia[] = [{ id: 'phaseTwoVideo', kind: 'video', duration: 100 }];
+const phaseTwoInput = { ...speedInput, media: phaseTwoMedia };
+const phaseTwoTransitions = options({ transitions: [{ id: 'tr-whip', strength: 0.8 }, { id: 'tr-push', strength: 0.6 }] });
+const phaseTwoRecipe: Recipe = { ...speedRecipe, transitionRate: 1, sectionTransitionRate: 1 };
+for (const variant of ['slowPocket', 'tapeStop', 'whooshRamp', 'beatStutter'] as const) {
+  const settings = options({ ...phaseTwoTransitions, transitions: variant === 'tapeStop' ? [] : phaseTwoTransitions.transitions,
+    speed: { variants: [variant], per32: 16, intensity: 0.8 } });
+  const request = { ...phaseTwoInput, recipe: phaseTwoRecipe, options: settings };
+  const plans = Array.from({ length: 24 }, (_, seed) => planEdit({ ...request, seed }));
+  const selected = plans.flatMap((p) => p.shots.map((shot, i) => ({ shot, next: p.shots[i + 1] }))
+    .filter(({ shot }) => shot.speed?.variant === variant));
+  ok(selected.length > 0, `${variant} is assigned`);
+  ok(selected.every(({ shot, next }) => {
+    const length = shot.b1 - shot.b0;
+    const legal = shot.in + shot.speed!.sourceMin >= -1e-8 &&
+      shot.in + shot.speed!.sourceMax <= phaseTwoMedia[0].duration - 0.02 + 1e-8;
+    if (variant === 'slowPocket') return legal && length >= 2 && music.level[shot.b0] === 1;
+    if (variant === 'tapeStop') return legal && length >= 1 && music.level[shot.b0] >= 1 && boundary(shot.b1);
+    if (variant === 'whooshRamp') return legal && music.level[shot.b0] >= 1 &&
+      ['tr-whip', 'tr-zoomblur', 'tr-crashzoom', 'tr-push', 'tr-spin'].includes(next?.transition?.moduleId ?? '');
+    return legal && length >= 2 && music.level[shot.b0] === 2;
+  }), `${variant} follows eligibility and source limits`);
+  ok(plans.every((p, seed) => JSON.stringify(p) === JSON.stringify(planEdit({ ...request, seed }))),
+    `${variant} deterministic`);
+}
+const stillStutter: MediaInfo = { step: 0.5, duration: 100, motion: Array(200).fill(0.1),
+  quality: Array(200).fill(1), cuts: [] };
+ok(Array.from({ length: 8 }, (_, seed) => planEdit({ ...phaseTwoInput, seed,
+  media: [{ ...phaseTwoMedia[0], info: stillStutter }],
+  options: options({ speed: { variants: ['beatStutter'], per32: 16, intensity: 1 } }) }))
+  .every((p) => p.shots.every((s) => s.speed?.variant !== 'beatStutter')),
+  'stutter rejects low motion when analysis exists');
+ok(JSON.stringify(planEdit({ ...phaseTwoInput, options: options({ speed: { variants: [], per32: 16, intensity: 1 } }) })) ===
+  JSON.stringify(planEdit({ ...phaseTwoInput, options: options({}) })),
+  'disabled phase two variants preserve output');
 
 const rotationMedia: PlanMedia[] = [
   { id: 'intro', kind: 'image', duration: 0, roles: ['intro'], weight: 1 },
