@@ -8,7 +8,7 @@ import { applyProposals, isEditTool, runProjectTool, type Proposal } from '../sr
 import { deleteMyStyle, renameMyStyle, saveMyStyle, useAutoEdit } from '../src/engine/autoEditSettings';
 import { RECIPES } from '../src/engine/autoEdit';
 import { usePrefs } from '../src/prefs';
-import { parseDirection } from '../src/ai/director';
+import { directorBatches, parseDirection } from '../src/ai/director';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -132,6 +132,33 @@ ok(d.get('i')!.weight === 0 && d.get('i')!.highlights.length === 0, '圖片沒�
 let threw = false;
 try { parseDirection('no json here', media); } catch { threw = true; }
 ok(threw, '沒有 JSON → 錯誤');
+
+// 導演分批：每批不超過上限，順序不變，單一素材超過上限自己一批
+{
+  const items = [{ id: 'a', n: 30 }, { id: 'b', n: 30 }, { id: 'c', n: 10 }, { id: 'd', n: 80 }, { id: 'e', n: 0 }];
+  const b = directorBatches(items, (x) => x.n, 60);
+  ok(JSON.stringify(b.map((l) => l.map((x) => x.id))) === '[["a","b"],["c"],["d"],["e"]]', `分批（${JSON.stringify(b.map((l) => l.map((x) => x.id)))}）`);
+}
+
+// 轉場權重用 [{ id, weight }]（Gemini 不支援對照表的 schema）
+{
+  const l: Proposal[] = [];
+  run('set_auto_edit', { transition_weights: [{ id: 'tr-whip', weight: 2.5 }] }, l);
+  applyProposals(l);
+  ok(useAutoEdit.getState().trWeights['tr-whip'] === 2.5, '轉場權重：陣列寫法');
+}
+
+// 要用 / 避開的範圍：放寬半個間隔、夾在影片長度內、合併重疊；圖片沒有範圍
+{
+  const vlen = media.find((m) => m.id === 'v')!.duration;
+  const r = '{"media":[{"id":"v","roles":["drop"],"weight":1,"use":[[2,4]],"avoid":[[6,6],[7,9],[vlen,999],"x"]},{"id":"i","roles":["intro"],"weight":1,"avoid":[[0,1]]}]}'.replace('vlen', String(vlen - 0.5));
+  const dd = parseDirection(r, media, new Map([['v', 2]]));
+  const v = dd.get('v')!;
+  ok(JSON.stringify(v.avoid.slice(0, 1)) === '[[5,10]]', `避開：單張放寬、重疊合併（${JSON.stringify(v.avoid)}）`);
+  ok(v.avoid.every(([, b]) => b <= vlen), '避開：不超過影片長度');
+  ok(JSON.stringify(v.use) === '[[1,5]]' && v.highlights.includes(1) && v.highlights.includes(4.5), '要用的範圍變成加分的時間點');
+  ok(dd.get('i')!.avoid.length === 0, '圖片沒有範圍');
+}
 
 if (fails) {
   console.log(`\n${fails} 個失敗`);

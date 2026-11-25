@@ -8,6 +8,7 @@ import { decodeRange } from './matteDecode';
 import { animFrameAt, animImage, animImageReady, type AnimImage } from './animImage';
 import { bridgeTrack, findGaps, padBox, pickTrack, smoothTrack, trackAt, type Face, type FaceSample, type Gap, type TrackPoint } from './faceTrack';
 import type { FaceReq, FaceRes } from './faceWorker';
+import { similarity, SFACE_DST } from './faceLead';
 import { Need, clipStill, sourceRange } from './jobNeed';
 import { TRACK_FPS, ensureBoxTrack, runPoints, trackKey, useBoxTracks } from './boxTrack';
 import type { Anchor } from './follow';
@@ -105,8 +106,8 @@ export function dropFaces(mediaId: string) {
 
 let worker: Worker | null = null;
 let seq = 0;
-const waiting = new Map<number, { res: (f: Face[]) => void; rej: (e: Error) => void }>();
-function infer(rgba: Uint8ClampedArray, inW: number, inH: number, imgW: number, imgH: number): Promise<Face[]> {
+const waiting = new Map<number, { res: (r: FaceRes) => void; rej: (e: Error) => void }>();
+function ask(req: FaceReq): Promise<FaceRes> {
   if (!worker) {
     worker = new Worker(new URL('./faceWorker.ts', import.meta.url), { type: 'module' });
     worker.onmessage = (e: MessageEvent<FaceRes>) => {
@@ -114,14 +115,34 @@ function infer(rgba: Uint8ClampedArray, inW: number, inH: number, imgW: number, 
       if (!w) return;
       waiting.delete(e.data.id);
       if ('error' in e.data) w.rej(new Error(e.data.error));
-      else w.res(e.data.faces);
+      else w.res(e.data);
     };
   }
-  const id = ++seq;
   return new Promise((res, rej) => {
-    waiting.set(id, { res, rej });
-    worker!.postMessage({ id, rgba, inW, inH, imgW, imgH, modelUrl: MODEL_URL } satisfies FaceReq, [rgba.buffer]);
+    waiting.set(req.id, { res, rej });
+    worker!.postMessage(req, [req.rgba.buffer]);
   });
+}
+async function infer(rgba: Uint8ClampedArray, inW: number, inH: number, imgW: number, imgH: number): Promise<Face[]> {
+  const r = await ask({ id: ++seq, rgba, inW, inH, imgW, imgH, modelUrl: MODEL_URL });
+  return 'faces' in r ? r.faces : [];
+}
+
+const SFACE_URL = `${import.meta.env.BASE_URL}models/face_recognition_sface_2021dec_int8.onnx`;
+/** 臉至少要這麼高（像素）才算特徵（太小的認不準） */
+export const EMBED_MIN_PX = 24;
+/**
+ * 臉的特徵（SFace，128 維）：用 5 個特徵點把臉對齊到 112 × 112 再算。
+ * kps = 特徵點在 src 上的像素座標（10 個數字）。
+ */
+export async function embedFace(src: CanvasImageSource, kps: number[]): Promise<number[]> {
+  const pts = Array.from({ length: 5 }, (_, i) => [kps[i * 2], kps[i * 2 + 1]] as [number, number]);
+  const g = new OffscreenCanvas(112, 112).getContext('2d', { willReadFrequently: true })!;
+  g.setTransform(...similarity(pts, SFACE_DST));
+  g.drawImage(src, 0, 0);
+  const r = await ask({ id: ++seq, rgba: g.getImageData(0, 0, 112, 112).data, modelUrl: SFACE_URL, embed: true });
+  if (!('emb' in r)) throw new Error('no embedding');
+  return r.emb;
 }
 
 /** 單張畫面偵測臉（不進快取；自動剪輯分析素材時找有人的畫面用）；w × h = 畫面大小 */
@@ -153,7 +174,8 @@ function setProgress(mediaId: string, done: number, total: number | null) {
 }
 
 function add(e: Entry, t: number, faces: Face[]) {
-  e.samples.set(slot(t), { t: +t.toFixed(4), faces });
+  // 特徵點只有主角辨識用，不存進追蹤的快取
+  e.samples.set(slot(t), { t: +t.toFixed(4), faces: faces.map(({ kps: _k, ...f }) => f) });
   e.track = null;
   e.dirty = true;
   bump();

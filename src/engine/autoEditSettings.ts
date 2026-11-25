@@ -60,7 +60,7 @@ export interface AutoEditSettings {
   /** 最近一次的音樂分析（面板的段落條、AI 讀設定用；重設不清掉） */
   analysis: { audioId: string; info: MusicInfo } | null;
   /** 最近一次 AI 導演的結果（面板顯示用；重設不清掉） */
-  direction: Record<string, { roles: SectionKind[]; weight: number; highlights: number[]; note: string; pop?: number }> | null;
+  direction: Record<string, { roles: SectionKind[]; weight: number; highlights: number[]; use?: [number, number][]; avoid?: [number, number][]; note: string; pop?: number }> | null;
 }
 export type StyleKey = RecipeId | 'custom' | `my:${string}`;
 /** 自己存的風格：鏡頭節奏、特效層、轉場權重、密度、強度 */

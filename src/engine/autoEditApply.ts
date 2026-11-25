@@ -18,10 +18,14 @@ import { CLIP_MASK_ID } from '../modules/extra';
 import { beatTimeF } from './speedRamp';
 import { ensureMatte, matteAt, MATTE_SIZE } from './matte';
 import type { Keyframe } from './keyframes';
-import { directMedia } from '../ai/director';
+import { directMedia, directorShots } from '../ai/director';
+import { countdown } from '../ai/gemini';
+import { freeRoom } from './mediaAnalysis';
+import { confidentLead, findLead, isLead, leadInfo, leadShare } from './faceLead';
+import { padBox } from './faceTrack';
 import { aiErrorText, toAiError, useAiSettings } from '../ai/assistant';
 export { useAutoEdit, type AutoEditSettings };
-import { fxGroup, intensityParams, transitionOpt } from './autoEditPools';
+import { AUDIO_DRIVE, fxGroup, intensityParams, transitionOpt } from './autoEditPools';
 import { fxCombo, usePrefs } from '../prefs';
 import { newKey } from './keyframes';
 import { fitSize } from './transform';
@@ -98,7 +102,12 @@ export async function analyzeSource(src: MusicSource): Promise<MusicInfo> {
 
 export function planFor(src: MusicSource, music: MusicInfo, media: Media[], recipe: Recipe, seed: number, options: PlanOptions = DEFAULT_OPTIONS, range?: [number, number], extra?: Map<string, Partial<PlanMedia>>): EditPlan {
   const n = src.beats.length;
-  const pm: PlanMedia[] = media.map((m) => ({ ...extra?.get(m.id), id: m.id, kind: m.kind === 'video' ? 'video' : 'image', duration: m.kind === 'video' ? m.duration : Infinity }));
+  const pm: PlanMedia[] = media.map((m) => {
+    const x = extra?.get(m.id);
+    // 影片的一格（主體跳出用）：編排時當成圖片
+    const video = m.kind === 'video' && !x?.popOnly;
+    return { ...x, id: m.id, kind: video ? 'video' : 'image', duration: video ? m.duration : Infinity };
+  });
   return planEdit({ beats: src.beats.map((b, i) => ({ t: src.time(i), down: b.down })), music, media: pm, recipe, seed, options, range: range ?? [0, n] });
 }
 
@@ -130,7 +139,9 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
     const sp = m.kind === 'video' && sh.speed && sh.in + sh.speed.sourceMin >= -1e-6 && sh.in + sh.speed.sourceMax <= m.duration - 0.02 + 1e-6 ? sh.speed : null;
     if (sp) inn = sh.in;
     const c = makeClip({ mediaId: m.srcId ?? m.id, start, duration, in: inn + (m.from ?? 0), volume: 0 });
-    if (sh.face) c.subject = { kind: 'face' };
+    // 有主角：從主角的臉開始追（框選目標），不會跟到同框的別人；沒有就一般的臉部追蹤
+    if (sh.anchor) c.subject = { kind: 'box', anchors: [{ t: +(sh.anchor.t + (m.kind === 'video' ? m.from ?? 0 : 0)).toFixed(4), box: padBox(sh.anchor) }] };
+    else if (sh.face) c.subject = { kind: 'face' };
     if (sh.face && sh.push) c.keys = facePush(sh.face, m, s.format.w / s.format.h, duration);
     if (sp) {
       const tb = (beat: number) => beatTimeF(T, beat) - start;
@@ -169,7 +180,7 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
     c.transitionIn = null;
   }
   for (const p of plan.pops ?? []) for (const l of expandPop(p, T)) {
-    const c = popClip(l, s, p);
+    const c = popClip(l, s, p, mediaOf);
     if (c) clips.push(c);
   }
   const effects: FxItem[] = [];
@@ -198,7 +209,10 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
     // 衝擊特效只打一下：方塊長度 = 模組的 @duration（不超過計畫的範圍）
     if (!trigger && isHitFx(mod)) duration = Math.min(duration, parseDuration(mod.code, 0.5));
     if (duration < 1 / 60) continue;
-    effects.push({ id: uid(), moduleId: o.moduleId, params: { ...(o.params ?? {}) }, start, duration, track, ...(trigger ? { trigger } : {}) });
+    // 跟著音樂音量動的參數（只聽音樂那一軌）
+    const ad = AUDIO_DRIVE[o.moduleId];
+    const audio = ad ? { [ad.param]: { source: 'level' as const, min: ad.min, max: ad.max, ...(src.audio ? { from: { audio: [src.audio.track] } } : {}) } } : undefined;
+    effects.push({ id: uid(), moduleId: o.moduleId, params: { ...(o.params ?? {}) }, start, duration, track, ...(trigger ? { trigger } : {}), ...(audio ? { audio } : {}) });
   }
   return { clips, effects };
 }
@@ -226,7 +240,7 @@ export function facePush(f: { x: number; y: number; h: number }, m: { width: num
 
 const POP_EASE: Record<string, Keyframe['ease']> = { hold: 'hold', linear: [0, 0, 1, 1], out: [0, 0, 0.58, 1], back: [0.34, 1.56, 0.64, 1] };
 /** 主體跳出的一層 → 片段（track = 第幾層，add_items 會換成真正的軌道） */
-function popClip(l: PopLayer, s: S, pop: PlanPop): Clip | null {
+function popClip(l: PopLayer, s: S, pop: PlanPop, mediaOf: Map<string, Footage>): Clip | null {
   const duration = l.t1 - l.t0;
   if (duration < 1 / 60) return null;
   let c: Clip;
@@ -237,9 +251,11 @@ function popClip(l: PopLayer, s: S, pop: PlanPop): Clip | null {
     c.text = { ...c.text!, text: l.text, size: 380 };
     c.transform = { ...c.transform, y: -0.12 };
   } else {
-    const m = s.media.find((x) => x.id === l.mediaId);
+    const m = mediaOf.get(l.mediaId);
     if (!m) return null;
-    c = makeClip({ mediaId: m.id, start: l.t0, duration, track: l.layer, volume: 0, ...(l.matte ? { aiMatte: true } : {}) });
+    c = makeClip({ mediaId: m.srcId ?? m.id, start: l.t0, duration, track: l.layer, volume: 0, in: m.kind === 'video' ? m.from ?? 0 : 0, ...(l.matte ? { aiMatte: true } : {}) });
+    // 影片的一格：整段停在那一格（揭露那一拍影片從這格接著播）
+    if (m.kind === 'video') c.remap = { moduleId: 'remap-curve', params: {}, keys: [newKey(0, 0, 'hold'), newKey(duration, 0, 'hold')] };
   }
   if (l.blend && l.blend !== 'normal') c.blend = l.blend;
   c.keys = Object.fromEntries(Object.entries(l.keys ?? {}).map(([k, list]) => [k, list!.map((x) => newKey(Math.min(duration, Math.max(0, x.t)), x.v, POP_EASE[x.ease] ?? 'hold'))]));
@@ -248,7 +264,7 @@ function popClip(l: PopLayer, s: S, pop: PlanPop): Clip | null {
     ...(e.beatEvery ? { timing: { kind: 'beat' as const, every: e.beatEvery, d: e.hitSec ?? 0.18 } } : {}),
   }));
   // 片段自己的遮罩（剪影窗 / 主體挖洞）：A 的輪廓路徑，框 = 圖片 cover 進畫面後的大小，以主體中心縮放
-  const subject = s.media.find((x) => x.id === pop.mediaId);
+  const subject = mediaOf.get(pop.mediaId);
   if (l.mask && subject) {
     const { w, h } = coverBox(subject, s.format);
     const keyed = (f: (sc: number) => number) => l.mask!.scale.map((k) => newKey(Math.min(duration, Math.max(0, k.t)), f(k.v), POP_EASE[k.ease] ?? 'hold'));
@@ -273,12 +289,12 @@ function coverBox(m: Media, f: { w: number; h: number }) {
 
 /** 圖片能不能做主體跳出（去背後量主體的位置 / 大小）；同一張圖算一次 */
 const popCache = new Map<string, { ok: boolean; centered: boolean; cx: number; cy: number; path?: string }>();
-async function popInfo(m: Media, s: S): Promise<{ ok: boolean; centered: boolean; cx: number; cy: number; path?: string }> {
-  const key = `${m.id}:${s.format.w}x${s.format.h}`;
+async function popInfo(m: Media, s: S, at = 0): Promise<{ ok: boolean; centered: boolean; cx: number; cy: number; path?: string }> {
+  const key = m.kind === 'video' ? `${m.id}@${at.toFixed(2)}:${s.format.w}x${s.format.h}` : `${m.id}:${s.format.w}x${s.format.h}`;
   const hit = popCache.get(key);
   if (hit) return hit;
-  await ensureMatte(m, [0]);
-  const d = matteAt(m, 0);
+  await ensureMatte(m, [m.kind === 'video' ? at : 0]);
+  const d = matteAt(m, m.kind === 'video' ? at : 0);
   const r = d ? popFraming(scoreMatte(d.data, MATTE_SIZE), m.width, m.height, s.format.w, s.format.h) : { ok: false, centered: false, cx: 0, cy: 0, area: 0 };
   // 輪廓路徑（剪影窗 / 主體挖洞用；只有能用的圖才描）
   const path = r.ok && d ? traceMatte(d.data, MATTE_SIZE) : '';
@@ -286,6 +302,34 @@ async function popInfo(m: Media, s: S): Promise<{ ok: boolean; centered: boolean
   popCache.set(key, out);
   return out;
 }
+/** 影片最多挑幾格去背；每支最多幾格；揭露後至少要能接著播幾秒 */
+const POP_MAX_FRAMES = 8;
+const POP_PER_VIDEO = 2;
+const POP_ROOM = 4;
+
+/**
+ * 影片裡適合做主體跳出的幾格（素材時間，相對指定片段的起點）：
+ * 有主角 → 主角的臉最大的那幾格；有臉 → 臉最大的；都沒有 → 影片 30% 的地方。同一支挑的格子至少隔 5 秒。
+ */
+export function popFrameCandidates(media: Footage[], extra: Map<string, Partial<PlanMedia>>): { m: Footage; t: number }[] {
+  const out: { m: Footage; t: number; h: number }[] = [];
+  for (const m of media) {
+    if (m.kind !== 'video' || m.duration < POP_ROOM + 1 || extra.get(m.id)?.weight === 0) continue;
+    const x = extra.get(m.id);
+    const ok = (t: number) => t <= m.duration - POP_ROOM && !x?.ban?.some(([a, b]) => t >= a - 0.1 && t <= b + POP_ROOM);
+    const pts = x?.leadPts?.length ? x.leadPts.map((p) => ({ t: p.t, h: p.h }))
+      : (x?.info?.faces ?? []).map((f, i) => (f ? { t: i * x!.info!.step, h: f.h } : null)).filter((p): p is { t: number; h: number } => !!p);
+    const list = pts.length ? pts : [{ t: m.duration * 0.3, h: 0 }];
+    const picked: { t: number; h: number }[] = [];
+    for (const p of [...list].sort((a, b) => b.h - a.h)) {
+      if (picked.length >= POP_PER_VIDEO) break;
+      if (ok(p.t) && picked.every((q) => Math.abs(q.t - p.t) >= 5)) picked.push(p);
+    }
+    for (const p of picked) out.push({ m, t: p.t, h: p.h });
+  }
+  return out.sort((a, b) => b.h - a.h).slice(0, POP_MAX_FRAMES).map(({ m, t }) => ({ m, t }));
+}
+
 /** 最多替幾張圖去背（第一次要下載模型、每張要算一下） */
 const POP_MAX_IMAGES = 20;
 
@@ -320,7 +364,11 @@ export const canReplaceLast = () => !!last && !docChanged(last.after);
 
 export type AutoEditError = 'noMusic' | 'noMedia' | 'noRange' | 'noKey' | 'empty' | 'cancelled';
 /** 進度：音樂 / 素材分析（第幾個、共幾個）/ AI 導演 */
-export type AutoEditProgress = { stage: 'music' } | { stage: 'media'; i: number; n: number; name: string; frac: number } | { stage: 'matte'; i: number; n: number; name: string } | { stage: 'director'; retry?: { n: number; wait: number } };
+export type AutoEditProgress = { stage: 'music' } | { stage: 'media'; i: number; n: number; name: string; frac: number } | { stage: 'matte'; i: number; n: number; name: string }
+  | { stage: 'director'; retry?: { n: number; wait: number }; files?: number; images?: number; batch?: { done: number; total: number } }
+  | { stage: 'directed'; list: { name: string; roles: string[]; weight: number; note: string; use?: [number, number][]; avoid?: [number, number][] }[] }
+  | { stage: 'plan' }
+  | { stage: 'lead'; files: number; spans: number; skipped: number; unsure?: true };
 
 /** 依目前的設定產生一版並套用（一步復原）；replaceLast：上一版之後沒有其他修改 → 先復原上一版 */
 export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditProgress) => void = () => {}, signal?: AbortSignal): Promise<{ shots: number; effects: number; pops: number; warn?: string } | { error: AutoEditError }> {
@@ -344,7 +392,47 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
   const sampled = need.length ? await sampleAll(need, (i, n, name, frac) => onProgress({ stage: 'media', i, n, name, frac }), stopped) : new Map<string, Sampled>();
   if (stopped()) return { error: 'cancelled' };
   if (st.analyze) for (const [id, x] of sampled) extra.set(id, { ...(x.info ? { info: x.info } : {}), ...(x.people !== undefined ? { people: x.people, face: x.face } : {}) });
-  // 主體跳出：替候選圖片去背、量主體
+  // 主角：所有素材裡出現最多的那個人（臉的特徵分群）；夠明顯才用
+  const notes = new Map<string, (t: number) => string>();
+  if (st.analyze) {
+    const all = [...sampled.values()].flatMap((x) => [...(x.info?.facesAt ?? []).flatMap((l) => l ?? []), ...(x.faceList ?? [])])
+      .filter((f): f is typeof f & { emb: number[] } => !!f.emb);
+    const lead = findLead(all);
+    const frames = [...sampled.values()].flatMap((x) => [...(x.info?.facesAt ?? []), ...(x.faceList ? [x.faceList] : [])]);
+    if (confidentLead(lead, lead ? leadShare(frames, lead) : 0)) {
+      let files = 0, spans = 0, skipped = 0;
+      for (const [id, x] of sampled) {
+        if (x.info?.facesAt) {
+          const r = leadInfo(x.info, x.info.facesAt, lead);
+          const pts = r.states.flatMap((s, i) => {
+            const b = s === 'lead' ? x.info!.facesAt![i]!.filter((f) => isLead(f, lead)).sort((p, q) => q.h - p.h)[0] : null;
+            return b ? [{ t: i * x.info!.step, x: b.x, y: b.y, w: b.w ?? b.h, h: b.h }] : [];
+          });
+          extra.set(id, { ...extra.get(id), info: { ...x.info, faces: r.faces, people: r.people }, people: r.people.reduce((s, v) => s + v, 0) / Math.max(1, r.people.length), ban: r.ban, leadPts: pts });
+          if (pts.length) files++;
+          spans += r.ban.length;
+          // 給 AI 導演看：這一格有沒有主角
+          const step = x.info.step, sampledIdx = r.states.map((s, i) => (s ? i : -1)).filter((i) => i >= 0);
+          notes.set(id, (t) => {
+            const i = sampledIdx.reduce((best, k) => (Math.abs(k * step - t) < Math.abs(best * step - t) ? k : best), sampledIdx[0] ?? 0);
+            const s = r.states[i];
+            return s === 'lead' ? ' [main person]' : s === 'others' ? ' [only other people]' : '';
+          });
+        } else if (x.faceList?.length) {
+          const lf = x.faceList.filter((f) => isLead(f, lead)).sort((p, q) => q.h - p.h)[0];
+          const others = !lf && x.faceList.some((f) => f.emb);
+          if (lf) files++;
+          if (others) skipped++;
+          extra.set(id, { ...extra.get(id), face: lf ?? null, people: lf ? Math.min(1, lf.h / 0.25) : 0,
+            ...(lf ? { leadPts: [{ t: 0, x: lf.x, y: lf.y, w: lf.w ?? lf.h, h: lf.h }] } : {}), ...(others ? { weight: 0 } : {}) });
+          notes.set(id, () => (lf ? ' [main person]' : others ? ' [only other people]' : ''));
+        }
+      }
+      onProgress({ stage: 'lead', files, spans, skipped });
+    } else if (all.length) onProgress({ stage: 'lead', files: 0, spans: 0, skipped: 0, unsure: true });
+  }
+  // 主體跳出：替候選圖片去背、量主體；frames = 影片裡拿來做主體跳出的那幾格（當成另外的素材）
+  const frames: Footage[] = [];
   if (st.popOn && st.popVariants.length) {
     const imgs = media.filter((m) => m.kind === 'image').slice(0, POP_MAX_IMAGES);
     for (let i = 0; i < imgs.length; i++) {
@@ -357,20 +445,53 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
         // 去背失敗（模型載入失敗之類）：這張不做主體跳出
       }
     }
+    // 影片：挑幾格去背（有主角就挑主角的臉最大的那幾格），主體跳出後揭露那一拍直接從這格接著播
+    const cands = popFrameCandidates(media, extra);
+    for (let i = 0; i < cands.length; i++) {
+      if (stopped()) return { error: 'cancelled' };
+      const { m, t } = cands[i];
+      const real = s.media.find((x) => x.id === (m.srcId ?? m.id));
+      if (!real) continue;
+      const at = (m.from ?? 0) + t;
+      if (!popCache.has(`${real.id}@${at.toFixed(2)}:${s.format.w}x${s.format.h}`)) onProgress({ stage: 'matte', i: i + 1, n: cands.length, name: `${m.name} @${t.toFixed(1)}s` });
+      try {
+        const pop = await popInfo(real, s, at);
+        if (!pop.ok) continue;
+        const id = `${m.id}@${t.toFixed(2)}`;
+        frames.push({ ...m, id, srcId: real.id, from: at, duration: m.duration - t });
+        extra.set(id, { pop, popOnly: true, ...(extra.get(m.id)?.roles ? { roles: extra.get(m.id)!.roles } : {}) });
+      } catch {
+        // 去背失敗：這格不用
+      }
+    }
   }
   if (st.director) {
-    onProgress({ stage: 'director' });
+    const picks = directorShots(media, sampled);
+    onProgress({ stage: 'director', files: media.length, images: [...picks.values()].reduce((s, l) => s + l.length, 0) });
     try {
-      const dir = await directMedia(music, media, sampled, st.directorNote, signal, (n, wait) => onProgress({ stage: 'director', retry: { n, wait } }));
-      for (const [id, d] of dir) extra.set(id, { ...extra.get(id), roles: d.roles, weight: d.weight, highlights: d.highlights, popSuit: d.pop });
+      const dir = await directMedia(music, media, sampled, st.directorNote, signal, (n, wait) => onProgress({ stage: 'director', retry: { n, wait } }),
+        (done, total) => onProgress({ stage: 'director', batch: { done, total } }),
+        (failed, total, e) => { warn = $t('AI 導演 {0}/{1} 批沒回應，那些素材改用一般分配：{2}', failed, total, aiErrorText(toAiError(e))); },
+        (id, t) => notes.get(id)?.(t) ?? '');
+      for (const [id, d] of dir) {
+        const m = media.find((x) => x.id === id);
+        // 能用的部分不到半秒 = 整支不用
+        // 導演說要避開的 + 主角辨識說只有別人的，都不用；主角辨識說不用的圖照樣不用
+        const prev = extra.get(id);
+        const ban = [...(prev?.ban ?? []), ...d.avoid];
+        const weight = prev?.weight === 0 || m?.kind === 'video' && ban.length && freeRoom(m.duration, ban) < 0.5 ? 0 : d.weight;
+        extra.set(id, { ...prev, roles: d.roles, weight, highlights: d.highlights, ban, popSuit: d.pop });
+      }
+      onProgress({ stage: 'directed', list: media.filter((m) => dir.has(m.id)).map((m) => ({ name: m.name, ...dir.get(m.id)!, weight: extra.get(m.id)?.weight ?? dir.get(m.id)!.weight })) });
       useAutoEdit.getState().set({ direction: Object.fromEntries(dir) });
     } catch (e) {
       // 導演失敗（額度、網路）：照樣剪，只是沒有 AI 的分配
-      warn = aiErrorText(toAiError(e));
+      warn = $t('AI 導演失敗，改用一般分配：{0}', aiErrorText(toAiError(e)));
     }
   }
 
   if (stopped()) return { error: 'cancelled' };
+  onProgress({ stage: 'plan' });
   // 拿掉上一版 + 放上新的一版 = 一步復原
   const before = snapshotDoc();
   const replace = replaceLast && canReplaceLast() ? last!.before : null;
@@ -392,8 +513,8 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
       range = r;
     }
     const seed = (Math.random() * 2 ** 31) >>> 0;
-    const plan = planFor(src, music, media, st.params, seed, planOptions(st, s), range, extra);
-    const { clips, effects } = planItems(plan, src, s, media);
+    const plan = planFor(src, music, [...media, ...frames], st.params, seed, planOptions(st, s), range, extra);
+    const { clips, effects } = planItems(plan, src, s, [...media, ...frames]);
     if (!clips.length) return { error: 'empty' };
     plannedPops = plan.pops?.length ?? 0;
     const p: Proposal = { summary: 'auto edit', op: { op: 'add_items', clips, effects } };
@@ -414,43 +535,92 @@ export interface AutoEditRun {
   label: string;
   frac: number | null;
   result: { ok: boolean; text: string } | null;
+  /** 這次做了哪些步驟（AI 分頁顯示用；每一步一行） */
+  log: string[];
 }
-export const useAutoEditRun = create<AutoEditRun>(() => ({ running: false, label: '', frac: null, result: null }));
+export const useAutoEditRun = create<AutoEditRun>(() => ({ running: false, label: '', frac: null, result: null, log: [] }));
+
+const ROLE: Record<string, string> = { intro: '開頭', build: '鋪陳', drop: '高潮', body: '主體', outro: '結尾' };
+/** 導演對一個素材的安排（一行） */
+const sec = (v: number) => (Math.round(v * 10) / 10).toString();
+const spanText = (l: [number, number][]) => l.map(([a, b]) => `${sec(a)}–${sec(b)}s`).join('、');
+const directedLine = (d: { name: string; roles: string[]; weight: number; note: string; use?: [number, number][]; avoid?: [number, number][] }) =>
+  `${d.name}：${d.weight === 0 ? $t('不用') : d.roles.map((r) => $t(ROLE[r] ?? r)).join(' · ') || $t('主體')}` +
+  `${d.weight !== 0 && d.use?.length ? ` · ${$t('用 {0}', spanText(d.use))}` : ''}${d.weight !== 0 && d.avoid?.length ? ` · ${$t('避開 {0}', spanText(d.avoid))}` : ''}` +
+  `${d.note ? ` · ${d.note}` : ''}`;
 let abort: AbortController | null = null;
 export const cancelAutoEdit = () => abort?.abort();
 
-/** 產生一版（進度與結果顯示在自動剪輯面板）；replaceLast = 再一版 */
-export async function generateAutoEdit(replaceLast = false) {
-  if (useAutoEditRun.getState().running) return;
+/**
+ * 產生一版（進度與結果顯示在自動剪輯面板）；replaceLast = 再一版。
+ * quiet：不切到自動剪輯面板（從 AI 分頁開始的，進度顯示在對話裡）。回傳結果（已經在跑 = null）。
+ */
+export async function generateAutoEdit(replaceLast = false, quiet = false): Promise<{ ok: boolean; text: string; cancelled?: true } | null> {
+  if (useAutoEditRun.getState().running) return null;
   abort = new AbortController();
   const set = (p: Partial<AutoEditRun>) => useAutoEditRun.setState(p);
-  set({ running: true, label: $t('分析音樂…'), frac: null, result: null });
-  // 從選單 / AI 助手開始的也看得到進度
-  void import('../ui/Dock').then((d) => d.useDock.getState().activatePanel('auto')).catch(() => {});
+  const step = (line: string) => set({ log: [...useAutoEditRun.getState().log, line] });
+  set({ running: true, label: $t('分析音樂…'), frac: null, result: null, log: [] });
+  // 從選單開始的也看得到進度
+  if (!quiet) void import('../ui/Dock').then((d) => d.useDock.getState().activatePanel('auto')).catch(() => {});
+  let lastStep = '';
+  // 限流 / 忙碌的等待：狀態列倒數
+  let stopTick = () => {};
+  const once = (key: string, line: string) => {
+    if (key !== lastStep) step(line);
+    lastStep = key;
+  };
+  const done = (result: { ok: boolean; text: string }) => {
+    set({ result });
+    step(result.text);
+    return result;
+  };
   try {
-    const r = await runAutoEdit(replaceLast, (p) => set(
-      p.stage === 'music' ? { label: $t('分析音樂…'), frac: null }
-        : p.stage === 'media' ? { label: $t('分析素材 {0}/{1}：{2}', p.i, p.n, p.name), frac: (p.i - 1 + p.frac) / p.n }
-          : p.stage === 'matte' ? { label: $t('去背 {0}/{1}：{2}', p.i, p.n, p.name), frac: (p.i - 1) / p.n }
-            : p.retry ? { label: $t('AI 忙碌，{0} 秒後重試（第 {1} 次）', p.retry.wait, p.retry.n), frac: null }
-              : { label: $t('AI 導演分配素材…'), frac: null },
-    ), abort.signal);
+    const r = await runAutoEdit(replaceLast, (p) => {
+      stopTick();
+      if (p.stage === 'director' && p.retry) {
+        const n = p.retry.n;
+        stopTick = countdown(p.retry.wait, (left) => set({ label: $t('AI 忙碌，{0} 秒後重試（第 {1} 次）', left, n), frac: null }));
+        return;
+      }
+      if (p.stage === 'directed') {
+        for (const d of p.list) step(directedLine(d));
+        return;
+      }
+      if (p.stage === 'lead') {
+        step(p.unsure ? $t('認不出明顯的主角（臉太少，或好幾個人出現得一樣多）')
+          : $t('主角：出現在 {0} 個素材；只有別人的 {1} 段會避開', p.files, p.spans) + (p.skipped ? ` · ${$t('{0} 張圖沒有主角，不用', p.skipped)}` : ''));
+        return;
+      }
+      const label = p.stage === 'music' ? $t('分析音樂…')
+        : p.stage === 'media' ? $t('分析素材 {0}/{1}：{2}', p.i, p.n, p.name)
+          : p.stage === 'matte' ? $t('去背 {0}/{1}：{2}', p.i, p.n, p.name)
+            : p.stage === 'plan' ? $t('排鏡頭、疊特效…')
+              : p.retry ? $t('AI 忙碌，{0} 秒後重試（第 {1} 次）', p.retry.wait, p.retry.n)
+                : p.batch ? $t('AI 導演：{0}/{1} 批', p.batch.done, p.batch.total)
+                : p.images !== undefined ? $t('AI 導演在看 {0} 個素材的 {1} 張畫面…', p.files ?? 0, p.images) : $t('AI 導演分配素材…');
+      // 重試只顯示在狀態列；分批每完成一批記一行
+      if (p.stage === 'director' && p.batch) once(`batch:${p.batch.done}`, label);
+      else if (p.stage !== 'director' || !p.retry) once(`${p.stage}:${'i' in p ? p.i : ''}`, label);
+      set(p.stage === 'media' ? { label, frac: (p.i - 1 + p.frac) / p.n } : p.stage === 'matte' ? { label, frac: (p.i - 1) / p.n } : { label, frac: null });
+    }, abort.signal);
     if ('error' in r) {
-      if (r.error === 'cancelled') return set({ result: { ok: false, text: $t('已取消') } });
+      if (r.error === 'cancelled') return { ...done({ ok: false, text: $t('已取消') }), cancelled: true };
       const msg = {
         noMusic: $t('沒有節拍：先在音訊軌放音樂'), noMedia: $t('沒有可用的素材'), noRange: $t('循環範圍裡沒有節拍'),
         noKey: $t('AI 導演需要 API 金鑰'), empty: $t('沒有產生任何片段'),
       }[r.error];
-      set({ result: { ok: false, text: msg } });
+      return done({ ok: false, text: msg });
     } else {
       const base = r.pops ? $t('已產生 {0} 個鏡頭、{1} 個主體跳出', r.shots, r.pops) : $t('已產生 {0} 個鏡頭', r.shots);
       const text = r.effects ? `${base} · ${$t('{0} 個特效', r.effects)}` : base;
-      set({ result: r.warn ? { ok: false, text: `${text} · ${$t('AI 導演失敗，改用一般分配：{0}', r.warn)}` } : { ok: true, text } });
+      return done(r.warn ? { ok: false, text: `${text} · ${r.warn}` } : { ok: true, text });
     }
   } catch (e) {
-    if (abort?.signal.aborted) set({ result: { ok: false, text: $t('已取消') } });
-    else set({ result: { ok: false, text: $t('自動剪輯失敗：{0}', e instanceof Error ? e.message : e) } });
+    if (abort?.signal.aborted) return { ...done({ ok: false, text: $t('已取消') }), cancelled: true };
+    return done({ ok: false, text: $t('自動剪輯失敗：{0}', e instanceof Error ? e.message : e) });
   } finally {
+    stopTick();
     abort = null;
     set({ running: false, label: '', frac: null });
   }

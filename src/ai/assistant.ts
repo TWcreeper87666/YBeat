@@ -2,10 +2,11 @@
  * AI 助手：設定（金鑰 / 模型，只存在這個瀏覽器）、聊天狀態、以及「產生 → 本機編譯 → 有錯就自動修正」的流程。
  */
 import { $t } from '../i18n';
+import { toast } from '../ui/uiStore';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { ModuleKind } from '../store';
-import { ApiKeyError, BlockedError, BusyError, RateLimitError, imagePart, listModels, pickDefaultModel, streamTurn, type ModelInfo, type Turn } from './gemini';
+import { countdown, ApiKeyError, BlockedError, BusyError, RateLimitError, imagePart, listModels, pickDefaultModel, streamTurn, type ModelInfo, type Turn } from './gemini';
 import { moduleShots, previewShot } from './frames';
 import { parseDuration } from '../engine/params';
 import { chatSystem, moduleSystem, withCustom } from './prompt';
@@ -30,10 +31,12 @@ interface AiSettings {
   custom: string;
   /** 寫好模組後，把套在預覽畫面上的結果給 AI 看一次（多一個請求） */
   look: boolean;
-  set(p: Partial<Pick<AiSettings, 'key' | 'model' | 'custom' | 'look'>>): void;
+  /** AI 提議的修改回覆完就直接套用 */
+  auto: boolean;
+  set(p: Partial<Pick<AiSettings, 'key' | 'model' | 'custom' | 'look' | 'auto'>>): void;
 }
 export const useAiSettings = create<AiSettings>()(
-  persist((set) => ({ key: '', model: '', custom: '', look: false, set: (p) => set(p) }), { name: 'ybeat-ai', partialize: (s) => ({ key: s.key, model: s.model, custom: s.custom, look: s.look }) }),
+  persist((set) => ({ key: '', model: '', custom: '', look: false, auto: false, set: (p) => set(p) }), { name: 'ybeat-ai', partialize: (s) => ({ key: s.key, model: s.model, custom: s.custom, look: s.look, auto: s.auto }) }),
 );
 
 export const useAiModels = create<{ list: ModelInfo[]; loading: boolean; error: string }>(() => ({ list: [], loading: false, error: '' }));
@@ -123,6 +126,8 @@ async function runWithFixes(o: {
   /** 編譯通過的模組套在預覽畫面上給 AI 看一次；onLook = 給 AI 看的圖（data URL） */
   look?: boolean;
   onLook?: (urls: string[]) => void;
+  /** 限流最多等幾秒自動重試（AI 自己接著說明時可以等久一點） */
+  maxRateWait?: number;
 }): Promise<{ added: Turn[]; text: string; check: CheckResult | null; fixes: number; refs: string[]; proposals: Proposal[] }> {
   const { key, model } = useAiSettings.getState();
   if (!key) throw new ApiKeyError('no key');
@@ -138,14 +143,19 @@ async function runWithFixes(o: {
   // 工具呼叫前已經說的話（這次回覆裡要接著顯示）
   let before = '';
   const join = (a: string, b: string) => (a && b ? `${a}\n\n${b}` : a || b);
+  // 等待重試的倒數
+  let stopTick = () => {};
   for (;;) {
     const r = await streamTurn({
-      key, model, system: o.system, turns: [...o.turns, ...added], signal: o.signal,
+      key, model, system: o.system, turns: [...o.turns, ...added], signal: o.signal, maxRateWait: o.maxRateWait,
       tools, toolMode: rounds < MAX_TOOL_ROUNDS ? 'AUTO' : 'NONE',
-      onText: o.onText && ((t) => o.onText!(join(before, t))),
-      // 伺服器忙碌、自動重試中：先在回覆的位置顯示狀態（收到回覆就會蓋掉）
-      onRetry: o.onText && ((n, wait) => o.onText!(join(before, $t('AI 忙碌，{0} 秒後重試（第 {1} 次）', wait, n)))),
-    });
+      onText: o.onText && ((t) => { stopTick(); o.onText!(join(before, t)); }),
+      // 伺服器忙碌 / 限流、自動重試中：先在回覆的位置倒數（收到回覆就會蓋掉）
+      onRetry: o.onText && ((n, wait) => {
+        stopTick();
+        stopTick = countdown(wait, (left) => o.onText!(join(before, $t('AI 忙碌，{0} 秒後重試（第 {1} 次）', left, n))));
+      }),
+    }).finally(() => stopTick());
     if (r.calls.length && rounds < MAX_TOOL_ROUNDS) {
       rounds++;
       const modules = useStore.getState().modules;
@@ -224,6 +234,8 @@ export interface ChatMsg {
   image?: string;
   /** 給 AI 看過的模組畫面（data URL；第一張是原始畫面） */
   seen?: string[];
+  /** 自動剪輯的步驟（套用後產生時即時更新；running = 還在跑） */
+  steps?: { lines: string[]; running: boolean; label?: string };
   /** 已套用：實際套用 / 跳過幾項 */
   applied?: { done: number; skipped: number };
   error?: AiError;
@@ -267,17 +279,30 @@ export function sendChat(text: string, attach?: Attach, withFrame = false) {
   const withSnap: Turn = frame
     ? { role: 'user', text: snapText, img: true, parts: [{ text: snapText }, { text: `Attached: the current preview frame at the playhead (${useStore.getState().time.toFixed(2)}s).` }, imagePart(frame)] }
     : { role: 'user', text: snapText };
-  const reply: ChatMsg = { id: uid(), role: 'model', text: '', turns: [], streaming: true, ...(named.length ? { refs: named.map((m) => m.name) } : {}) };
+  const history = chatHistory(S.msgs);
+  useAiChat.setState({ msgs: [...S.msgs, user] });
+  runReply(null, withSnap, history, attach?.kind, named.length ? named.map((m) => m.name) : undefined);
+}
+
+/** 舊訊息只帶最近幾則；失敗的回覆、工具回合（讀到的程式碼很長）不帶；附圖的回合只留文字 */
+const chatHistory = (msgs: ChatMsg[]): Turn[] =>
+  msgs.filter((m) => !m.error).flatMap((m) => m.turns).filter((t) => !t.parts || t.img).map((t): Turn => (t.img ? { role: t.role, text: t.text } : t)).slice(-HISTORY);
+
+/**
+ * 送出一次 AI 回覆。keep = 不顯示、但要留在紀錄裡的使用者回合（AI 自己接著說明時用）；api = 這次實際送的回合。
+ */
+function runReply(keep: Turn | null, api: Turn, history: Turn[], hint?: ModuleKind, refs?: string[], maxRateWait?: number) {
+  const S = useAiChat.getState();
+  const reply: ChatMsg = { id: uid(), role: 'model', text: '', turns: [], streaming: true, ...(refs ? { refs } : {}) };
   const abort = new AbortController();
-  // 舊訊息只帶最近幾則；失敗的回覆、工具回合（讀到的程式碼很長）不帶；附圖的回合只留文字
-  const history = S.msgs.filter((m) => !m.error).flatMap((m) => m.turns).filter((t) => !t.parts || t.img).map((t): Turn => (t.img ? { role: t.role, text: t.text } : t)).slice(-HISTORY);
-  useAiChat.setState({ msgs: [...S.msgs, user, reply], busy: true, abort });
+  useAiChat.setState({ msgs: [...S.msgs, reply], busy: true, abort });
   void (async () => {
+    let done = false;
     try {
       const r = await runWithFixes({
         system: withCustom(chatSystem(), useAiSettings.getState().custom),
-        turns: [...history, withSnap],
-        hint: attach?.kind,
+        turns: [...history, api],
+        hint,
         signal: abort.signal,
         onText: (t) => patch(reply.id, { text: t }),
         onFix: (n) => patch(reply.id, { fixing: n }),
@@ -287,14 +312,18 @@ export function sendChat(text: string, attach?: Attach, withFrame = false) {
         onProposals: (proposals) => patch(reply.id, { proposals }),
         look: useAiSettings.getState().look,
         onLook: (seen) => patch(reply.id, { seen }),
+        maxRateWait,
       });
-      patch(reply.id, { text: r.text, turns: r.added, streaming: false, fixing: undefined, fixes: r.fixes, check: r.check, refs: r.refs, proposals: r.proposals });
+      patch(reply.id, { text: r.text, turns: keep ? [keep, ...r.added] : r.added, streaming: false, fixing: undefined, fixes: r.fixes, check: r.check, refs: r.refs, proposals: r.proposals });
+      done = r.proposals.length > 0;
     } catch (e) {
       if (abort.signal.aborted) patch(reply.id, { streaming: false, fixing: undefined, turns: [] });
       else patch(reply.id, { streaming: false, fixing: undefined, turns: [], error: toAiError(e) });
     } finally {
       useAiChat.setState({ busy: false, abort: null });
     }
+    // 自動套用（AI 看完自動剪輯結果的那則不套，免得一直重剪）
+    if (done && !keep && useAiSettings.getState().auto) applyChatProposalsToast(reply.id);
   })();
 }
 
@@ -302,9 +331,45 @@ export function sendChat(text: string, attach?: Attach, withFrame = false) {
 export function applyChatProposals(msgId: string): { done: number; skipped: number } | null {
   const m = useAiChat.getState().msgs.find((x) => x.id === msgId);
   if (!m?.proposals?.length || m.applied) return null;
-  const r = applyProposals(m.proposals);
+  const gen = m.proposals.some((p) => p.op.op === 'auto_edit' && p.op.generate);
+  let off = () => {};
+  if (gen) {
+    // 產生的步驟即時顯示在這則回覆下面
+    patch(msgId, { steps: { lines: [], running: true } });
+    void import('../engine/autoEditApply').then(({ useAutoEditRun }) => {
+      off = useAutoEditRun.subscribe((s) => {
+        if (s.running) patch(msgId, { steps: { lines: s.log, running: true, label: s.label } });
+      });
+    });
+  }
+  const r = applyProposals(m.proposals, {
+    onAutoEdit: (res) => {
+      off();
+      void import('../engine/autoEditApply').then(({ useAutoEditRun }) => {
+        const lines = useAutoEditRun.getState().log;
+        patch(msgId, { steps: { lines, running: false } });
+        // 跑完：讓 AI 看結果說明（使用者取消的、已經在跑別的就不打擾）
+        if (res && !res.cancelled) reviewAutoEdit(res, lines);
+      });
+    },
+  });
   patch(msgId, { applied: r });
   return r;
+}
+
+/** 套用並跳出結果提示 */
+export function applyChatProposalsToast(msgId: string) {
+  const r = applyChatProposals(msgId);
+  if (r) toast(r.skipped ? $t('已套用 {0} 項，{1} 項已不存在', r.done, r.skipped) : $t('已套用 {0} 項', r.done));
+}
+
+/** 自動剪輯跑完：把結果、步驟交給 AI，請它跟使用者說明（不顯示使用者訊息） */
+function reviewAutoEdit(res: { ok: boolean; text: string }, lines: string[]) {
+  if (useAiChat.getState().busy) return;
+  const text = `[Auto edit finished — not typed by the user]\nResult: ${res.ok ? 'ok' : 'problem'} — ${res.text}\nSteps:\n${lines.map((l) => `- ${l}`).join('\n')}\n\n` +
+    `Briefly tell the user (in their language) what was made: how many shots / effects, how the AI director arranged the media if it ran, and anything that went wrong. ` +
+    `Then suggest one or two concrete next tweaks. Do not call tools unless the result clearly needs fixing.`;
+  runReply({ role: 'user', text }, { role: 'user', text: `${text}\n\n<project_snapshot>\n${projectSnapshot()}\n</project_snapshot>` }, chatHistory(useAiChat.getState().msgs), undefined, undefined, 90);
 }
 
 export function stopChat() {

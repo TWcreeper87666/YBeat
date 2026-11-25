@@ -58,7 +58,12 @@ export function reverseFrameAt(media: Media, src: number): { pts: number; bm: Im
 /** 確保 a..b（素材秒數）都在快取裡；已經有 / 正在解就不重複 */
 export function ensureReverseFrames(media: Media, a: number, b: number): Promise<void> {
   const e = entry(media.id);
-  if (e.done.some(([x, y]) => x <= a + 1e-3 && y >= b - 1e-3)) return Promise.resolve();
+  if (e.done.some(([x, y]) => x <= a + 1e-3 && y >= b - 1e-3)) {
+    // 還會用到：標成最近用過，超過上限時先丟別的（不然還沒播到的影格會先被丟，播到時只好退回 <video>）
+    const t = ++tick;
+    for (const f of e.frames) if (f.pts >= a - 0.05 && f.pts <= b + 0.05) f.used = t;
+    return Promise.resolve();
+  }
   const key = `${a.toFixed(2)}-${b.toFixed(2)}`;
   const running = e.jobs.get(key);
   if (running) return running;
@@ -68,16 +73,19 @@ export function ensureReverseFrames(media: Media, a: number, b: number): Promise
   const job = decodeFrames({
     url: media.url, from: a, to: b, alive: () => cache.get(media.id) === e,
     onFrame: (pts, frame) => {
-      pending.push(createImageBitmap(frame, { resizeWidth: w, resizeHeight: h, resizeQuality: 'medium' }).then((bm) => {
+      // WebGL 對 ImageBitmap 不套 UNPACK_FLIP_Y（會上下顛倒）：跟 scrubCache 一樣先翻好
+      pending.push(createImageBitmap(frame, { resizeWidth: w, resizeHeight: h, resizeQuality: 'medium', imageOrientation: 'flipY' }).then((bm) => {
         if (e.frames.some((f) => Math.abs(f.pts - pts) < 1e-4)) return bm.close();
-        e.frames.push({ pts, bm, used: ++tick });
+        // 依時間插入：解碼途中預覽就會來查（二分搜尋），陣列要一直保持排序
+        let i = e.frames.length;
+        while (i > 0 && e.frames[i - 1].pts > pts) i--;
+        e.frames.splice(i, 0, { pts, bm, used: ++tick });
         total++;
       }).finally(() => frame.close()));
     },
   }).then(async (fps) => {
     await Promise.all(pending);
     e.fps = fps;
-    e.frames.sort((x, y) => x.pts - y.pts);
     e.done.push([a, b]);
     evict();
   }).catch(() => {

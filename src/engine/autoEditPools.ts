@@ -20,6 +20,7 @@ const TR_CAT_STRENGTH: Record<string, number> = { basic: 0.25, wipe: 0.4, distor
 /** 內建特效當點綴的方式（沒列的照分類猜） */
 const FX_ACCENT: Record<string, Omit<AccentOpt, 'id'>> = {
   'fx-letterbox': { hit: false, mood: 'any', beats: 6 },
+  'fx-vignette': { hit: false, mood: 'any', beats: 8 },
   'fx-zoompulse': { hit: false, everyBeat: true, mood: 'intense' },
   'fx-blurpulse': { hit: false, everyBeat: true, mood: 'intense' },
   'fx-strobe': { hit: false, mood: 'intense', beats: 2 },
@@ -68,7 +69,7 @@ const FX_GROUP: Record<string, FxGroup> = {
   'fx-flash': 'flash', 'fx-strobe': 'flash', 'fx-invert': 'flash',
   'fx-rgb': 'glitch', 'fx-glitch': 'glitch', 'fx-pixelate': 'glitch', 'fx-slice': 'glitch',
   'fx-bw': 'color', 'fx-duotone': 'color', 'fx-hue': 'color', 'fx-grade': 'color',
-  'fx-grain': 'ambient', 'fx-vhs': 'ambient', 'fx-lightleak': 'ambient', 'fx-glow': 'ambient', 'fx-letterbox': 'ambient',
+  'fx-grain': 'ambient', 'fx-vhs': 'ambient', 'fx-lightleak': 'ambient', 'fx-glow': 'ambient', 'fx-letterbox': 'ambient', 'fx-vignette': 'ambient',
 };
 const CAT_GROUP: Record<string, FxGroup> = { motion: 'zoom', distort: 'zoom', light: 'flash', color: 'color', glitch: 'glitch' };
 
@@ -84,6 +85,15 @@ const INTENSITY: Record<string, [string, number, number]> = {
   'fx-rgb': ['amount', 0.008, 0.06], 'fx-glitch': ['amount', 0.2, 0.9], 'fx-twitch': ['amount', 0.2, 0.9],
   'fx-shockwave': ['strength', 0.02, 0.12], 'fx-chromazoom': ['amount', 0.03, 0.2], 'fx-blurpulse': ['amount', 0.008, 0.08],
   'fx-duotone': ['strength', 0.25, 1], 'fx-lightleak': ['intensity', 0.2, 1.3], 'fx-grain': ['amount', 0.03, 0.2],
+  'fx-vignette': ['amount', 0.3, 0.8],
+};
+
+/**
+ * 自動剪輯放這些特效時，參數跟著音樂音量動（min = 安靜時、max = 最大聲時）。
+ * 暗角：越大聲，中間亮的範圍越小（外圍的暗往內收）。
+ */
+export const AUDIO_DRIVE: Record<string, { param: string; min: number; max: number }> = {
+  'fx-vignette': { param: 'size', min: 0.65, max: 0.28 },
 };
 
 export function intensityParams(id: string, v: number): Record<string, number> | undefined {

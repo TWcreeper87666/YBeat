@@ -826,7 +826,10 @@ function mergeParams(code: string | undefined, cur: ParamValues, raw: unknown): 
   }
 }
 
-function applyOp(op: Op): number {
+/** onAutoEdit：自動剪輯產生完的結果（AI 對話接著看結果） */
+export interface ApplyHooks { onAutoEdit?: (r: { ok: boolean; text: string; cancelled?: true } | null) => void }
+
+function applyOp(op: Op, hooks: ApplyHooks = {}): number {
   const st = useStore.getState();
   const code = (id: string | undefined) => st.modules.find((m) => m.id === id)?.code;
   const has = (id: string) => useStore.getState().clips.some((c) => c.id === id);
@@ -836,7 +839,7 @@ function applyOp(op: Op): number {
   let n = 0;
   switch (op.op) {
     case 'auto_edit':
-      applyAutoEdit(op.patch, op.generate, op.replaceLast);
+      applyAutoEdit(op.patch, op.generate, op.replaceLast, hooks.onAutoEdit);
       return 1;
     case 'add_items': {
       const ok = (id: string) => st.modules.some((m) => m.id === id);
@@ -1088,7 +1091,7 @@ function applyOp(op: Op): number {
 }
 
 /** 一次套用所有提議（一步復原）；回傳實際套用了幾項、幾項因為目標不見了而跳過 */
-export function applyProposals(list: Proposal[]): { done: number; skipped: number } {
+export function applyProposals(list: Proposal[], hooks: ApplyHooks = {}): { done: number; skipped: number } {
   const s0 = useStore.getState();
   const keep = { selection: s0.selection, selected: s0.selected, leftTab: s0.leftTab };
   let done = 0;
@@ -1098,7 +1101,7 @@ export function applyProposals(list: Proposal[]): { done: number; skipped: numbe
     for (const p of list) {
       const o = p.op;
       const want = o.op === 'auto_edit' ? 1 : o.op === 'add_items' ? o.clips.length + o.effects.length : o.op === 'add_effects' ? o.blocks.length : o.op === 'set_transitions' ? o.at.length : 'clipIds' in o ? o.clipIds.length : 'items' in o ? o.items.length : o.targets.length;
-      const n = applyOp(p.op);
+      const n = applyOp(p.op, hooks);
       done += n;
       skipped += Math.max(0, want - n);
     }

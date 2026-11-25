@@ -6,3 +6,6 @@
 - [ ] 時間軸標記：可命名、跳轉、吸附
 - [ ] 音量曲線＋背景音樂自動避讓人聲
 - [ ] 代理檔／區段預先渲染（視效能再做, when 4K lol）
+
+- [x] 加入auto mode，自動套用
+- [x] property tab, curve dropdown fix

@@ -93,6 +93,33 @@ ok(Math.abs(layer.keys.x![0].v - 0.09) < 1e-9 && layer.keys.x!.at(-1)!.v === 0, 
 ok(layer.effects?.length === 2 && layer.effects.every((f) => f.timing?.kind === 'beat'), '震閃：兩個每拍觸發的片段特效');
 ok(!revealClip.transitionIn && revealClip.keys.scaleX![0].v === 1 && revealClip.keys.x![0].v === 0, '揭露拍：硬切、完整圖從原尺寸開始（拉遠改成推近）');
 
+// 主體跳出（影片的一格）：主體層停在那一格、揭露拍從那一格接著播
+{
+  reset();
+  const v = S().media.find((m) => m.id === 'v')!;
+  const frame = { ...v, id: 'v@3.00', srcId: 'v', from: 3, duration: v.duration - 3 };
+  const plan: EditPlan = {
+    seed: 1, recipe: 'rhythm',
+    shots: [{ b0: 0, b1: 8, mediaId: 'v', in: 0 }, { b0: 8, b1: 12, mediaId: 'v@3.00', in: 0 }],
+    overlays: [], pops: [{ b0: 4, b1: 8, variant: 'step', mediaId: 'v@3.00', cx: 0, cy: 0 }],
+  };
+  const r = planItems(plan, src, S(), [v, frame]);
+  const sub = r.clips.find((c) => c.track === 1)!;
+  const rev = r.clips.find((c) => c.track === 0 && c.start === 4)!;
+  ok(!!sub && sub.mediaId === 'v' && sub.in === 3 && sub.aiMatte === true, '主體層：原影片、從那一格開始、去背');
+  ok(sub.remap?.moduleId === 'remap-curve' && sub.remap.keys.every((k) => k.v === 0), '主體層：停在那一格');
+  ok(!!rev && rev.mediaId === 'v' && rev.in === 3 && rev.remap?.moduleId !== 'remap-curve', '揭露拍：同一支影片從那一格接著播（正常速度）');
+}
+
+// 暗角：中間亮的範圍跟著音樂音量（越大聲越小），只聽音樂那一軌
+{
+  reset();
+  const plan: EditPlan = { seed: 1, recipe: 'rhythm', shots: [{ b0: 0, b1: 8, mediaId: 'v', in: 0 }], overlays: [{ b0: 0, b1: 8, moduleId: 'fx-vignette', lane: 0 }], pops: [] };
+  const vig = planItems(plan, src, S()).effects.find((e) => e.moduleId === 'fx-vignette');
+  const d = vig?.audio?.size;
+  ok(!!d && d.source === 'level' && d.min > d.max && (src.audio ? JSON.stringify(d.from) === JSON.stringify({ audio: [src.audio.track] }) : !d.from), '暗角跟著音樂音量收放');
+}
+
 // 跟拍變速：計畫 → 變速曲線片段
 reset();
 const T2 = (i: number) => Math.min(8, Math.max(0, i) * 0.5);

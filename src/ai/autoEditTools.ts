@@ -39,7 +39,7 @@ export const AUTO_EDIT_DECLS = [
   },
   {
     name: 'set_auto_edit',
-    description: 'Propose changes to the Auto Edit panel settings (applied when the user presses Apply). generate: also cut a new take with the new settings (replace_last: replace the previous auto-edit take if it is still unchanged). Rates are 0..1.',
+    description: 'Propose changes to the Auto Edit panel settings (applied when the user presses Apply). generate: also cut a new take with the new settings (replace_last: replace the previous auto-edit take if it is still unchanged); after the user presses Apply the steps are shown in the chat and you get the result to review. For requests like \"make an edit of <person>, no unrelated people\", turn on the director with a director_note. Rates are 0..1.',
     parameters: {
       type: 'object',
       properties: {
@@ -58,7 +58,10 @@ export const AUTO_EDIT_DECLS = [
             required: ['effect', 'when'],
           },
         },
-        transition_weights: { type: 'object', description: 'transition id -> relative weight 0..3 (0 = never, 1 = normal); only the listed ones change', additionalProperties: { type: 'number' } },
+        transition_weights: {
+          type: 'array', description: 'relative weight 0..3 per transition id (0 = never, 1 = normal); only the listed ones change',
+          items: { type: 'object', properties: { id: { type: 'string' }, weight: { type: 'number' } }, required: ['id', 'weight'] },
+        },
         beats_per_shot: { type: 'object', description: 'beats per shot at low / mid / high energy (1..32)', properties: { low: num(''), mid: num(''), high: num('') } },
         variation: num('0..1 chance a shot is halved / doubled'),
         min_shot_sec: num('shortest shot, seconds'),
@@ -368,8 +371,12 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
     changed++;
   }
   const trPick = pick(a.transitions, P.transitions, P.transitions.filter((m) => (trWeights[m.id] ?? 1) <= 0).map((m) => m.id), fail, 'transitions');
-  const tw = a.transition_weights as Record<string, unknown> | undefined;
-  if (trPick || (tw && typeof tw === 'object')) {
+  // [{ id, weight }]（Gemini 的 schema 不支援 id → 數字的對照表）；舊的物件寫法也收
+  const raw = a.transition_weights;
+  const tw: Record<string, unknown> | undefined = Array.isArray(raw)
+    ? Object.fromEntries(raw.map((x) => [String((x as { id?: unknown })?.id), (x as { weight?: unknown })?.weight]))
+    : raw && typeof raw === 'object' ? raw as Record<string, unknown> : undefined;
+  if (trPick || tw) {
     const next = { ...trWeights };
     if (trPick) for (const m of P.transitions) next[m.id] = trPick.includes(m.id) ? 0 : Math.max(1, next[m.id] ?? 1);
     for (const [id, v] of Object.entries(tw ?? {})) {
@@ -406,9 +413,15 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
   return { summary, patch, generate, replaceLast: generate && !!a.replace_last };
 }
 
-/** 套用：改面板設定；要產生就等這批修改結束後再跑（分析是非同步） */
-export function applyAutoEdit(patch: AutoEditPatch, generate: boolean, replaceLast: boolean) {
+/**
+ * 套用：改面板設定；要產生就等這批修改結束後再跑（分析是非同步）。
+ * 產生的進度顯示在 AI 對話裡（不切到自動剪輯面板）；onDone = 跑完的結果（AI 接著看結果說明）。
+ */
+export function applyAutoEdit(patch: AutoEditPatch, generate: boolean, replaceLast: boolean, onDone?: (r: { ok: boolean; text: string; cancelled?: true } | null) => void) {
   if (Object.keys(patch).length) useAutoEdit.getState().set(patch);
-  void import('../ui/Dock').then((d) => d.useDock.getState().activatePanel('auto', true)).catch(() => {});
-  if (generate) setTimeout(() => void import('../engine/autoEditApply').then((m) => m.generateAutoEdit(replaceLast)).catch(() => {}), 0);
+  if (!generate) {
+    void import('../ui/Dock').then((d) => d.useDock.getState().activatePanel('auto', true)).catch(() => {});
+    return;
+  }
+  setTimeout(() => void import('../engine/autoEditApply').then((m) => m.generateAutoEdit(replaceLast, true)).then((r) => onDone?.(r), () => onDone?.(null)), 0);
 }

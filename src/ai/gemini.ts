@@ -99,7 +99,20 @@ type TurnOpts = {
   onText?: (full: string) => void;
   /** 暫時性錯誤、等一下要重試時通知（第幾次、等幾秒） */
   onRetry?: (attempt: number, waitSec: number, reason: string) => void;
+  /** 限流最多等幾秒就自動重試（沒有 = MAX_RATE_WAIT；自動進行的請求可以等久一點） */
+  maxRateWait?: number;
 };
+
+/** 倒數 sec 秒：馬上顯示一次，之後每秒 show(剩幾秒)，到 1 為止；回傳停止的函式 */
+export function countdown(sec: number, show: (left: number) => void): () => void {
+  let left = Math.max(1, Math.ceil(sec));
+  show(left);
+  const t = setInterval(() => {
+    if (left <= 1) return clearInterval(t);
+    show(--left);
+  }, 1000);
+  return () => clearInterval(t);
+}
 
 /** 重試的等待秒數（第 1、2、3、4 次） */
 const RETRY_WAIT = [1, 2, 4, 8];
@@ -126,7 +139,7 @@ export async function streamTurn(o: TurnOpts): Promise<{ text: string; parts: Pa
       if (o.signal?.aborted || got || attempt >= RETRY_WAIT.length) throw e;
       let wait: number | null = null;
       if (e instanceof BusyError) wait = RETRY_WAIT[attempt];
-      else if (e instanceof RateLimitError) wait = e.retryAfter !== null && e.retryAfter <= MAX_RATE_WAIT ? Math.max(e.retryAfter, RETRY_WAIT[attempt]) : null;
+      else if (e instanceof RateLimitError) wait = e.retryAfter !== null && e.retryAfter <= (o.maxRateWait ?? MAX_RATE_WAIT) ? Math.max(e.retryAfter, RETRY_WAIT[attempt]) : null;
       // 網路錯誤（fetch 失敗、串流中斷）
       else if (e instanceof TypeError) wait = RETRY_WAIT[attempt];
       if (wait === null) throw e;

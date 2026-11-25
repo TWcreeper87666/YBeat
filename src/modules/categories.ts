@@ -56,6 +56,7 @@ const MAP: Record<string, string> = {
   'fx-split': 'frame',
   'fx-kaleido': 'frame',
   'fx-letterbox': 'frame',
+  'fx-vignette': 'frame',
   'fx-speedlines': 'style',
   'fx-outline': 'style',
   'fx-matteoutline': 'style',

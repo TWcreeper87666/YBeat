@@ -72,28 +72,55 @@ export function transitionWindow(prev: Clip | undefined, c: Clip, side: 'in' | '
 
 /** 速度低於這個（含倒播）的那幾格改用倒播快取 */
 const REVERSE_RATE = 0.25;
-/** 變速曲線片段會用到的素材範圍（有倒播 / 極慢段才回傳）；依曲線快取 */
-const spanMemo = new WeakMap<object, { a: number; b: number } | null>();
-function curveSpan(clip: Clip, media: Media, ctx: Pick<RenderCtx, 'modules'>): { a: number; b: number } | null {
+/** 速度高於這個（往前跳）也算：<video> 跟不上，一樣要 seek */
+const JUMP_RATE = 16;
+/**
+ * 變速曲線裡 <video> 跟不上的區段（倒播 / 極慢 / 跳格），片段內秒數。
+ * exit = 離開這段時的素材時間（在這段裡就先把 <video> seek 過去等著）。
+ * ranges = 要先解好的素材範圍：前後多留一點，離開後 <video> 還沒跟上時接著用快取。
+ */
+interface CurveSpans { spans: { t0: number; t1: number; exit: number }[]; ranges: [number, number][] }
+const spanMemo = new WeakMap<object, CurveSpans & { in: number; dur: number }>();
+function curveSpans(clip: Clip, media: Media, ctx: Pick<RenderCtx, 'modules'>): CurveSpans | null {
   const keys = clip.remap.moduleId === 'remap-curve' ? clip.remap.keys : undefined;
   if (!keys?.length || media.kind !== 'video') return null;
   const memoKey = keys as unknown as object;
-  if (spanMemo.has(memoKey)) {
-    const m = spanMemo.get(memoKey)!;
-    // 同一條曲線換了 in（例如移動素材起點）：重算
-    if (!m || (m as { in?: number }).in === clip.in) return m;
+  const m = spanMemo.get(memoKey);
+  // 同一條曲線換了 in / 長度（例如移動素材起點）：重算
+  if (m && m.in === clip.in && m.dur === clip.duration) return m.spans.length ? m : null;
+  // 跟 clipSource 的差分間隔一樣（1/60 秒）：每一小段都剛好被一個取樣涵蓋，短短的跳格也不會漏
+  const step = 1 / 60;
+  const n = Math.max(8, Math.ceil(clip.duration / step));
+  const at = (k: number) => clipSource(clip, Math.min(clip.duration, k * step), media, ctx.modules);
+  const spans: CurveSpans['spans'] = [];
+  for (let k = 0; k < n; k++) {
+    const { rate } = at(k);
+    // 片段最後一格的差分會被夾住變成 0，不算
+    if (k * step >= clip.duration - step) break;
+    if (rate >= REVERSE_RATE && rate <= JUMP_RATE) continue;
+    const last = spans.at(-1);
+    if (last && Math.abs(last.t1 - k * step) < 1e-9) last.t1 = (k + 1) * step;
+    else spans.push({ t0: k * step, t1: (k + 1) * step, exit: 0 });
   }
-  const n = Math.max(8, Math.ceil(clip.duration * 30));
-  let a = Infinity, b = -Infinity, slow = false;
-  for (let k = 0; k <= n; k++) {
-    const { src, rate } = clipSource(clip, (k / n) * clip.duration, media, ctx.modules);
-    a = Math.min(a, src);
-    b = Math.max(b, src);
-    if (rate < REVERSE_RATE) slow = true;
+  const ranges: [number, number][] = [];
+  for (const sp of spans) {
+    sp.t1 = Math.min(sp.t1, clip.duration);
+    sp.exit = at(Math.round(sp.t1 / step)).src;
+    let a = Infinity, b = -Infinity;
+    for (let k = Math.floor(Math.max(0, sp.t0 - 0.2) / step); k * step <= Math.min(clip.duration, sp.t1 + 0.6); k++) {
+      const { src } = at(k);
+      a = Math.min(a, src);
+      b = Math.max(b, src);
+    }
+    const prev = ranges.at(-1);
+    if (prev && a <= prev[1] + 0.5 && b >= prev[0] - 0.5) {
+      prev[0] = Math.min(prev[0], a);
+      prev[1] = Math.max(prev[1], b);
+    } else ranges.push([a, b]);
   }
-  const out = slow ? Object.assign({ a, b }, { in: clip.in }) : null;
+  const out = { spans, ranges, in: clip.in, dur: clip.duration };
   spanMemo.set(memoKey, out);
-  return out;
+  return spans.length ? out : null;
 }
 /** 預覽：現在 ~ 4 秒後會播到的倒播片段，先把影格解好 */
 function prefetchReverse(ctx: RenderCtx, t: number) {
@@ -101,8 +128,8 @@ function prefetchReverse(ctx: RenderCtx, t: number) {
     if (c.start > t + 4 || c.start + c.duration < t) continue;
     const m = ctx.media.get(c.mediaId);
     if (!m || m.missing) continue;
-    const sp = curveSpan(c, m, ctx);
-    if (sp) void ensureReverseFrames(m, sp.a, sp.b);
+    const cs = curveSpans(c, m, ctx);
+    if (cs) for (const [a, b] of cs.ranges) void ensureReverseFrames(m, a, b);
   }
 }
 
@@ -890,11 +917,14 @@ export class Renderer {
       const { src, rate } = clipSource(clip, local, media, ctx.modules);
       matteSrc = src;
       const v = this.videoFor(clip, media, mode === 'preview');
-      // 變速曲線的倒播 / 極慢段：用預先解好的影格（<video> 往回 seek 太慢），不動 <video>
-      if (mode === 'preview' && rate < REVERSE_RATE && curveSpan(clip, media, ctx)) {
+      // 變速曲線的倒播 / 極慢 / 跳格段：用預先解好的影格（<video> 往回 seek 太慢），<video> 先 seek 到這段結束的位置等著
+      const cs = mode === 'preview' ? curveSpans(clip, media, ctx) : null;
+      const inSpan = cs?.spans.find((s) => local >= s.t0 && local < s.t1);
+      if (inSpan) {
         const rf = reverseFrameAt(media, src);
         if (rf) {
           if (!v.paused) v.pause();
+          if (!v.seeking && Math.abs(v.currentTime - inSpan.exit) > 0.02) v.currentTime = inSpan.exit;
           this.drawTex(target, clip, local, this.bitmapTex('rev:' + clip.id, rf.bm), media, blend, undefined, clip.aiMatte ? this.matteTex(clip, media, rf.pts, ctx) : null);
           return;
         }
@@ -906,6 +936,17 @@ export class Renderer {
       tex = this.videoTex(this.rootOf(clip.id), v, clip.fit === 'blur', mode === 'export', mode === 'preview' && playing);
       // AI 去背的遮罩要對準「貼圖裡實際的那一格」，不是目標時間（播放中影片會稍微超前 / 落後）
       matteSrc = this.texTime.get('vid:' + this.rootOf(clip.id)) ?? src;
+      // 剛離開倒播段：<video> 的畫面還沒跟上（seek / 開始播放中）→ 接著用快取影格，不要閃一下舊畫面
+      if (cs) {
+        const shown = this.texTime.get('vid:' + this.rootOf(clip.id));
+        if (v.seeking || shown === undefined || Math.abs(shown - src) > 0.1) {
+          const rf = reverseFrameAt(media, src);
+          if (rf) {
+            this.drawTex(target, clip, local, this.bitmapTex('rev:' + clip.id, rf.bm), media, blend, undefined, clip.aiMatte ? this.matteTex(clip, media, rf.pts, ctx) : null);
+            return;
+          }
+        }
+      }
       // 暫停中拖播放頭：精準的 seek 還沒完成（長 GOP 影片很慢）就先用快取的小張影格
       if (mode === 'preview' && !playing) {
         const shown = this.texTime.get('vid:' + this.rootOf(clip.id));

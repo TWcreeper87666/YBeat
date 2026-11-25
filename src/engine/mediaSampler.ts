@@ -5,17 +5,41 @@
  */
 import type { Media } from '../store';
 import { analyzeSamples, bestFace, frameStats, grayOf, peopleScore, type FaceBox, type FrameSample, type MediaInfo } from './mediaAnalysis';
-import { detectFaces } from './face';
+import { detectFaces, embedFace, EMBED_MIN_PX } from './face';
+import type { FacesAt } from './faceLead';
+import type { Face } from './faceTrack';
 import type { Shot } from '../ai/frames';
 import { decodeAt } from './matteDecode';
 
 const W = 160;
 const SHOT_SIDE = 384;
-/** 給 AI 看的位置（影片長度的比例） */
-const SHOT_AT = [0.15, 0.5, 0.85];
+/** 給 AI 導演看的畫面：每 SHOT_GAP 秒一張，一支最多 SHOT_MAX 張（很長的影片拉開間隔） */
+const SHOT_GAP = 2;
+const SHOT_MAX = 40;
 
-/** people：整個素材平均有多少人（0..1；偵測失敗 = 沒有）；face：圖片裡最大的臉 */
-export interface Sampled { info: MediaInfo | null; shots: { t: number; shot: Shot }[]; people?: number; face?: FaceBox | null }
+/** people：整個素材平均有多少人（0..1；偵測失敗 = 沒有）；face：圖片裡最大的臉；faceList：圖片裡的臉（含特徵） */
+export interface Sampled { info: MediaInfo | null; shots: { t: number; shot: Shot }[]; people?: number; face?: FaceBox | null; faceList?: FacesAt }
+
+/** 偵測到的臉 → 加上特徵（臉夠大、有特徵點才算；一格最多算最大的 EMBED_MAX 張，群眾畫面不用每張都算；特徵模型載入失敗就都不算） */
+const EMBED_MAX = 4;
+let embedBroken = false;
+async function withEmb(src: CanvasImageSource, w: number, h: number, faces: Face[]): Promise<NonNullable<FacesAt>> {
+  const out: NonNullable<FacesAt> = [];
+  let n = 0;
+  for (const f of [...faces].sort((a, b) => b.h - a.h)) {
+    const box = { x: f.x, y: f.y, w: f.w, h: f.h };
+    if (embedBroken || !f.kps || f.h * h < EMBED_MIN_PX || n >= EMBED_MAX) { out.push(box); continue; }
+    n++;
+    try {
+      out.push({ ...box, emb: await embedFace(src, f.kps.map((v, k) => v * (k % 2 ? h : w))) });
+    } catch (e) {
+      console.warn('face embedding failed', e);
+      embedBroken = true;
+      out.push(box);
+    }
+  }
+  return out;
+}
 
 /** from = 只分析素材的 from..from+duration 秒（自動剪輯的指定片段）；取樣時間都相對 from */
 type Src = Media & { from?: number };
@@ -41,15 +65,15 @@ async function sampleImage(m: Media): Promise<Sampled> {
   const shots = [{ t: 0, shot: toShot(img, img.naturalWidth, img.naturalHeight) }];
   try {
     const faces = await detectFaces(img, img.naturalWidth, img.naturalHeight);
-    return { info: null, shots, people: peopleScore(faces), face: bestFace(faces) };
+    return { info: null, shots, people: peopleScore(faces), face: bestFace(faces), faceList: await withEmb(img, img.naturalWidth, img.naturalHeight, faces) };
   } catch {
     return { info: null, shots };
   }
 }
 
-/** 找人：每秒最多一格（一支最多 FACE_MAX 格），先存 480px 的小圖（遠一點的臉也抓得到），取樣完再一張一張偵測臉 */
-const FACE_SIDE = 480;
-const FACE_MAX = 100;
+/** 找人：每秒最多一格（一支最多 FACE_MAX 格），先存 640px 的小圖（遠一點的臉也抓得到、認得出是誰），取樣完再一張一張偵測臉、算特徵 */
+const FACE_SIDE = 640;
+const FACE_MAX = 80;
 function faceGrabber(times: number[], step: number, vw: number, vh: number) {
   const every = Math.max(1, Math.ceil(1 / step - 1e-6), Math.ceil(times.length / FACE_MAX));
   const k = FACE_SIDE / Math.max(vw, vh, 1);
@@ -67,16 +91,19 @@ function faceGrabber(times: number[], step: number, vw: number, vh: number) {
       if (!pics.size) return undefined;
       const scores = new Map<number, number>();
       const boxes = new Map<number, FaceBox | null>();
+      const facesAt: FacesAt[] = info.quality.map(() => null);
       try {
         for (const [i, d] of pics) {
           g.putImageData(d, 0, 0);
           const faces = await detectFaces(g.canvas, w, h);
           scores.set(i, peopleScore(faces));
           boxes.set(i, bestFace(faces));
+          if (i < facesAt.length) facesAt[i] = await withEmb(g.canvas, w, h, faces);
         }
       } catch {
         return undefined;
       }
+      info.facesAt = facesAt;
       const idx = [...scores.keys()].sort((a, b) => a - b);
       const near = info.quality.map((_, i) => idx.reduce((best, x) => (Math.abs(x - i) < Math.abs(best - i) ? x : best), idx[0]));
       info.people = near.map((j) => scores.get(j)!);
@@ -98,7 +125,9 @@ function sampleTimes(dur: number) {
   const step = Math.max(0.5, dur / 360);
   const times: number[] = [];
   for (let t = 0; t < dur - 0.05; t += step) times.push(t);
-  const shotIdx = new Set(SHOT_AT.map((f) => Math.min(times.length - 1, Math.round((f * dur) / step))));
+  const every = Math.max(1, Math.round(SHOT_GAP / step), Math.ceil(times.length / SHOT_MAX));
+  // 從半個間隔開始（開頭第一格常常是黑的 / 還沒對焦）
+  const shotIdx = new Set(times.map((_, k) => k).filter((k) => (k + Math.floor(every / 2)) % every === 0));
   return { step, times, shotIdx };
 }
 

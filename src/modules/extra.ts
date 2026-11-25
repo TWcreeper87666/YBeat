@@ -361,6 +361,22 @@ vec4 effect(vec2 uv) {
 }
 `;
 
+const vignette = `// 暗角：畫面外圍變暗，視線集中在中間（整段放著用）
+// @duration 3
+// @param amount: float = 0.55 (0..1) "濃度"
+// @param size: float = 0.5 (0.05..1.2) "中間亮的範圍"
+// @param softness: float = 0.5 (0.01..1) "柔和"
+// @param tint: color = #000000 "顏色"
+vec4 effect(vec2 uv) {
+  vec4 c = tex(uv);
+  // 跟著畫面比例的橢圓：中間 0、四個角 1
+  float d = length((uv - 0.5) * 2.0) / 1.41421356;
+  float v = smoothstep(size, size + softness, d);
+  c.rgb = mix(c.rgb, tint, v * amount);
+  return c;
+}
+`;
+
 const lightLeak = `// 漏光 Light Leak
 // @duration 1.5
 // @hit
@@ -679,6 +695,7 @@ export const EXTRA_MODULES: Module[] = [
   mk('fx-bw', 'effect', '黑白高反差 B&W', bw),
   mk('fx-vhs', 'effect', 'VHS 掃描線', vhs),
   mk('fx-letterbox', 'effect', '電影黑邊 Letterbox', letterbox),
+  mk('fx-vignette', 'effect', '暗角 Vignette', vignette),
   mk('fx-lightleak', 'effect', '漏光 Light Leak', lightLeak, 2),
   mk('fx-grain', 'effect', '底片顆粒 Grain', grainFx),
   mk('fx-outline', 'effect', '描邊 Outline', outline),

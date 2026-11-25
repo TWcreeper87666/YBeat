@@ -120,6 +120,41 @@ const noLane = <T extends { lane?: number }>(list: T[]) => list.map(({ lane: _l,
   ok(imgs.shots.every((s) => s.mediaId !== 'a' || !s.motion), '推近到臉取代一般推近');
 }
 
+// AI 導演說要避開的範圍一定不用；整支都不能用的不選
+{
+  const info = { step: 0.5, duration: 40, motion: Array(80).fill(0.5), quality: Array(80).fill(1), cuts: [] };
+  const ban: [number, number][] = [[0, 30]];
+  const r = plan([], {}, { media: [{ id: 'video', kind: 'video', duration: 40, info, ban }] });
+  ok(r.shots.length > 0 && r.shots.every((s) => s.in >= 30 - 0.05), `只用沒避開的部分（${r.shots.map((s) => s.in.toFixed(1)).join(',')}）`);
+  const two = plan([], {}, { media: [{ id: 'a', kind: 'video', duration: 40, info, ban: [[0, 40]] }, { id: 'b', kind: 'video', duration: 40, info }] });
+  ok(two.shots.every((s) => s.mediaId === 'b'), '整支避開的素材不選');
+  const noInfo = plan([], {}, { media: [{ id: 'video', kind: 'video', duration: 40, ban }] });
+  ok(noInfo.shots.every((s) => s.in >= 30 - 0.05), '沒分析過也避開');
+}
+
+// 主角：鏡頭帶主角的臉當追蹤起點（在鏡頭範圍裡、離中間最近的取樣點）
+{
+  const faces = Array(80).fill({ x: 0.7, y: 0.4, w: 0.1, h: 0.2 });
+  const info = { step: 0.5, duration: 40, motion: Array(80).fill(0.5), quality: Array(80).fill(1), cuts: [], people: Array(80).fill(0.8), faces };
+  const leadPts = Array.from({ length: 40 }, (_, i) => ({ t: i, x: 0.7, y: 0.4, w: 0.1, h: 0.2 }));
+  const r = plan([], {}, { media: [{ id: 'video', kind: 'video', duration: 40, info, leadPts }] });
+  ok(r.shots.length > 0 && r.shots.every((s) => !!s.anchor && s.anchor.t >= s.in - 1 - 1e-6), '有主角：每個鏡頭都有追蹤起點（鏡頭範圍前後 1 秒內）');
+  const none = plan([], {}, { media: [{ id: 'video', kind: 'video', duration: 40, info }] });
+  ok(none.shots.every((s) => !s.anchor && !!s.face), '沒有主角資料：只開一般臉部追蹤');
+}
+
+// 影片的一格（popOnly）：只拿來做主體跳出、揭露拍用它，不進一般輪播
+{
+  const result = plan([], { pops: { variants: ['step'], per32: 4 } }, {
+    media: [
+      { id: 'video', kind: 'video', duration: 40 },
+      { id: 'video@3.00', kind: 'image', duration: Infinity, popOnly: true, pop: { ok: true, centered: true, cx: 0, cy: 0 } },
+    ],
+  });
+  ok(result.pops.length > 0 && result.pops.every((p) => p.mediaId === 'video@3.00'), '影片的一格拿來做主體跳出');
+  ok(result.shots.filter((s) => s.mediaId === 'video@3.00').every((s) => result.pops.some((p) => p.b1 === s.b0)), '影片的一格只出現在揭露拍');
+}
+
 // 觸發機率（trigger.ts）
 {
   const pts = Array.from({ length: 400 }, (_, i) => i * 0.5);

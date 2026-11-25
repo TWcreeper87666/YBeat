@@ -1095,6 +1095,8 @@ body.mask-dragging, body.mask-dragging * { user-select: none; }
 .curve-edit { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
 .curve-edit-svg { background: #0e0f13; border: 1px solid var(--line); border-radius: 4px; }
 .curve-edit .select { padding: 2px 6px; font-size: 12px; }
+/* 屬性面板裡 .ec-node .select 的 flex-basis 在直排會變成高度：曲線的下拉改成跟圖一樣寬 */
+.ec-node .curve-edit .select { flex: none; width: 100%; }
 .btn.on-accent { background: #13302d; border-color: var(--accent2); color: var(--accent2); }
 
 /* 時間尺固定在上方（.tl-row 的 position: relative 不能蓋掉 sticky） */

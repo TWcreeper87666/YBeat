@@ -1,5 +1,5 @@
 import type { MusicInfo } from './musicAnalysis';
-import { bestIn, faceIn, type FaceBox, type MediaInfo } from './mediaAnalysis';
+import { banned, bestIn, faceIn, freeRoom, type FaceBox, type MediaInfo, type Span } from './mediaAnalysis';
 import type { SectionKind } from './musicAnalysis';
 import type { PlanPop, PopVariant } from './subjectPop';
 import { speedCurve, type PlanSpeed, type SpeedVariant } from './speedRamp';
@@ -99,6 +99,12 @@ export interface PlanMedia {
   weight?: number;
   /** 影片亮點秒數。 */
   highlights?: number[];
+  /** 影片裡一定不能用的範圍（AI 導演說要避開的、只有別人的）。 */
+  ban?: Span[];
+  /** 影片的某一格（當成圖片）：只拿來做主體跳出，揭露那一拍接著播那支影片；不進一般的輪播。 */
+  popOnly?: true;
+  /** 主角的臉出現的取樣點（素材時間；圖片 t = 0）。 */
+  leadPts?: { t: number; x: number; y: number; w: number; h: number }[];
   /** 整個素材平均有多少人（0..1；圖片 = 那一張）。 */
   people?: number;
   /** 圖片裡最大的臉。 */
@@ -114,7 +120,11 @@ export interface PlanTransition { moduleId: string; beats: number }
  * face：這個鏡頭裡臉的平均位置（素材畫面 0..1）→ 片段打開臉部追蹤（特效的中心跟著臉）。
  * push：推近到臉上（取代一般的推近 / 拉遠；套用端依畫面比例算縮放、位移）。
  */
-export interface PlanShot { b0: number; b1: number; mediaId: string; in: number; motion?: KenBurns; transition?: PlanTransition; speed?: PlanSpeed; face?: FaceBox; push?: true }
+export interface PlanShot {
+  b0: number; b1: number; mediaId: string; in: number; motion?: KenBurns; transition?: PlanTransition; speed?: PlanSpeed; face?: FaceBox; push?: true;
+  /** 主角的臉（素材時間，不含指定片段的起點）：片段從這裡開始追主角 */
+  anchor?: { t: number; x: number; y: number; w: number; h: number };
+}
 export interface PlanOverlay {
   b0: number; b1: number; moduleId: string; params?: Record<string, number | boolean>; everyBeat?: boolean;
   /** 特效層產生的：觸發方式 */
@@ -212,7 +222,7 @@ export function planEdit(input: PlanInput): EditPlan {
         plan.pops.filter((p) => p.mediaId === m.id).length * 2 })).sort((a, b) => b.rank - a.rank);
       let picked: PlanPop | undefined;
       for (const { m } of ranked) {
-        const revealImages = media.filter((other) => other.kind === 'image' && other.id !== m.id &&
+        const revealImages = media.filter((other) => other.kind === 'image' && !other.popOnly && other.id !== m.id &&
           !plan.pops.some((p) => (p.mediaId === other.id || p.revealMediaId === other.id) &&
             b1 - 4 < p.b1 && p.b0 < b1));
         const revealImage = revealImages.find((other) => other.pop?.ok === false) ?? revealImages[0];
@@ -301,7 +311,7 @@ export function planEdit(input: PlanInput): EditPlan {
           const latest = m.duration - 0.02 - curve.sourceMax;
           if (!(window > 0) || latest < -curve.sourceMin) return null;
           const w0 = m.info
-            ? Math.min(bestIn(m.info, window, 1, usedReverse.get(m.id) ?? [], speedRng, m.highlights),
+            ? Math.min(bestIn(m.info, window, 1, usedReverse.get(m.id) ?? [], speedRng, m.highlights, m.ban),
               m.duration - 0.02 - window)
             : speedRng() * Math.max(0, latest + curve.sourceMin);
           const w1 = w0 + window;
@@ -309,7 +319,7 @@ export function planEdit(input: PlanInput): EditPlan {
           const samples = m.info?.motion.slice(Math.max(0, Math.floor(w0 / m.info.step)),
             Math.min(m.info.motion.length, Math.ceil(w1 / m.info.step)));
           const motion = samples?.length ? samples.reduce((sum, value) => sum + value, 0) / samples.length : m.info ? 0 : 1;
-          if (w0 < -1e-8 || w1 > m.duration - 0.02 + 1e-8 || motion < 0.15 ||
+          if (w0 < -1e-8 || w1 > m.duration - 0.02 + 1e-8 || motion < 0.15 || banned(m.ban, w0, w1) ||
             m.info?.cuts.some((cut) => w0 < cut + margin && w1 > cut - margin)) return null;
           const role = m.roles === undefined ? 0.5 : sectionKind && m.roles.includes(sectionKind) ? 1 : 0;
           return { m, w0, w1, rank: motion + role * 0.1 + (m.weight ?? 0.5) * 0.05 };
@@ -330,7 +340,8 @@ export function planEdit(input: PlanInput): EditPlan {
   // 每輪用完素材，依設定洗牌。
   let queue: PlanMedia[] = [];
   let previousMedia = '';
-  const rotation = media.some((item) => item.weight !== 0) ? media.filter((item) => item.weight !== 0) : media;
+  const normal = media.filter((item) => !item.popOnly);
+  const rotation = normal.some((item) => item.weight !== 0) ? normal.filter((item) => item.weight !== 0) : normal;
   const refill = () => {
     queue = [];
     const groupSize = settings.order === 'shuffle' ? rotation.length : 3;
@@ -387,13 +398,21 @@ export function planEdit(input: PlanInput): EditPlan {
     const reserved = reveal.get(b0);
     for (let i = 0; i < queue.length && !reserved; i++) {
       const m = queue[i];
-      if (blockedMedia(m.id, b0, b1) || m.id === previousMedia || m.kind === 'video' && m.duration + 1e-9 < shotSec) continue;
+      if (blockedMedia(m.id, b0, b1) || m.id === previousMedia || m.kind === 'video' && freeRoom(m.duration, m.ban) + 1e-9 < shotSec) continue;
       const roleMatch = m.roles === undefined ? 0.5 : sectionKind && m.roles.includes(sectionKind) ? 1 : 0;
       // 有人的素材優先
       const score = roleMatch + (m.weight ?? 0.5) * 0.5 + (m.people ?? 0) * 0.4 + rng() * 0.3;
       if (score > bestScore) { bestScore = score; choice = i; }
     }
     if (reserved) choice = queue.findIndex((m) => m.id === (reserved.revealMediaId ?? reserved.mediaId));
+    // 備案：先找還有空間（沒被 AI 導演整段避開）的素材，連續同一個也可以
+    const room = (m: PlanMedia) => m.kind !== 'video' || freeRoom(m.duration, m.ban) + 1e-9 >= shotSec;
+    if (choice < 0 && !reserved) choice = queue.findIndex((m) => !blockedMedia(m.id, b0, b1) && m.id !== previousMedia && room(m));
+    if (choice < 0 && !reserved) choice = queue.findIndex((m) => !blockedMedia(m.id, b0, b1) && room(m));
+    if (choice < 0 && !reserved && queue.some((m) => !room(m))) {
+      refill();
+      choice = queue.findIndex((m) => !blockedMedia(m.id, b0, b1) && room(m));
+    }
     if (choice < 0 && !reserved) choice = queue.findIndex((m) => !blockedMedia(m.id, b0, b1) && m.id !== previousMedia);
     if (choice < 0 && !reserved) choice = queue.findIndex((m) => !blockedMedia(m.id, b0, b1));
     if (choice < 0 && !reserved) {
@@ -411,10 +430,11 @@ export function planEdit(input: PlanInput): EditPlan {
       const regions = usedVideo.get(item.id) ?? [];
       if (item.info) {
         shot.in = bestIn(item.info, duration(b0, b1), level / 2,
-          regions.map((r) => ({ t0: r.b0, t1: r.b1 })), rng, item.highlights);
+          regions.map((r) => ({ t0: r.b0, t1: r.b1 })), rng, item.highlights, item.ban);
       } else {
-        const options = Array.from({ length: 12 }, () => latest * rng());
-        options.push(0, latest);
+        const all = [...Array.from({ length: 12 }, () => latest * rng()), 0, latest];
+        const free = all.filter((t) => !banned(item.ban, t, t + duration(b0, b1)));
+        const options = free.length ? free : all;
         const distance = (candidate: number) => regions.length ? Math.min(...regions.map((r) => Math.max(r.b0 - (candidate + duration(b0, b1)), candidate - r.b1, 0))) : 0;
         shot.in = options.sort((a, b) => distance(b) - distance(a))[0];
       }
@@ -588,14 +608,14 @@ export function planEdit(input: PlanInput): EditPlan {
       const own = prior.indexOf(regionOf.get(shot)!);
       if (own >= 0) prior.splice(own, 1);
       const w0 = item.info
-        ? bestIn(item.info, window, level / 2, prior, assignmentRng, item.highlights)
+        ? bestIn(item.info, window, level / 2, prior, assignmentRng, item.highlights, item.ban)
         : assignmentRng() * Math.max(0, latest + speed.sourceMin);
       const sourceEnd = w0 + window;
       const margin = reverseVariants.has(pick.variant) ? (item.info?.step ?? 0.2) / 2 : 0.1;
       const meanMotion = item.info ? item.info.motion
         .slice(Math.max(0, Math.floor(w0 / item.info.step)), Math.min(item.info.motion.length, Math.ceil(sourceEnd / item.info.step)))
         .reduce((sum, value, _, samples) => sum + value / samples.length, 0) : 1;
-      const valid = w0 >= -1e-8 && sourceEnd <= item.duration - 0.02 + 1e-8 &&
+      const valid = w0 >= -1e-8 && sourceEnd <= item.duration - 0.02 + 1e-8 && !banned(item.ban, w0, sourceEnd) &&
         !item.info?.cuts.some((cut) => w0 < cut + margin && sourceEnd > cut - margin) &&
         (!reverseVariants.has(pick.variant) && pick.variant !== 'beatStutter' || meanMotion >= 0.15);
       if (!valid) {
@@ -702,6 +722,13 @@ export function planEdit(input: PlanInput): EditPlan {
       : m.info ? faceIn(m.info, shot.in + (shot.speed?.sourceMin ?? 0), shot.in + (shot.speed?.sourceMax ?? duration(shot.b0, shot.b1))) : null;
     if (!f || f.h < FACE_MIN_H) continue;
     shot.face = f;
+    // 主角在這個鏡頭裡的取樣點（離中間最近的）
+    const t0 = m.kind === 'image' ? 0 : shot.in + (shot.speed?.sourceMin ?? 0);
+    const t1 = m.kind === 'image' ? 0 : shot.in + (shot.speed?.sourceMax ?? duration(shot.b0, shot.b1));
+    const mid = (t0 + t1) / 2;
+    // 取樣大約每秒一格：短鏡頭可能夾在兩格中間，前後放寬 1 秒
+    const pt = m.leadPts?.filter((p) => p.t >= t0 - 1 && p.t <= t1 + 1).sort((a, b) => Math.abs(a.t - mid) - Math.abs(b.t - mid))[0];
+    if (pt) shot.anchor = pt;
     if (settings.kenBurns) {
       delete shot.motion;
       shot.push = true;

@@ -153,7 +153,8 @@ function remap(t, p, info) { return t * p.speed; }  // 回傳素材時間（秒�
 | `src/ui/Preview.tsx` / `MaskEditor.tsx` | 預覽、變換框、遮罩編輯框 |
 | `src/ui/Dock.tsx` / `dockTree.ts` | 可拖曳停駐的版面（有測試） |
 | `src/engine/matte.ts`、`matteWorker.ts` | AI 去背（U²-Netp，Web Worker + onnxruntime-web） |
-| `src/engine/face.ts`、`faceTrack.ts`、`faceWorker.ts` | 臉部偵測（YuNet）、挑臉 / 平滑 / 內插、追丟的空洞用 VitTrack 補 |
+| `src/engine/face.ts`、`faceTrack.ts`、`faceWorker.ts` | 臉部偵測（YuNet）、挑臉 / 平滑 / 內插、追丟的空洞用 VitTrack 補；臉的特徵（SFace） |
+| `src/engine/faceLead.ts` | 自動剪輯認主角：臉對齊、特徵分群、只有別人的範圍 |
 | `src/engine/boxTrack.ts`、`vitTrack.ts`、`trackWorker.ts` | 自訂目標追蹤（VitTrack）、錨點、結果快取 |
 | `src/engine/follow.ts` | 片段追蹤的目標（`Clip.subject`）、point 參數跟隨、素材 ↔ 畫面座標換算 |
 | `src/engine/jobNeed.ts` | 背景運算（去背 / 偵測 / 追蹤）沒有片段需要了就停下 |
@@ -193,3 +194,4 @@ function remap(t, p, info) { return t * p.speed; }  // 回傳素材時間（秒�
 | `u2netp.onnx` | AI 去背 | [U-2-Net](https://github.com/xuebinqin/U-2-Net)（U²-Netp） | Apache 2.0 |
 | `face_detection_yunet_2023mar.onnx` | 臉部偵測 | [OpenCV Zoo – YuNet](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet) | MIT |
 | `object_tracking_vittrack_2023sep.onnx` | 目標追蹤 | [OpenCV Zoo – VitTrack](https://github.com/opencv/opencv_zoo/tree/main/models/object_tracking_vittrack) | Apache 2.0 |
+| `face_recognition_sface_2021dec_int8.onnx` | 自動剪輯認主角 | [OpenCV Zoo – SFace](https://github.com/opencv/opencv_zoo/tree/main/models/face_recognition_sface)（int8） | Apache 2.0 |

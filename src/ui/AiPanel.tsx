@@ -1,8 +1,8 @@
 import { $t, displayName } from '../i18n';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { BookOpen, Check, CircleAlert, Copy, ExternalLink, Eye, EyeOff, Image as ImageIcon, Info, LoaderCircle, Paperclip, Plus, RefreshCw, Send, Settings, Sparkles, Square, Trash2, Wand2 } from 'lucide-react';
+import { BookOpen, Check, CircleAlert, Copy, ExternalLink, Eye, EyeOff, Image as ImageIcon, Info, LoaderCircle, Paperclip, Plus, RefreshCw, Send, Settings, Sparkles, Square, Trash2, Wand2, Zap } from 'lucide-react';
 import {
-  MAX_FIXES, aiErrorText, applyChatProposals, clearChat, refreshModels, sendChat, stopChat, useAiChat, useAiModels, useAiSettings,
+  MAX_FIXES, aiErrorText, applyChatProposalsToast, clearChat, refreshModels, sendChat, stopChat, useAiChat, useAiModels, useAiSettings,
   type ChatMsg,
 } from '../ai/assistant';
 import { codeBlocks, detectKind, guessName, validateModule } from '../ai/validate';
@@ -201,10 +201,7 @@ function CodeCard({ code, lang, live, msg }: { code: string; lang: string; live:
 
 function ProposalCard({ msg }: { msg: ChatMsg }) {
   const list = msg.proposals!;
-  const apply = () => {
-    const r = applyChatProposals(msg.id);
-    if (r) toast(r.skipped ? $t('已套用 {0} 項，{1} 項已不存在', r.done, r.skipped) : $t('已套用 {0} 項', r.done));
-  };
+  const apply = () => applyChatProposalsToast(msg.id);
   return (
     <div className="ai-code">
       <div className="ai-code-head">
@@ -258,6 +255,16 @@ function Message({ msg }: { msg: ChatMsg }) {
       )}
       {msg.streaming && !!msg.seen?.length && !msg.fixing && <span className="ai-status"><LoaderCircle size={12} className="spin" /> {$t('檢查畫面中')}</span>}
       {!!msg.proposals?.length && <ProposalCard msg={msg} />}
+      {msg.steps && (
+        <div className="ai-code">
+          <div className="ai-code-head">
+            <span className="ai-code-lang">{$t('自動剪輯')}</span>
+            <span className="spacer" />
+            {msg.steps.running && <span className="ai-status"><LoaderCircle size={12} className="spin" /> {msg.steps.label || $t('進行中')}</span>}
+          </div>
+          {!!msg.steps.lines.length && <ul className="ai-ops">{msg.steps.lines.map((l, i) => <li key={i}>{l}</li>)}</ul>}
+        </div>
+      )}
       {msg.streaming && !msg.text && <span className="muted small"><LoaderCircle size={12} className="spin" /> {$t('思考中')}</span>}
       {msg.fixing ? <span className="ai-status"><LoaderCircle size={12} className="spin" /> {$t('修正中 {0}/{1}', msg.fixing, MAX_FIXES)}</span> : null}
       {!msg.streaming && !!msg.fixes && <span className="ai-status muted">{$t('已自動修正 {0} 次', msg.fixes)}</span>}
@@ -276,6 +283,8 @@ export function AiPanel() {
   const [text, setText] = useState('');
   const [attachOn, setAttachOn] = useState(true);
   const [frameOn, setFrameOn] = useState(false);
+  const autoOn = useAiSettings((s) => s.auto);
+  const setAi = useAiSettings((s) => s.set);
   // 程式碼分頁目前打開的模組（可以附加到問題裡）
   useCodeEditor((s) => s.active);
   useCodeEditor((s) => s.drafts);
@@ -344,6 +353,9 @@ export function AiPanel() {
           )}
           <ToggleChip v={frameOn} on={setFrameOn} title={frameOn ? $t('不附加') : $t('附加預覽畫面')}>
             <ImageIcon size={11} /> {$t('預覽畫面')}
+          </ToggleChip>
+          <ToggleChip v={autoOn} on={(v) => setAi({ auto: v })} title={$t('AI 提議的修改直接套用')}>
+            <Zap size={11} /> {$t('自動套用')}
           </ToggleChip>
         </div>
         <div className="ai-input-row">

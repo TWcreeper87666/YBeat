@@ -28,18 +28,21 @@ export function frameStats(gray: Float32Array, w: number, h: number, prev?: Floa
 }
 
 export interface FrameSample { t: number; luma: number; sharp: number; diff: number }
+import type { FacesAt } from './faceLead';
+
 /** 一格畫面裡最大的那張臉（素材畫面 0..1：中心、高度） */
-export interface FaceBox { x: number; y: number; h: number }
+export interface FaceBox { x: number; y: number; h: number; w?: number }
 /**
  * people：每個取樣點畫面裡有沒有人（0..1，臉越大越高）；faces：那一格最大的臉（沒有 = null）。
  * 沒偵測 = 沒有這兩個欄位。
  */
-export interface MediaInfo { step: number; duration: number; motion: number[]; quality: number[]; cuts: number[]; people?: number[]; faces?: (FaceBox | null)[] }
+/** facesAt：有取樣找人的那幾格偵測到的臉（含特徵；沒取樣 = null），主角辨識用 */
+export interface MediaInfo { step: number; duration: number; motion: number[]; quality: number[]; cuts: number[]; people?: number[]; faces?: (FaceBox | null)[]; facesAt?: FacesAt[] }
 
 /** 最大的那張臉 */
 export function bestFace(faces: { x: number; y: number; h: number }[]): FaceBox | null {
   let best: FaceBox | null = null;
-  for (const f of faces) if (!best || f.h > best.h) best = { x: f.x, y: f.y, h: f.h };
+  for (const f of faces) if (!best || f.h > best.h) best = { x: f.x, y: f.y, h: f.h, ...('w' in f && typeof f.w === 'number' ? { w: f.w } : {}) };
   return best;
 }
 
@@ -133,20 +136,36 @@ function windowScore(info: MediaInfo, t0: number, t1: number, wantMotion: number
 /** 有人的畫面加分（品質 0..1、亮點 +0.5） */
 export const PEOPLE_BONUS = 0.6;
 
+/** 素材時間的範圍（秒） */
+export type Span = [number, number];
+/** t0..t1 碰到禁用範圍（容許 0.05 秒的邊） */
+export const banned = (ban: Span[] | undefined, t0: number, t1: number) => !!ban?.some(([a, b]) => t0 < b - 0.05 && t1 > a + 0.05);
+/** 避開禁用範圍後最長的一段（秒） */
+export function freeRoom(duration: number, ban: Span[] | undefined): number {
+  let best = 0, at = 0;
+  for (const [a, b] of [...(ban ?? [])].sort((x, y) => x[0] - y[0])) {
+    best = Math.max(best, a - at);
+    at = Math.max(at, b);
+  }
+  return Math.max(best, duration - at);
+}
+
 export function scoreWindow(info: MediaInfo, t0: number, t1: number, wantMotion: number): number {
   return windowScore(info, t0, t1, wantMotion, true);
 }
 
-export function bestIn(info: MediaInfo, dur: number, wantMotion: number, avoid: { t0: number; t1: number }[], rng: () => number, highlights: number[] = []): number {
+/** ban = 一定不能用的範圍（AI 導演說要避開的）；整支都不能用時照舊挑（呼叫端應先用 freeRoom 排除） */
+export function bestIn(info: MediaInfo, dur: number, wantMotion: number, avoid: { t0: number; t1: number }[], rng: () => number, highlights: number[] = [], ban: Span[] = []): number {
   if (dur >= info.duration) return 0;
   const latest = Math.max(0, info.duration - dur);
   const stride = info.step > 0 ? info.step / 2 : latest || 1;
   const candidates: number[] = [];
   for (let t = 0; t < latest; t += stride) candidates.push(t);
   candidates.push(latest);
-  const rank = (ignoreCuts: boolean): { t: number; score: number } => {
+  const rank = (ignoreCuts: boolean, ignoreBan = false): { t: number; score: number } => {
     let best = { t: 0, score: -Infinity };
     for (const t of candidates) {
+      if (!ignoreBan && banned(ban, t, t + dur)) continue;
       const base = windowScore(info, t, t + dur, wantMotion, !ignoreCuts);
       if (base === -Infinity) continue;
       const overlap = avoid.reduce((sum, region) => sum + Math.max(0, Math.min(t + dur, region.t1) - Math.max(t, region.t0)), 0);
@@ -157,5 +176,7 @@ export function bestIn(info: MediaInfo, dur: number, wantMotion: number, avoid: 
     return best;
   };
   const first = rank(false);
-  return first.score === -Infinity ? rank(true).t : first.t;
+  if (first.score !== -Infinity) return first.t;
+  const loose = rank(true);
+  return loose.score !== -Infinity ? loose.t : rank(true, true).t;
 }

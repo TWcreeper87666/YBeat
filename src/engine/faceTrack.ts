@@ -10,6 +10,8 @@ export interface Face {
   w: number;
   h: number;
   score: number;
+  /** 5 個特徵點（右眼、左眼、鼻尖、右嘴角、左嘴角）的 x, y（素材畫面 0..1）；主角辨識對齊用 */
+  kps?: number[];
 }
 
 /** 一次取樣（素材時間，秒）偵測到的所有臉 */
@@ -38,7 +40,9 @@ export function decodeYunet(out: Record<string, ArrayLike<number>>, inW: number,
         if (score < thr) continue;
         const cx = (c + bbox[i * 4]) * s, cy = (r + bbox[i * 4 + 1]) * s;
         const w = Math.exp(bbox[i * 4 + 2]) * s, h = Math.exp(bbox[i * 4 + 3]) * s;
-        faces.push({ x: cx / imgW, y: cy / imgH, w: w / imgW, h: h / imgH, score });
+        const kp = out[`kps_${s}`];
+        const kps = kp ? Array.from({ length: 10 }, (_, k) => ((k % 2 ? r : c) + kp[i * 10 + k]) * s / (k % 2 ? imgH : imgW)) : undefined;
+        faces.push({ x: cx / imgW, y: cy / imgH, w: w / imgW, h: h / imgH, score, ...(kps ? { kps } : {}) });
       }
     }
   }
