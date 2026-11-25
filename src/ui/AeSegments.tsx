@@ -2,18 +2,17 @@
  * 自動剪輯的素材清單：從素材分頁把影片 / 圖片拖到自動剪輯分頁 → 選範圍加入（按住 Alt = 整段）。
  * 同一支影片可以加很多段，片段可以改名。清單是空的 = 用素材庫全部（清單上照樣列出每個素材）。
  */
-import React, { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { create } from 'zustand';
-import { Images, Pause, Pencil, Play, X } from 'lucide-react';
+import { Crop as CropIcon, Images, Pencil, X } from 'lucide-react';
 import { $t } from '../i18n';
 import { mediaUsable, uid, useStore, type Media } from '../store';
 import { tc } from '../engine/rulerTicks';
 import { footage, useAutoEdit, wholeSeg, type AeSeg } from '../engine/autoEditSettings';
-import { scrubFrame, warmScrub } from '../engine/scrubCache';
 import { useLibFocus } from './uiStore';
 import { useDock } from './Dock';
-import { isTextField } from './focus';
+import { RangePicker, isFullCrop, type Crop } from './RangePicker';
 import { openSource, useSource } from './SourcePanel';
 
 export const roleName = (k: string) => ({ intro: $t('開頭'), build: $t('鋪陳'), drop: $t('高潮'), body: $t('主體'), outro: $t('結尾') } as Record<string, string>)[k] ?? k;
@@ -39,7 +38,7 @@ function addSegs(list: AeSeg[]) {
     if (i >= 0) out.push(...rest.splice(i, 1));
     else out.push(g);
   }
-  for (const n of rest) if (!out.some((g) => g.mediaId === n.mediaId && g.a === n.a && g.b === n.b)) out.push(n);
+  for (const n of rest) if (!out.some((g) => g.mediaId === n.mediaId && g.a === n.a && g.b === n.b && JSON.stringify(g.crop) === JSON.stringify(n.crop))) out.push(n);
   setSegs(out);
 }
 
@@ -118,6 +117,7 @@ export function SegList() {
               <span className="ae-seg-name" title={m.name} onDoubleClick={(e) => (e.stopPropagation(), setRenaming(g.id))}>{g.name ?? m.name}</span>
             )}
             {d && <em className="ae-role" title={d.note}>{d.weight === 0 ? $t('不用') : d.roles.map(roleName).join(' · ')}</em>}
+            {g.crop && <CropIcon size={11} className="ae-crop" aria-label={$t('已裁切')} />}
             <span className="ae-stat">{!video ? $t('圖片') : ranged ? `${fmt(g.a)} – ${fmt(g.b)}` : fmt(m.duration)}</span>
             <span className="ae-seg-btns" onClick={(e) => e.stopPropagation()}>
               {video && <button className="ec-icon" title={$t('調整範圍')} onClick={() => openRange(m, row.implicit ? undefined : g, [], row.implicit)}><Pencil size={12} /></button>}
@@ -141,195 +141,19 @@ export function AeRangeDialog() {
   return createPortal(<RangeDialog key={`${req.mediaId}:${req.segId ?? ''}`} req={req} m={m} />, document.body);
 }
 
-type AB = { a: number; b: number };
-
 function RangeDialog({ req, m }: { req: RangeReq; m: Media }) {
-  const dur = m.duration;
-  const [ab, setAB] = useState<AB>({ a: req.a, b: req.b });
-  const { a, b } = ab;
-  const [t, setT] = useState(req.a);
-  const [playing, setPlaying] = useState(false);
-  const video = useRef<HTMLVideoElement>(null);
-  const overlay = useRef<HTMLCanvasElement>(null);
-  const bar = useRef<HTMLDivElement>(null);
   const others = useAutoEdit((x) => x.segs.filter((g) => g.mediaId === m.id && g.id !== req.segId));
-  const cur = useRef(ab);
-  cur.current = ab;
-  // 視窗內的復原 / 重做（範圍的調整）
-  const past = useRef<AB[]>([]);
-  const future = useRef<AB[]>([]);
-  const remember = () => { past.current.push(cur.current); future.current = []; };
-  const undo = () => { const p = past.current.pop(); if (p) { future.current.push(cur.current); setAB(p); } };
-  const redo = () => { const f = future.current.pop(); if (f) { past.current.push(cur.current); setAB(f); } };
-
-  /** 拖曳中的跳轉：上一次 seek 還沒完成就先記著，完成後再跳到最新位置（跟素材預覽一樣） */
-  const target = useRef<number | null>(null);
-  const scrubbing = useRef(false);
-  const seek = (x: number) => {
-    const v = video.current;
-    const c = Math.max(0, Math.min(dur, x));
-    target.current = c;
-    setT(c);
-    if (v && !v.seeking) v.currentTime = c;
-  };
-
-  useEffect(() => {
-    const v = video.current;
-    if (!v) return;
-    let raf = 0;
-    const onSeeked = () => {
-      const want = target.current;
-      if (want !== null && Math.abs(v.currentTime - want) > 0.03) v.currentTime = want;
-      else target.current = null;
-    };
-    v.addEventListener('seeked', onSeeked);
-    const tick = () => {
-      const { a: lo, b: hi } = cur.current;
-      // 播放：只循環播選取的範圍
-      if (!v.paused && target.current === null && (v.currentTime >= hi - 0.01 || v.currentTime < lo - 0.05)) v.currentTime = lo;
-      if (target.current === null) setT(v.currentTime);
-      // 拖曳中精準畫面還沒出來 → 先畫快取的小張影格
-      const ov = overlay.current;
-      if (ov) {
-        const want = target.current;
-        const stale = want !== null && (v.seeking || Math.abs(v.currentTime - want) > 0.08);
-        const bm = stale && scrubbing.current ? scrubFrame(m, want!) : null;
-        if (bm) {
-          if (ov.width !== bm.width || ov.height !== bm.height) { ov.width = bm.width; ov.height = bm.height; }
-          const g = ov.getContext('2d')!;
-          g.setTransform(1, 0, 0, -1, 0, bm.height); // 快取影格是上下翻轉存的（給 WebGL 用）
-          g.drawImage(bm, 0, 0);
-          ov.style.display = 'block';
-        } else ov.style.display = 'none';
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    const on = () => setPlaying(!v.paused);
-    v.addEventListener('play', on);
-    v.addEventListener('pause', on);
-    warmScrub(m, req.a);
-    seek(req.a);
-    return () => {
-      cancelAnimationFrame(raf);
-      v.removeEventListener('seeked', onSeeked);
-      v.removeEventListener('play', on);
-      v.removeEventListener('pause', on);
-      v.pause();
-    };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
-  const toggle = () => {
-    const v = video.current;
-    if (!v) return;
-    if (v.paused) {
-      if (v.currentTime < a || v.currentTime >= b - 0.01) v.currentTime = a;
-      void v.play().catch(() => {});
-    } else v.pause();
-  };
-
   const close = () => {
-    video.current?.pause();
     const next = req.queue[0] && useStore.getState().media.find((x) => x.id === req.queue[0]);
     if (next) openRange(next, undefined, req.queue.slice(1));
     else useRange.setState({ req: null });
   };
-  const commit = () => {
-    if (b - a < 0.2) return;
-    if (req.segId) setSegs(segsNow().map((g) => (g.id === req.segId ? { ...g, a, b } : g)));
-    else if (req.implicit && !segsNow().length) setSegs(explicit().map((g) => (g.mediaId === m.id ? { ...g, a, b } : g)));
-    else addSegs([{ id: uid(), mediaId: m.id, a, b }]);
+  const commit = (a: number, b: number, c?: Crop) => {
+    const crop = isFullCrop(c) ? undefined : c;
+    if (req.segId) setSegs(segsNow().map((g) => (g.id === req.segId ? { ...g, a, b, crop } : g)));
+    else if (req.implicit && !segsNow().length) setSegs(explicit().map((g) => (g.mediaId === m.id ? { ...g, a, b, crop } : g)));
+    else addSegs([{ id: uid(), mediaId: m.id, a, b, ...(crop ? { crop } : {}) }]);
   };
-  /** 加入這段、留著視窗再選下一段（從這段結尾開始） */
-  const addMore = () => {
-    commit();
-    past.current = [];
-    future.current = [];
-    const na = Math.min(b, dur - 0.2);
-    setAB({ a: na, b: dur });
-    seek(na);
-  };
-  const clampIn = (x: number, r: AB): AB => ({ ...r, a: Math.max(0, Math.min(x, r.b - 0.2)) });
-  const clampOut = (x: number, r: AB): AB => ({ ...r, b: Math.min(dur, Math.max(x, r.a + 0.2)) });
-
-  useEffect(() => {
-    const k = (e: KeyboardEvent) => {
-      if (isTextField(e.target)) return;
-      const mod = e.ctrlKey || e.metaKey;
-      if (mod && e.key.toLowerCase() === 'z') (e.shiftKey ? redo : undo)();
-      else if (mod && e.key.toLowerCase() === 'y') redo();
-      else if (mod) return;
-      else if (e.key === 'Escape') close();
-      else if (e.key === 'Enter') { commit(); close(); }
-      else if (e.key === ' ') toggle();
-      else if (e.key === 'i' || e.key === 'I') { remember(); setAB(clampIn(t, cur.current)); }
-      else if (e.key === 'o' || e.key === 'O') { remember(); setAB(clampOut(t, cur.current)); }
-      else return;
-      e.preventDefault();
-      e.stopPropagation();
-    };
-    window.addEventListener('keydown', k, true);
-    return () => window.removeEventListener('keydown', k, true);
-  });
-
-  // 範圍條：拖把手 = 調入點 / 出點（畫面跟著跳），其他地方 = 移動播放位置
-  const timeAt = (x: number) => {
-    const r = bar.current!.getBoundingClientRect();
-    return Math.max(0, Math.min(1, (x - r.left) / r.width)) * dur;
-  };
-  const down = (e: React.PointerEvent, what: 'a' | 'b' | 't') => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    e.stopPropagation();
-    video.current?.pause();
-    scrubbing.current = true;
-    const start = cur.current;
-    const apply = (x: number) => {
-      const v = timeAt(x);
-      if (what === 'a') { const r = clampIn(v, cur.current); setAB(r); cur.current = r; seek(r.a); }
-      else if (what === 'b') { const r = clampOut(v, cur.current); setAB(r); cur.current = r; seek(r.b); }
-      else seek(v);
-    };
-    apply(e.clientX);
-    const move = (ev: PointerEvent) => apply(ev.clientX);
-    const up = () => {
-      scrubbing.current = false;
-      window.removeEventListener('pointermove', move);
-      window.removeEventListener('pointerup', up);
-      if (what !== 't' && (start.a !== cur.current.a || start.b !== cur.current.b)) { past.current.push(start); future.current = []; }
-    };
-    window.addEventListener('pointermove', move);
-    window.addEventListener('pointerup', up);
-  };
-  const pc = (x: number) => `${(x / Math.max(1e-6, dur)) * 100}%`;
-
-  return (
-    <div className="overlay" style={{ zIndex: 300 }} onPointerDown={(e) => e.target === e.currentTarget && close()}>
-      <div className="dialog wide ae-range">
-        <h3 title={m.name}>{m.name}</h3>
-        <div className="ae-range-video">
-          <video ref={video} src={m.url} playsInline preload="auto" onClick={toggle} />
-          <canvas ref={overlay} />
-        </div>
-        <div className="ae-range-bar" ref={bar} onPointerDown={(e) => down(e, 't')}>
-          {others.map((g) => <i key={g.id} className="other" style={{ left: pc(g.a), width: pc(g.b - g.a) }} />)}
-          <i className="sel" style={{ left: pc(a), width: pc(b - a) }} />
-          <i className="head" style={{ left: pc(t) }} />
-          <b style={{ left: pc(a) }} onPointerDown={(e) => down(e, 'a')} />
-          <b style={{ left: pc(b) }} onPointerDown={(e) => down(e, 'b')} />
-        </div>
-        <div className="ae-line">
-          <button className="ec-icon" title={playing ? $t('暫停') : $t('播放')} onClick={toggle}>{playing ? <Pause size={14} /> : <Play size={14} />}</button>
-          <span className="ae-stat">{fmt(t)}</span>
-          <span className="spacer" />
-          <span className="ae-stat">{fmt(a)} – {fmt(b)} · {(b - a).toFixed(1)}s</span>
-        </div>
-        <div className="dialog-actions">
-          <button className="btn" onClick={close}>{$t('取消')}</button>
-          {!req.segId && <button className="btn" onClick={addMore}>{$t('再加一段')}</button>}
-          <button className="btn primary" onClick={() => (commit(), close())}>{req.segId ? $t('確定') : $t('加入')}</button>
-        </div>
-      </div>
-    </div>
-  );
+  const initCrop = req.segId ? segsNow().find((g) => g.id === req.segId)?.crop : undefined;
+  return <RangePicker m={m} init={{ a: req.a, b: req.b }} initCrop={initCrop} crop others={others} editing={!!req.segId} onCommit={commit} onClose={close} />;
 }

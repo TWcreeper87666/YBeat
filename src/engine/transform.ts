@@ -1,6 +1,6 @@
 import { $t } from '../i18n';
 import { ease } from './remap';
-import { ANIM_PROPS, evalKeys, upsertKey, type AnimProp, type Keys } from './keyframes';
+import { ANIM_PROPS, evalKeys, newKey, upsertKey, type AnimProp, type Keyframe, type Keys } from './keyframes';
 
 /** 片段在畫面中的變換。x/y 以畫面寬/高為 1（0 = 置中，y 向下為正），rotation 為度（順時針） */
 export interface Transform {
@@ -80,4 +80,48 @@ export function fitSize(cover: boolean, srcAspect: number, frameAspect: number):
   const wide = srcAspect > frameAspect;
   if (cover) return wide ? [srcAspect, 1] : [frameAspect, frameAspect / srcAspect];
   return wide ? [frameAspect, frameAspect / srcAspect] : [srcAspect, 1];
+}
+
+/** 裁切框：相對素材畫面的比例 0~1（左上角 + 寬高） */
+export interface Crop { x: number; y: number; w: number; h: number }
+export const FULL_CROP: Crop = { x: 0, y: 0, w: 1, h: 1 };
+export const isFullCrop = (c?: Crop | null) => !c || (c.x <= 0.001 && c.y <= 0.001 && c.w >= 0.999 && c.h >= 0.999);
+
+/** 只看得到裁切框、框內剛好填滿畫面（fit = cover）時的縮放與位移 */
+export function cropView(c: Crop, srcAspect: number, frameAspect: number): { s: number; x: number; y: number } {
+  const F = fitSize(true, srcAspect, frameAspect);
+  const G = fitSize(true, (srcAspect * c.w) / c.h, frameAspect);
+  const s = G[0] / (c.w * F[0]);
+  const cx = c.x + c.w / 2, cy = c.y + c.h / 2;
+  return { s, x: ((0.5 - cx) * F[0] * s) / frameAspect, y: (0.5 - cy) * F[1] * s };
+}
+
+/**
+ * 片段套上裁切：原本的縮放 / 位移（含關鍵影格）當作是對「裁切後的畫面」做的，換算成對整個素材的值。
+ * 有動畫時在每個 key 的時間點重算（片段要用 fit = cover）。
+ */
+export function cropClip(clip: Animatable, crop: Crop, srcAspect: number, frameAspect: number): { transform: Transform; keys: Keys } {
+  const v = cropView(crop, srcAspect, frameAspect);
+  const map = (t: Transform) => ({ scaleX: t.scaleX * v.s, scaleY: t.scaleY * v.s, x: t.scaleX * v.x + t.x, y: t.scaleY * v.y + t.y });
+  const keys = clip.keys ?? {};
+  const props = ['scaleX', 'scaleY', 'x', 'y'] as const;
+  if (!props.some((p) => keys[p]?.length)) return { transform: { ...clip.transform, ...map(clip.transform) }, keys };
+  const all = props.flatMap((p) => keys[p] ?? []);
+  const times = [...new Set(all.map((k) => k.t))].sort((a, b) => a - b);
+  const easeAt = (t: number): Keyframe['ease'] => all.find((k) => k.t === t)?.ease ?? [0, 0, 1, 1];
+  const vals = times.map((t) => map(clipTransformAt(clip, t)));
+  const out: Keys = { ...keys };
+  for (const p of props) out[p] = times.map((t, i) => newKey(t, vals[i][p], easeAt(t)));
+  return { transform: clip.transform, keys: out };
+}
+
+/** 臉 / 框（素材畫面 0..1）換到裁切框裡的座標；中心在框外 = null */
+export function intoCrop<T extends { x: number; y: number; h: number; w?: number }>(b: T, c: Crop): T | null {
+  const x = (b.x - c.x) / c.w, y = (b.y - c.y) / c.h;
+  if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+  return { ...b, x, y, h: b.h / c.h, ...(b.w !== undefined ? { w: b.w / c.w } : {}) };
+}
+/** intoCrop 的反向：裁切框裡的座標換回素材畫面 */
+export function outOfCrop<T extends { x: number; y: number; h: number; w?: number }>(b: T, c: Crop): T {
+  return { ...b, x: c.x + b.x * c.w, y: c.y + b.y * c.h, h: b.h * c.h, ...(b.w !== undefined ? { w: b.w * c.w } : {}) };
 }

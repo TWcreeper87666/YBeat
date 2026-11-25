@@ -33,6 +33,7 @@ import { sourceTime, tracking } from '../engine/follow';
 import { faceDone, useFaces } from '../engine/face';
 import { boxCoverage, useBoxTracks } from '../engine/boxTrack';
 import { marqueeClamp } from './marqueeClamp';
+import { useResolvedTheme } from '../prefs';
 
 const SNAP_PX = 8;
 /** 時間軸預設長度（秒）；專案比這個長才依專案長度延伸 */
@@ -913,19 +914,6 @@ export function mergeOrHint() {
 
 interface AddTrackState { x: number; y: number; kind: TrackKind; above: number | null }
 
-/** 依軌道類型列出「放在哪一軌上方」，並換算成插入的 index */
-function positionOptions(kind: TrackKind, n: number) {
-  // 影片 / 特效：index 大的在上面；音訊：index 小的在上面
-  const order = kind === 'audio' ? [...Array(n).keys()] : [...Array(n).keys()].reverse();
-  const opts = [{ label: kind === 'audio' ? $t('最上方') : $t('最上層'), at: kind === 'audio' ? 0 : n }];
-  for (const i of order) {
-    const at = kind === 'audio' ? i + 1 : i;
-    opts.push({ label: kind === 'audio' ? $t('在「{0} {1}」之後', NAMES[kind], i + 1) : $t('在「{0} {1}」下層', NAMES[kind], i + 1), at });
-  }
-  // 去掉重複（最上層 = 第一條的上方）
-  return opts.filter((o, i) => opts.findIndex((x) => x.at === o.at) === i);
-}
-
 const KINDS: TrackKind[] = ['video', 'fx', 'audio'];
 
 /** 畫面最下方的插入位置：音訊 = 最後；影片 / 特效依顯示設定（上層在下方 → 最上層；上層在上方 → 最底層） */
@@ -938,11 +926,20 @@ export function bottomSlot(kind: TrackKind): { at: number; level?: number } {
   return upperAtBottom ? { at: n, level: s.tracks.video.length } : { at: 0, level: 0 };
 }
 
-/** 在某條軌道下方（畫面上）插入新軌道：先加在清單最後（原本軌道的編號不變），再排到那條軌道下面 */
-function insertTracksBelow(kind: TrackKind, idx: number, count: Record<TrackKind, number>) {
+/**
+ * 新增軌道的位置：所有軌道（不分類型）照圖層順序由上到下排，p = 插在第 p 條之前（0 = 最上層、n = 最底層）。
+ * 換算成畫面上的位置（上層在下方時順序相反）。
+ */
+function layerRows() {
+  const S = useStore.getState();
+  const screen = displayRows(S.tracks, S.upperAt);
+  return { screen, layer: S.upperAt === 'top' ? screen : [...screen].reverse() };
+}
+
+/** 新軌道先加在清單最後（原本軌道的編號不變），再插到顯示順序的 screenPos */
+function insertTracksAt(screenPos: number, count: Record<TrackKind, number>, layerOrder: boolean) {
   const S = useStore.getState();
   const before = displayRows(S.tracks, S.upperAt);
-  const pos = before.findIndex((r) => r.kind === kind && r.idx === idx);
   const added: { kind: TrackKind; idx: number }[] = [];
   for (const k of KINDS) {
     for (let i = 0; i < count[k]; i++) {
@@ -950,21 +947,28 @@ function insertTracksBelow(kind: TrackKind, idx: number, count: Record<TrackKind
       useStore.getState().addTrack(k);
     }
   }
+  // 依圖層順序指定時，畫面上的順序要跟圖層一致（上層在下方 → 反過來）
+  if (layerOrder && S.upperAt === 'bottom') added.reverse();
   const order = [...before];
-  order.splice(pos < 0 ? order.length : pos + 1, 0, ...added);
+  order.splice(Math.max(0, Math.min(order.length, screenPos)), 0, ...added);
   useStore.getState().reorderTracks(order);
+}
+
+/** 在某條軌道下方（畫面上）插入新軌道 */
+function insertTracksBelow(kind: TrackKind, idx: number, count: Record<TrackKind, number>) {
+  const S = useStore.getState();
+  const before = displayRows(S.tracks, S.upperAt);
+  const pos = before.findIndex((r) => r.kind === kind && r.idx === idx);
+  insertTracksAt(pos < 0 ? before.length : pos + 1, count, false);
 }
 
 /** 一次可以新增好幾種、好幾條軌道 */
 function AddTrackPanel({ state, close }: { state: AddTrackState; close: () => void }) {
   const tracks = useStore((s) => s.tracks);
   const [count, setCount] = useState<Record<TrackKind, number>>({ video: 0, fx: 0, audio: 0, [state.kind]: 1 } as Record<TrackKind, number>);
-  const [at, setAt] = useState<Record<TrackKind, number>>(() => {
-    const o = {} as Record<TrackKind, number>;
-    for (const k of KINDS) o[k] = bottomSlot(k).at;
-    if (state.above !== null) o[state.kind] = state.kind === 'audio' ? state.above + 1 : state.above + 1;
-    return o;
-  });
+  // 位置（圖層順序）：預設 = 畫面最下方
+  const n = displayRows(tracks, useStore.getState().upperAt).length;
+  const [layerPos, setLayerPos] = useState(() => (useStore.getState().upperAt === 'top' ? n : 0));
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState({ x: state.x, y: state.y });
 
@@ -998,16 +1002,7 @@ function AddTrackPanel({ state, close }: { state: AddTrackState; close: () => vo
       if (total) toast($t('已新增 {0} 條軌道', total));
       return close();
     }
-    for (const k of KINDS) {
-      const toBottom = at[k] === bottomSlot(k).at;
-      for (let i = 0; i < count[k]; i++) {
-        // 放在最下方：每加一條，下一條就接在它下面
-        if (toBottom) {
-          const b = bottomSlot(k);
-          S.addTrack(k, b.at, b.level);
-        } else S.addTrack(k, at[k]);
-      }
-    }
+    insertTracksAt(S.upperAt === 'top' ? layerPos : n - layerPos, count, true);
     if (total) toast($t('已新增 {0} 條軌道', total));
     close();
   };
@@ -1026,13 +1021,14 @@ function AddTrackPanel({ state, close }: { state: AddTrackState; close: () => vo
             <span>{count[k]}</span>
             <button onClick={() => setN(k, count[k] + 1)}><Plus size={13} /></button>
           </div>
-          {!anchored && (
-            <select className="select" disabled={!count[k]} value={at[k]} onChange={(e) => setAt({ ...at, [k]: +e.target.value })}>
-              {positionOptions(k, tracks[k].length).map((o) => <option key={o.label} value={o.at}>{o.label}</option>)}
-            </select>
-          )}
         </div>
       ))}
+      {!anchored && (
+        <select className="select at-pos" disabled={!total} value={layerPos} onChange={(e) => setLayerPos(+e.target.value)}>
+          <option value={0}>{$t('最上層')}</option>
+          {layerRows().layer.map((r, i) => <option key={`${r.kind}${r.idx}`} value={i + 1}>{$t('在「{0} {1}」下層', NAMES[r.kind], r.idx + 1)}</option>)}
+        </select>
+      )}
       <div className="dialog-actions">
         <button className="btn" onClick={close}>{$t('取消')}</button>
         <button className="btn primary" disabled={!total} onClick={add}>{total ? $t('新增 {0} 條', total) : $t('新增')}</button>
@@ -1124,7 +1120,7 @@ function SubjectBar({ clip, media, width, stack }: { clip: Clip; media: Media; w
     cov = new Uint8Array(n);
     for (let k = 0; k < n; k++) cov[k] = faceDone(media, sourceTime(clip, media, ((k + 0.5) / n) * clip.duration, map)) ? 1 : 0;
   }
-  return <CoverageBar cov={cov} busy={!!st.job} err={st.err} cls={stack ? 'stack' : ''} color="#ffd23f" title={(p) => `${s.kind === 'face' ? $t('臉部追蹤') : $t('追蹤')} ${p}%`} />;
+  return <CoverageBar cov={cov} busy={!!st.job} err={st.err} cls={stack ? 'stack' : ''} color="var(--ov-track)" title={(p) => `${s.kind === 'face' ? $t('臉部追蹤') : $t('追蹤')} ${p}%`} />;
 }
 
 /** 片段有追蹤：時間軸上的小標記（進度看底部的進度條） */
@@ -2112,6 +2108,7 @@ const gainAt = (g: Gain | undefined, local: number) => {
 
 function Waveform({ media, inT, dur, width, gain }: { media: Media; inT: number; dur: number; width: number; gain?: Gain }) {
   const ref = useRef<HTMLCanvasElement>(null);
+  const theme = useResolvedTheme((s) => s.theme);
   const gv = gain?.volume, gi = gain?.fadeIn, go = gain?.fadeOut, gl = gain?.len;
   useEffect(() => {
     const c = ref.current;
@@ -2124,7 +2121,7 @@ function Waveform({ media, inT, dur, width, gain }: { media: Media; inT: number;
     const g = c.getContext('2d')!;
     const draw = (levels: ArrayLike<number>) => {
       g.clearRect(0, 0, W, H);
-      g.fillStyle = 'rgba(110, 231, 200, 0.75)';
+      g.fillStyle = getComputedStyle(c).getPropertyValue('--wave').trim() || 'rgba(110, 231, 200, 0.75)';
       for (let x = 0; x < W; x++) {
         const k = gainAt(gain, gain ? ((x + 0.5) / W) * gain.len : 0);
         const h = Math.max(1, Math.min(1, (levels[x] ?? 0) * k) * H);
@@ -2151,7 +2148,7 @@ function Waveform({ media, inT, dur, width, gain }: { media: Media; inT: number;
     });
     return () => { alive = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [media, inT, dur, width, gv, gi, go, gl]);
+  }, [media, inT, dur, width, gv, gi, go, gl, theme]);
   return <canvas ref={ref} className="wave" />;
 }
 
@@ -2165,7 +2162,7 @@ const Ruler = React.memo(function Ruler({ end, pps, onPointerDown }: { end: numb
   const loop = useStore((s) => s.loop);
   const w = minor * pps;
   return (
-    <div className="ruler" onPointerDown={onPointerDown} style={{ backgroundImage: `repeating-linear-gradient(90deg, #ffffff12 0 1px, transparent 1px ${w}px)` }}>
+    <div className="ruler" onPointerDown={onPointerDown} style={{ backgroundImage: `repeating-linear-gradient(90deg, color-mix(in srgb, var(--text) 7%, transparent) 0 1px, transparent 1px ${w}px)` }}>
       {ticks.map((s) => (
         <div key={s} className="tick" style={{ left: s * pps }}>
           {rulerLabel(s, major)}

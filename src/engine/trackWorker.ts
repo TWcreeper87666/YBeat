@@ -7,6 +7,8 @@ import wasmUrl from '../../node_modules/onnxruntime-web/dist/ort-wasm-simd-threa
 import { SEARCH, TEMPLATE, cropBlob, decodeVit, type PxBox } from './vitTrack';
 
 ort.env.wasm.wasmPaths = { wasm: wasmUrl };
+// 模型的無害警告（例如 initializer 出現在 graph inputs）不要印到 console
+ort.env.logLevel = 'error';
 if (!self.crossOriginIsolated) ort.env.wasm.numThreads = 1;
 
 let session: Promise<ort.InferenceSession> | null = null;
@@ -14,7 +16,7 @@ function getSession(modelUrl: string) {
   session ??= (async () => {
     const r = await fetch(modelUrl);
     if (!r.ok) throw new Error(`model HTTP ${r.status}`);
-    return ort.InferenceSession.create(new Uint8Array(await r.arrayBuffer()), { executionProviders: ['wasm'] });
+    return ort.InferenceSession.create(new Uint8Array(await r.arrayBuffer()), { executionProviders: ['wasm'], logSeverityLevel: 3 });
   })();
   session.catch(() => (session = null));
   return session;

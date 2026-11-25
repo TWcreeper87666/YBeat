@@ -169,7 +169,7 @@ const speedName = (v: SpeedVariant) => ({
   slowPocket: $t('拍間慢放'), tapeStop: $t('卡帶停'), whooshRamp: $t('甩鏡加速'), beatStutter: $t('重複切片'),
 })[v];
 
-const KIND_COLOR: Record<string, string> = { intro: '#3d4a66', build: '#8a6d2c', drop: '#c2413f', outro: '#3d4a66', body: '#2b7d74' };
+const KIND_COLOR: Record<string, string> = { intro: 'var(--sec-intro)', build: 'var(--sec-build)', drop: 'var(--sec-drop)', outro: 'var(--sec-intro)', body: 'var(--sec-body)' };
 
 /** 能量曲線編輯器：淡色 = 分析出來的能量、亮線 = 調整後；背景三帶 = 低 / 中 / 高；控制點上下拖 = 更嗨 / 更穩 */
 function EnergyCurve({ info, shape, onChange }: { info: MusicInfo; shape: EnergyShape; onChange: (s: EnergyShape) => void }) {

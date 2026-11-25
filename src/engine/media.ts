@@ -53,12 +53,35 @@ export async function importFile(file: Blob, name: string): Promise<Media | null
       v.currentTime = 1e9;
       await once(v, 'seeked');
     }
-    v.currentTime = Math.min(0.1, v.duration / 2);
-    await once(v, 'seeked');
     const c = document.createElement('canvas');
     c.width = 160;
     c.height = Math.round((160 * v.videoHeight) / v.videoWidth);
-    c.getContext('2d')!.drawImage(v, 0, 0, c.width, c.height);
+    const g = c.getContext('2d', { willReadFrequently: true })!;
+    /** 畫出 t 秒那格，回傳平均亮度（0~255） */
+    const grab = async (t: number) => {
+      v.currentTime = t;
+      await once(v, 'seeked');
+      // seeked 時那格不一定已經解好（直接畫會是黑的）：等它真的出來（最多 300ms）
+      const vv = v as HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number };
+      if (vv.requestVideoFrameCallback) await Promise.race([new Promise<void>((r) => vv.requestVideoFrameCallback!(() => r())), new Promise((r) => setTimeout(r, 300))]);
+      g.drawImage(v, 0, 0, c.width, c.height);
+      const px = g.getImageData(0, 0, c.width, c.height).data;
+      let sum = 0;
+      for (let i = 0; i < px.length; i += 4) sum += px[i] * 0.3 + px[i + 1] * 0.59 + px[i + 2] * 0.11;
+      return sum / (px.length / 4);
+    };
+    // 開頭幾乎全黑（錄影剛開始、淡入）：改用後面比較亮的一格當縮圖
+    let best = { t: Math.min(0.1, v.duration / 2), y: 0 };
+    best.y = await grab(best.t);
+    if (best.y < 12) {
+      for (const f of [0.25, 0.5]) {
+        const t = v.duration * f;
+        const y = await grab(t);
+        if (y > best.y) best = { t, y };
+        if (y >= 12) break;
+      }
+      await grab(best.t);
+    }
     const info = await audioInfo(url, file.size);
     return {
       id: uid(), name, kind: 'video', url,

@@ -52,6 +52,7 @@ import { confirmDialog, openMenu, promptDialog, revealSelection, stopPreviewFx, 
 import { DragNumber } from './DragNumber';
 import { ModuleCode } from './ModuleCode';
 import { newModule, openModuleEditor } from './CodePanel';
+import { TabRecButton } from './TabRecord';
 import { FavButton, LibFilter, LibToolbar, byFavOrder, favSortOpts, match, onBlank, openPicker } from './Library';
 import { MaskLibrary, ShapeThumb, addClipMask, ensureClipBaseMask, setMaskShape } from './MaskPanel';
 import { openShapeDrawer } from './ShapeDrawer';
@@ -237,6 +238,7 @@ export function MediaPanel() {
     }}>
       <LibToolbar id="media" query={q} setQuery={setQ} filter={{ active: filter !== 'all', reset: () => useLayout.getState().set({ mediaFilter: 'all' }) }}>
         <button className="lib-add" title={$t('匯入媒體 (Ctrl+O)')} onClick={async () => importFiles(await pickFiles())}><Plus size={15} /></button>
+        <TabRecButton />
       </LibToolbar>
       <LibFilter
         id="media"

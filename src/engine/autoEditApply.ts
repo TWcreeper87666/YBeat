@@ -20,7 +20,7 @@ import { ensureMatte, matteAt, MATTE_SIZE } from './matte';
 import type { Keyframe } from './keyframes';
 import { directMedia, directorShots } from '../ai/director';
 import { countdown } from '../ai/gemini';
-import { freeRoom } from './mediaAnalysis';
+import { bestFace, freeRoom, peopleScore } from './mediaAnalysis';
 import { confidentLead, findLead, isLead, leadInfo, leadShare } from './faceLead';
 import { padBox } from './faceTrack';
 import { aiErrorText, toAiError, useAiSettings } from '../ai/assistant';
@@ -28,7 +28,7 @@ export { useAutoEdit, type AutoEditSettings };
 import { AUDIO_DRIVE, fxGroup, intensityParams, transitionOpt } from './autoEditPools';
 import { fxCombo, usePrefs } from '../prefs';
 import { newKey } from './keyframes';
-import { fitSize } from './transform';
+import { cropClip, fitSize, intoCrop, outOfCrop, type Crop } from './transform';
 import { isHitFx, parseDuration } from './params';
 import { snapFrame } from './rulerTicks';
 import { applyProposals, type Proposal } from '../ai/projectTools';
@@ -140,9 +140,11 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
     if (sp) inn = sh.in;
     const c = makeClip({ mediaId: m.srcId ?? m.id, start, duration, in: inn + (m.from ?? 0), volume: 0 });
     // 有主角：從主角的臉開始追（框選目標），不會跟到同框的別人；沒有就一般的臉部追蹤
-    if (sh.anchor) c.subject = { kind: 'box', anchors: [{ t: +(sh.anchor.t + (m.kind === 'video' ? m.from ?? 0 : 0)).toFixed(4), box: padBox(sh.anchor) }] };
+    // 有裁切：分析結果是框內座標，追蹤用的框要換回整個畫面
+    const anchor = sh.anchor && m.crop ? outOfCrop(sh.anchor, m.crop) : sh.anchor;
+    if (anchor) c.subject = { kind: 'box', anchors: [{ t: +(anchor.t + (m.kind === 'video' ? m.from ?? 0 : 0)).toFixed(4), box: padBox(anchor) }] };
     else if (sh.face) c.subject = { kind: 'face' };
-    if (sh.face && sh.push) c.keys = facePush(sh.face, m, s.format.w / s.format.h, duration);
+    if (sh.face && sh.push) c.keys = facePush(sh.face, m.crop ? cropDims(m, m.crop) : m, s.format.w / s.format.h, duration);
     if (sp) {
       const tb = (beat: number) => beatTimeF(T, beat) - start;
       c.remap = { moduleId: 'remap-curve', params: {}, keys: sp.knots.map((k) => newKey(Math.min(duration, Math.max(0, tb(k.beat))), k.source, k.ease)) };
@@ -155,6 +157,11 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
         x: [newKey(0, a.x, lin), newKey(duration, b.x, lin)],
         y: [newKey(0, a.y, lin), newKey(duration, b.y, lin)],
       };
+    }
+    // 裁切：放大位移成只看得到框內（推近 / 運鏡是對框內畫面做的，一起換算）
+    if (m.crop) {
+      c.fit = 'cover';
+      Object.assign(c, cropClip(c, m.crop, (m.width || 16) / (m.height || 9), s.format.w / s.format.h));
     }
     const prev = clips[clips.length - 1];
     if (sh.transition && prev && Math.abs(prev.start + prev.duration - start) < 1e-6) {
@@ -222,6 +229,27 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
  * 開頭從比較寬的地方開始。座標跟 mediaToFrame 一樣（x 是畫面寬、y 是畫面高的比例）。
  */
 const FACE_FILL = 0.28;
+/** 裁切後的畫面大小（像素） */
+const cropDims = (m: { width: number; height: number }, c: Crop) => ({ width: (m.width || 16) * c.w, height: (m.height || 9) * c.h });
+
+/** 分析結果換到裁切框內的座標（框外的臉丟掉）：之後的主角、推近、錨點都當成只有框內的畫面 */
+export function cropSampled(x: Sampled, c: Crop): Sampled {
+  type F = { x: number; y: number; h: number; w?: number };
+  const list = <T extends F>(l: T[] | null | undefined) => (l ? l.map((f) => intoCrop(f, c)).filter((f): f is T => !!f) : l);
+  let info = x.info;
+  if (info) {
+    const facesAt = info.facesAt?.map((l) => list(l) ?? null);
+    const faces = info.faces?.map((f, i) => {
+      const at = facesAt?.[i];
+      return at ? bestFace(at) : f ? intoCrop(f, c) : null;
+    });
+    const people = info.people && faces ? info.people.map((_, i) => (faces[i] ? peopleScore([faces[i]!]) : 0)) : info.people;
+    info = { ...info, ...(faces ? { faces } : {}), ...(facesAt ? { facesAt } : {}), ...(people ? { people } : {}) };
+  }
+  const face = x.face ? intoCrop(x.face, c) : x.face;
+  return { ...x, info, face, faceList: list(x.faceList) ?? x.faceList, ...(x.people !== undefined && !face ? { people: 0 } : {}) };
+}
+
 export function facePush(f: { x: number; y: number; h: number }, m: { width: number; height: number }, aspect: number, duration: number): Clip['keys'] {
   const [sw, sh] = fitSize(true, (m.width || 1) / (m.height || 1), aspect);
   const at = (k: number) => {
@@ -314,7 +342,8 @@ const POP_ROOM = 4;
 export function popFrameCandidates(media: Footage[], extra: Map<string, Partial<PlanMedia>>): { m: Footage; t: number }[] {
   const out: { m: Footage; t: number; h: number }[] = [];
   for (const m of media) {
-    if (m.kind !== 'video' || m.duration < POP_ROOM + 1 || extra.get(m.id)?.weight === 0) continue;
+    // 有裁切的片段不拿來做主體跳出（去背、對齊都是看整個畫面）
+    if (m.kind !== 'video' || m.crop || m.duration < POP_ROOM + 1 || extra.get(m.id)?.weight === 0) continue;
     const x = extra.get(m.id);
     const ok = (t: number) => t <= m.duration - POP_ROOM && !x?.ban?.some(([a, b]) => t >= a - 0.1 && t <= b + POP_ROOM);
     const pts = x?.leadPts?.length ? x.leadPts.map((p) => ({ t: p.t, h: p.h }))
@@ -391,6 +420,10 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
   const need = media.filter((m) => st.analyze || st.director);
   const sampled = need.length ? await sampleAll(need, (i, n, name, frac) => onProgress({ stage: 'media', i, n, name, frac }), stopped) : new Map<string, Sampled>();
   if (stopped()) return { error: 'cancelled' };
+  for (const m of media) {
+    const x = m.crop && sampled.get(m.id);
+    if (x) sampled.set(m.id, cropSampled(x, m.crop!));
+  }
   if (st.analyze) for (const [id, x] of sampled) extra.set(id, { ...(x.info ? { info: x.info } : {}), ...(x.people !== undefined ? { people: x.people, face: x.face } : {}) });
   // 主角：所有素材裡出現最多的那個人（臉的特徵分群）；夠明顯才用
   const notes = new Map<string, (t: number) => string>();

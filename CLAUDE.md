@@ -21,3 +21,8 @@
 
 - 用 `src/ui/Toggle.tsx`，不要自己寫 `<input type="checkbox">` 或 `.seg` 按鈕：`Switch`（開 / 關）、`Check`（彈出視窗 / 小視窗的一串選項：左文字、右開關）、`Seg`（幾個選一個）、`SegToggles`（同外觀、各自開關）、`ToggleChip`（輸入框上方的附加開關）。
 - 工具列圖示按鈕直接加 `on` class（`.tbtn` / `.ec-icon` / `.btn.on-accent`）。
+
+## 提案 / 計畫文件
+
+- 需要先討論的設計（例如儲存結構變更）才寫成 `plan/xxx.md`，使用者同意後再做。
+- 計畫做完就刪掉那個 md，不要留著；還沒做的零星項目搬到 `todo.md`。程式註解不要引用 plan 檔。

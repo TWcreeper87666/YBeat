@@ -20,6 +20,8 @@ interface Entry {
   running: boolean;
   want: number; // 最近被要求的影格
   asked: number; // 最近一次被要求的時間（performance.now）
+  /** 讀不了（網址失效、格式不支援）：不再重試，免得一直重新請求 */
+  failed?: boolean;
 }
 
 /**
@@ -36,7 +38,7 @@ export function holdScrub(on: boolean) {
   if (!on) kick();
 }
 function kick(e?: Entry) {
-  if (e) waiting.add(e);
+  if (e && !e.failed) waiting.add(e);
   if (held || runner) return;
   let next: Entry | null = null;
   for (const x of waiting) if (!next || x.asked > next.asked) next = x;
@@ -48,7 +50,7 @@ function kick(e?: Entry) {
     // 放掉隱藏的 <video>（閒置的也占著解碼器）；接著抽時再建立
     const v = next!.video;
     if (v) { v.pause(); v.removeAttribute('src'); v.load(); next!.video = null; }
-    if (nextIndex(next!) >= 0 && cache.get(next!.id) === next) waiting.add(next!); // 還沒抽完：之後再接著抽
+    if (!next!.failed && nextIndex(next!) >= 0 && cache.get(next!.id) === next) waiting.add(next!); // 還沒抽完：之後再接著抽
     kick();
   });
 }
@@ -123,7 +125,7 @@ async function run(e: Entry) {
       });
     }
     const v = e.video;
-    if (!v.videoWidth) return;
+    if (!v.videoWidth) { e.failed = true; return; }
     const W = Math.max(2, Math.round((H * v.videoWidth) / v.videoHeight));
     const grab = async (i: number) => {
       try {
@@ -237,6 +239,17 @@ export function scrubFrame(m: Media, t: number): ImageBitmap | null {
 
 /** 快取影格的間距（秒） */
 export const scrubStep = (m: Media) => entryFor(m).step;
+
+/** 丟掉某個素材的快取（暫時的素材用完、網址要收回時） */
+export function dropScrub(id: string) {
+  const e = cache.get(id);
+  if (!e) return;
+  cache.delete(id);
+  waiting.delete(e);
+  e.failed = true;
+  e.frames.forEach((f) => f?.close());
+  if (e.video && !e.running) { e.video.removeAttribute('src'); e.video.load(); e.video = null; }
+}
 
 /** 預先開始抽（打開素材預覽、選範圍視窗時就先抽，拖曳時才有得用） */
 export function warmScrub(m: Media, t = 0) {

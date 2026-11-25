@@ -220,3 +220,53 @@ export function showPanel(layout: DockNode | null, panel: PanelId): DockNode {
   const target = findGroup(layout, (t) => t.tabs.includes('inspector')) ?? findGroup(layout, () => true)!;
   return insertIntoGroup(layout, target.id, [panel], panel, 'center');
 }
+
+/** 群組裡的分頁全部關閉 */
+export function closeGroup(layout: DockNode | null, id: string): DockNode | null {
+  const g = findGroup(layout, (t) => t.id === id);
+  if (!g) return layout;
+  let out = layout;
+  for (const p of g.tabs) out = removePanel(out, p);
+  return out;
+}
+
+function leaves(n: DockNode): TabsNode[] {
+  return n.type === 'tabs' ? [n] : n.children.flatMap(leaves);
+}
+
+/** 相鄰的群組（VS Code「與下一個群組合併」）：同一層的下一格，沒有就上一格；挑最靠近分界的那個群組 */
+export function neighborGroup(layout: DockNode | null, id: string): TabsNode | null {
+  const walk = (n: DockNode): TabsNode | null | undefined => {
+    if (n.type === 'tabs') return undefined;
+    const i = n.children.findIndex((c) => c.type === 'tabs' && c.id === id);
+    if (i >= 0) {
+      if (i + 1 < n.children.length) return leaves(n.children[i + 1])[0];
+      if (i > 0) { const ls = leaves(n.children[i - 1]); return ls[ls.length - 1]; }
+      return null;
+    }
+    for (const c of n.children) {
+      const r = walk(c);
+      if (r !== undefined) return r;
+    }
+    return undefined;
+  };
+  return layout ? walk(layout) ?? null : null;
+}
+
+/** 解散群組：分頁併到相鄰的群組 */
+export function dissolveGroup(layout: DockNode | null, id: string): DockNode | null {
+  const n = neighborGroup(layout, id);
+  if (!n) return layout;
+  return moveGroup(layout, id, { kind: 'tabs', group: n.id, index: n.tabs.length });
+}
+
+/** 所有群組合併成一個（active 保留 keep 群組目前的分頁） */
+export function joinAll(layout: DockNode | null, keep?: string): DockNode | null {
+  if (!layout || layout.type === 'tabs') return layout;
+  const all = leaves(layout);
+  const k = all.find((g) => g.id === keep) ?? all[0];
+  return { type: 'tabs', id: k.id, tabs: all.flatMap((g) => g.tabs), active: k.active };
+}
+
+/** 依序排列的所有群組 */
+export const groupsIn = (layout: DockNode | null): TabsNode[] => (layout ? leaves(layout) : []);

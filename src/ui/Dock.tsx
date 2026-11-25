@@ -8,7 +8,7 @@ import { Slot } from './PreviewPanel';
 import { useEditorWindow } from './EditorWindow';
 import { openMenu, useLayout, type MenuItem } from './uiStore';
 import {
-  C, R, T, dragSash, findGroup, mapTabs, minSize, moveGroup, movePanel, panelsIn, removePanel, setSizes, showPanel,
+  C, R, T, closeGroup, dissolveGroup, dragSash, findGroup, groupsIn, joinAll, mapTabs, minSize, moveGroup, movePanel, panelsIn, removePanel, setSizes, showPanel,
   type DockNode, type DropTarget, type PanelId, type Side, type SplitNode, type TabsNode,
 } from './dockTree';
 
@@ -31,14 +31,16 @@ export const PANELS: { id: PanelId; title: string }[] = [
   { id: 'timeline', title: $t('時間軸') },
 ];
 const TITLE = Object.fromEntries(PANELS.map((p) => [p.id, p.title])) as Record<PanelId, string>;
-const LIB: PanelId[] = ['media', 'color', 'text', 'lyrics', 'transition', 'effect', 'mask', 'remap'];
+const LIB: PanelId[] = ['media', 'color', 'text', 'transition', 'effect', 'mask', 'remap', 'lyrics'];
+const SIDE: PanelId[] = ['inspector', 'ai', 'auto', 'code'];
 
 /** 內建版面 */
 export const PRESETS: { id: string; name: string; build: () => DockNode }[] = [
-  { id: 'edit', name: $t('剪輯'), build: () => C([R([T(LIB), T(['inspector', 'code', 'ai', 'auto'], 'inspector'), T(['preview'])], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
-  { id: 'right', name: $t('預覽在右'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai', 'auto'], 'inspector')], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview'])], [0.72, 0.28]) },
-  { id: 'code', name: $t('寫程式'), build: () => R([C([R([T(LIB), T(['inspector', 'code', 'ai', 'auto'], 'code')], [0.3, 0.7]), T(['timeline'])], [0.68, 0.32]), T(['preview'])], [0.74, 0.26]) },
-  { id: 'timeline', name: $t('大時間軸'), build: () => C([R([T([...LIB, 'inspector', 'code', 'ai', 'auto'], 'media'), T(['preview'])], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
+  { id: 'edit', name: $t('剪輯'), build: () => C([R([T(LIB), T(SIDE, 'inspector'), T(['preview'])], [0.27, 0.33, 0.4]), T(['timeline'])], [0.6, 0.4]) },
+  { id: 'right', name: $t('預覽在右'), build: () => R([C([R([T(LIB), T(SIDE, 'inspector')], [0.42, 0.58]), T(['timeline'])], [0.56, 0.44]), T(['preview'])], [0.72, 0.28]) },
+  // 素材用最小寬度（比例給 0，實際由 minWidth 撐開）
+  { id: 'auto', name: $t('自動剪輯'), build: () => R([C([R([T(LIB), T(SIDE, 'auto')], [0, 1]), T(['timeline'])], [0.56, 0.44]), T(['preview'])], [0.72, 0.28]) },
+  { id: 'timeline', name: $t('大時間軸'), build: () => C([R([T([...LIB, ...SIDE], 'media'), T(['preview'])], [0.62, 0.38]), T(['timeline'])], [0.42, 0.58]) },
 ];
 
 interface Custom { id: string; name: string; layout: DockNode }
@@ -55,6 +57,10 @@ interface DockState {
   setActive(group: string, panel: PanelId): void;
   activatePanel(panel: PanelId, onlyIfPresent?: boolean): void;
   closePanel(panel: PanelId): void;
+  closeGroup(group: string): void;
+  /** 解散群組：分頁併到相鄰群組 */
+  dissolveGroup(group: string): void;
+  joinAll(keep: string): void;
   resize(split: string, sizes: number[]): void;
   toggleMax(group: string): void;
   applyPreset(id: string): void;
@@ -83,6 +89,9 @@ export const useDock = create<DockState>()(
         set({ layout: showPanel(l, panel) });
       },
       closePanel: (panel) => set({ layout: removePanel(get().layout, panel), maximized: null }),
+      closeGroup: (group) => set({ layout: closeGroup(get().layout, group), maximized: null }),
+      dissolveGroup: (group) => set({ layout: dissolveGroup(get().layout, group), maximized: null }),
+      joinAll: (keep) => set({ layout: joinAll(get().layout, keep), maximized: null }),
       resize: (split, sizes) => set({ layout: setSizes(get().layout, split, sizes) }),
       toggleMax: (group) => set({ maximized: get().maximized === group ? null : group }),
       applyPreset: (id) => set({ layout: (PRESETS.find((p) => p.id === id) ?? PRESETS[0]).build(), current: id, maximized: null }),
@@ -325,17 +334,56 @@ function Group({ node, hosts }: { node: TabsNode; hosts: Record<PanelId, HTMLEle
     barRef.current?.querySelector<HTMLElement>(`[data-dock-tab="${active}"]`)?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
   }, [active]);
 
+  /** 群組本身的選單項目（分頁列空白處、分頁右鍵共用） */
+  const groupItems = (): MenuItem[] => {
+    const d = useDock.getState();
+    const others = groupsIn(d.layout).filter((g) => g.id !== node.id);
+    const present = panelsIn(d.layout);
+    const missing = PANELS.filter((x) => !present.includes(x.id));
+    return [
+      { label: $t('關閉群組'), action: () => d.closeGroup(node.id) },
+      { label: $t('解散群組'), action: others.length ? () => d.dissolveGroup(node.id) : undefined },
+      {
+        label: $t('合併到'),
+        disabled: !others.length,
+        submenu: others.map((g) => ({ label: g.tabs.map((x) => TITLE[x]).join(' · '), action: () => d.moveGroup(node.id, { kind: 'tabs', group: g.id, index: g.tabs.length }) })),
+      },
+      { label: $t('合併所有群組'), action: others.length ? () => d.joinAll(node.id) : undefined },
+      { separator: true },
+      {
+        label: $t('加入面板'),
+        disabled: !missing.length,
+        submenu: missing.map((x) => ({ label: x.title, action: () => d.move(x.id, '', { kind: 'tabs', group: node.id, index: node.tabs.length }) })),
+      },
+      { separator: true },
+      { label: maximized ? $t('還原') : $t('最大化'), shortcut: $t('雙擊'), action: () => d.toggleMax(node.id) },
+    ];
+  };
+
+  const groupMenu = (e: React.MouseEvent) => {
+    if (e.target !== e.currentTarget) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openMenu(e.clientX, e.clientY, groupItems());
+  };
+
   const tabMenu = (e: React.MouseEvent, p: PanelId) => {
     e.preventDefault();
     e.stopPropagation();
     const d = useDock.getState();
+    const i = node.tabs.indexOf(p);
+    const multi = node.tabs.length > 1;
+    const split = (zone: 'right' | 'bottom') => () => d.move(p, node.id, { kind: 'group', group: node.id, zone });
     const items: MenuItem[] = [
       { label: $t('關閉'), shortcut: $t('中鍵'), action: () => d.closePanel(p) },
-      { label: $t('關閉其他分頁'), action: node.tabs.length > 1 ? () => node.tabs.filter((x) => x !== p).forEach((x) => d.closePanel(x)) : undefined },
+      { label: $t('關閉其他分頁'), action: multi ? () => node.tabs.filter((x) => x !== p).forEach((x) => d.closePanel(x)) : undefined },
+      { label: $t('關閉右側分頁'), action: i < node.tabs.length - 1 ? () => node.tabs.slice(i + 1).forEach((x) => d.closePanel(x)) : undefined },
       { separator: true },
-      { label: maximized ? $t('還原') : $t('最大化'), shortcut: $t('雙擊'), action: () => d.toggleMax(node.id) },
+      { label: $t('向右分割'), action: multi ? split('right') : undefined },
+      { label: $t('向下分割'), action: multi ? split('bottom') : undefined },
     ];
     if (p === 'preview') items.push({ label: floating ? $t('停駐預覽') : $t('分離成浮動視窗'), action: () => useLayout.getState().set({ floating: !floating }) });
+    items.push({ separator: true }, ...groupItems());
     openMenu(e.clientX, e.clientY, items);
   };
 
@@ -345,6 +393,7 @@ function Group({ node, hosts }: { node: TabsNode; hosts: Record<PanelId, HTMLEle
         ref={barRef}
         className={`dock-tabs ${drag && !drag.panel && drag.from === node.id ? 'dragging' : ''}`}
         onDoubleClick={(e) => e.target === e.currentTarget && useDock.getState().toggleMax(node.id)}
+        onContextMenu={groupMenu}
         onPointerDown={(e) => e.target === e.currentTarget && e.button === 0 && startTabDrag(e, null, node.id, rootRef?.current ?? null, node.tabs.map((x) => TITLE[x]).join(' · '))}
       >
         {node.tabs.map((p, i) => (

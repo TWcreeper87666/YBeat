@@ -1,4 +1,4 @@
-import { C, R, T, PANEL_MIN, dragSash, minSize, findGroup, moveGroup, movePanel, panelsIn, showPanel, removePanel, type DockNode, type PanelId } from '../src/ui/dockTree';
+import { C, R, T, PANEL_MIN, closeGroup, dissolveGroup, joinAll, neighborGroup, dragSash, minSize, findGroup, moveGroup, movePanel, panelsIn, showPanel, removePanel, type DockNode, type PanelId } from '../src/ui/dockTree';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -132,6 +132,23 @@ const show = (n: DockNode | null): string => (!n ? 'null' : n.type === 'tabs' ? 
   ok(Math.abs(b[1] - 0.3) < 1e-9, '往右拖太多：停在右邊的最小寬度');
   const c = dragSash([0.5, 0.5], 0, 0.1, [300, 300], 400);
   ok(Math.abs(c[0] - 0.5) < 1e-9, '兩邊都放不下：照最小尺寸的比例分');
+}
+
+// 群組右鍵：關閉、解散、合併全部
+{
+  const l = edit();
+  const lib = groupOf(l, 'media');
+  const c = closeGroup(l, lib.id)!;
+  ok(!panelsIn(c).includes('media') && panelsIn(c).includes('inspector') && sum(c), '關閉群組：裡面的分頁都消失，其他不變');
+  ok(neighborGroup(l, lib.id)?.tabs.includes('inspector') === true, '相鄰群組：同一列的下一格');
+  ok(neighborGroup(l, groupOf(l, 'preview').id)?.tabs.includes('inspector') === true, '最後一格：找上一格');
+  ok(neighborGroup(l, groupOf(l, 'timeline').id)?.tabs.includes('preview') === true, '時間軸：上一格是分割 → 取最靠近分界的群組');
+  const d = dissolveGroup(l, lib.id)!;
+  const ins = groupOf(d, 'inspector');
+  ok(LIB.every((p) => ins.tabs.includes(p)) && ins.tabs.length === LIB.length + 1 && sum(d), '解散群組：分頁併到相鄰群組');
+  ok(dissolveGroup(T(['media']), groupOf(T(['media']), 'media').id) !== null, '只有一個群組：不動');
+  const j = joinAll(l, groupOf(l, 'preview').id)!;
+  ok(j.type === 'tabs' && j.tabs.length === panelsIn(l).length && j.active === 'preview', '合併所有群組：一個群組、保留目前分頁');
 }
 
 console.log(fails ? `\n${fails} 項失敗` : '\n全部通過');

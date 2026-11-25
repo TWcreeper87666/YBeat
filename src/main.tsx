@@ -7,7 +7,9 @@ import { installAppBehavior } from './ui/Menu';
 import { installFileDrop } from './ui/dnd';
 import { restoreTimelineView } from './ui/timelineView';
 import { startProxies } from './engine/proxy';
+import { applyAppearance } from './prefs';
 
+applyAppearance();
 installAppBehavior();
 installFileDrop();
 restoreTimelineView();

@@ -10,6 +10,7 @@ import { FLAT_SHAPE, type EnergyShape } from './energyShape';
 import { trackHistory } from './history';
 import type { PopVariant } from './subjectPop';
 import type { SpeedVariant } from './speedRamp';
+import { isFullCrop, type Crop } from './transform';
 
 type S = ReturnType<typeof useStore.getState>;
 
@@ -67,7 +68,7 @@ export type StyleKey = RecipeId | 'custom' | `my:${string}`;
 export interface MyStyle { id: string; name: string; params: Recipe; rules: FxRule[]; trWeights: Record<string, number>; density: number; intensity: number }
 
 /** 指定片段：影片的 a..b 秒（圖片 a = b = 0 = 整張） */
-export interface AeSeg { id: string; mediaId: string; a: number; b: number; /** 使用者取的名稱（沒有 = 素材名稱） */ name?: string }
+export interface AeSeg { id: string; mediaId: string; a: number; b: number; /** 使用者取的名稱（沒有 = 素材名稱） */ name?: string; /** 裁切框（沒有 = 整個畫面） */ crop?: Crop }
 
 /** 整段（影片 0..長度、圖片 0..0） */
 export const wholeSeg = (m: Media, id: string): AeSeg => ({ id, mediaId: m.id, a: 0, b: m.kind === 'video' ? m.duration : 0 });
@@ -76,7 +77,7 @@ export const wholeSeg = (m: Media, id: string): AeSeg => ({ id, mediaId: m.id, a
  * 自動剪輯用的素材：指定片段 = 虛擬素材（id 不同、duration = 片段長度、from = 在原素材的起點、srcId = 原素材）。
  * 編排器、抽樣、AI 導演都把它當一般素材；套用成時間軸片段時才換回原素材 + 加上 from。
  */
-export type Footage = Media & { from?: number; srcId?: string };
+export type Footage = Media & { from?: number; srcId?: string; /** 只用畫面的這一塊（分析結果換到框內座標；放上時間軸時放大位移成只看得到框內） */ crop?: Crop };
 
 /** 這次要剪的素材：有指定片段就用片段，沒有就用素材庫（扣掉取消勾選的） */
 export function aeFootage(s: S, st: AutoEditSettings): Footage[] {
@@ -92,7 +93,7 @@ export function aeFootage(s: S, st: AutoEditSettings): Footage[] {
     }
     const a = Math.max(0, Math.min(g.a, m.duration)), b = Math.max(a, Math.min(g.b, m.duration));
     if (b - a < 0.2) continue;
-    out.push({ ...m, id: `${m.id}@${g.id}`, srcId: m.id, from: a, duration: b - a, name: m.name });
+    out.push({ ...m, id: `${m.id}@${g.id}`, srcId: m.id, from: a, duration: b - a, name: m.name, ...(isFullCrop(g.crop) ? {} : { crop: g.crop }) });
   }
   return out;
 }

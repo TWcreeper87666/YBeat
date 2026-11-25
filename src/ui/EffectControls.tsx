@@ -932,7 +932,7 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
           ref={rulerRef}
           onPointerDown={scrub}
           title={$t('拖曳移動播放頭')}
-          style={{ backgroundImage: `repeating-linear-gradient(90deg, #ffffff12 0 1px, transparent 1px ${minorPx}px)`, backgroundPosition: `${minorOff}px 0` }}
+          style={{ backgroundImage: `repeating-linear-gradient(90deg, color-mix(in srgb, var(--text) 7%, transparent) 0 1px, transparent 1px ${minorPx}px)`, backgroundPosition: `${minorOff}px 0` }}
         >
           {ticks.map((t) => <div key={t} className="tick" style={{ left: pct(t) }}>{rulerLabel(t, major)}</div>)}
           <div

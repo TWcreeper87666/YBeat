@@ -17,13 +17,14 @@ import { closeSource, sourceHotkey } from './ui/SourcePanel';
 import { FloatingWindow, PreviewPanel, Slot } from './ui/PreviewPanel';
 import { DockRoot, PANELS, layoutMenuItems, panelMenuItems, useDock, type PanelId } from './ui/Dock';
 import { ConfirmHost, DragGhost, MenuBar, MenuHost, Toasts } from './ui/Menu';
+import { TabRecHost } from './ui/TabRecord';
 import { fps } from './engine/rulerTicks';
 import { copyHits, copyKeys, cutHits, deleteSelectedHit, deleteSelectedKey, duplicateHits, hitEdge, hitsFocused, keysFocused, navHit, navHitEdge, nudgeHits, nudgeKeys, pasteHits, pasteKeys, selectAllHits, selectAllKeys, splitHit, trimHit } from './ui/EffectControls';
 import { ShapeDrawerHost } from './ui/ShapeDrawer';
 import { SHORTCUTS, TUTORIAL } from './ui/helpText';
 import { useLayout, toast, setBusy, stopPreviewFx, confirmDialog, openMenu, useConfirm, type MenuItem } from './ui/uiStore';
 import { DragNumber } from './ui/DragNumber';
-import { usePrefs } from './prefs';
+import { OVERLAY_DEFAULT, usePrefs, type OverlayColors } from './prefs';
 import { Globe, Settings } from 'lucide-react';
 import { downloadBlob, exportMp4 } from './engine/exporter';
 import { loadDemo } from './engine/demo';
@@ -204,6 +205,10 @@ function SetRow({ label, desc, inline, children }: { label: string; desc: ReactN
   );
 }
 
+const OVERLAY_KEYS: [keyof OverlayColors, string][] = [
+  ['mask', $t('遮罩')], ['maskInv', $t('反轉遮罩')], ['track', $t('追蹤')], ['param', $t('特效參數')], ['clip', $t('片段變換')],
+];
+
 function SettingsDialog({ close }: { close: () => void }) {
   const L = useLayout();
   const P = usePrefs();
@@ -213,7 +218,7 @@ function SettingsDialog({ close }: { close: () => void }) {
     const l = useLayout.getState(), p = usePrefs.getState();
     return {
       layout: { previewScale: l.previewScale, upperLayerAt: l.upperLayerAt, wheelScroll: l.wheelScroll, trackSize: l.trackSize, beatLead: l.beatLead, timeGrid: l.timeGrid },
-      prefs: { stillDur: p.stillDur, transDur: p.transDur, autosave: p.autosave, proxy: p.proxy },
+      prefs: { stillDur: p.stillDur, transDur: p.transDur, autosave: p.autosave, proxy: p.proxy, theme: p.theme, overlay: p.overlay },
       format: useStore.getState().format,
     };
   });
@@ -275,6 +280,21 @@ function SettingsDialog({ close }: { close: () => void }) {
         <SetRow label={$t('節拍提前')} desc={$t('節拍格線比聲音早一點，看起來才會對拍')} inline>
           <span className="set-hint">≈ {Math.round((L.beatLead / 60) * 1000)} ms</span>
           <DragNumber value={L.beatLead} min={0} max={30} step={1} decimals={0} def={4} suffix=" / 60 s" onChange={(v) => L.set({ beatLead: Math.round(v) })} />
+        </SetRow>
+        <div className="set-sec">{$t('外觀')}</div>
+        <SetRow label={$t('主題')} desc={$t('介面的深淺')}>
+          <Seg value={P.theme} on={(v) => P.set({ theme: v })} opts={[{ v: 'dark' as const, label: $t('深色') }, { v: 'light' as const, label: $t('淺色') }, { v: 'system' as const, label: $t('跟隨系統') }]} />
+        </SetRow>
+        <SetRow label={$t('預覽框顏色')} desc={$t('疊在預覽畫面上的框')}>
+          <div className="ov-colors">
+            {OVERLAY_KEYS.map(([k, label]) => (
+              <label key={k} className="ov-color">
+                <input type="color" className="color" value={(P.overlay ?? OVERLAY_DEFAULT)[k]} onChange={(e) => P.set({ overlay: { ...OVERLAY_DEFAULT, ...P.overlay, [k]: e.target.value } })} />
+                {label}
+              </label>
+            ))}
+            <button className="btn small" disabled={OVERLAY_KEYS.every(([k]) => (P.overlay ?? OVERLAY_DEFAULT)[k] === OVERLAY_DEFAULT[k])} onClick={() => P.set({ overlay: OVERLAY_DEFAULT })}>{$t('重設')}</button>
+          </div>
         </SetRow>
         <div className="set-sec">{$t('語言')} / Language</div>
         <SetRow label={$t('介面語言')} desc={$t('切換後會重新載入')}>
@@ -687,6 +707,7 @@ export default function App() {
       {createPortal(<Timeline />, hosts.timeline)}
 
       <ExportOverlay />
+      <TabRecHost />
       <Dialogs />
       <ShapeDrawerHost />
       <PickerHost />

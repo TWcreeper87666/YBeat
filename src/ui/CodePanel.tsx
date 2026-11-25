@@ -11,6 +11,7 @@ import { useDock } from './Dock';
 import { closeEditorWindow, useEditorWindow } from './EditorWindow';
 import { confirmDialog, openMenu, toast } from './uiStore';
 import { AiEditBar } from './AiEdit';
+import { useResolvedTheme } from '../prefs';
 
 /**
  * 「程式碼」分頁：編輯自訂模組（轉場 / 特效 / 變速），可以同時開好幾個（分頁內的分頁）。
@@ -230,6 +231,7 @@ export function CodePanel() {
 }
 
 function Editor({ id }: { id: string }) {
+  const theme = useResolvedTheme((s) => s.theme);
   const draft = useCodeEditor((s) => s.drafts[id]);
   useCodeEditor((s) => s.pending[id]);
   useStore((s) => s.modules);
@@ -301,7 +303,7 @@ function Editor({ id }: { id: string }) {
       <div className="cp-editor">
         <CodeMirror
           value={draft?.code ?? r.code}
-          theme="dark"
+          theme={theme}
           extensions={ext}
           onChange={(v) => setDraft(id, { ...useCodeEditor.getState().drafts[id], code: v })}
           basicSetup={{ foldGutter: false, highlightActiveLine: true }}
