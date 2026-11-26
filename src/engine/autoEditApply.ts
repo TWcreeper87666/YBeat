@@ -9,7 +9,7 @@ import { analyzeMusic, bandEnvelopes, type Bands, type MusicInfo } from './music
 import { DEFAULT_OPTIONS, planEdit, type EditPlan, type PlanMedia, type PlanOptions, type Recipe, type RuleOpt } from './autoEdit';
 import { loadAnalysis, saveAnalysis } from './analysisStore';
 import { aeFootage, footage, lastTake, musicClips, useAutoEdit, type AutoEditSettings, type Footage } from './autoEditSettings';
-import { $t } from '../i18n';
+import { $t, displayName } from '../i18n';
 import { create } from 'zustand';
 import { sampleAll, type Sampled } from './mediaSampler';
 import { shapeMusic } from './energyShape';
@@ -29,13 +29,14 @@ export { useAutoEdit, type AutoEditSettings };
 import { AUDIO_DRIVE, fxGroup, intensityParams, transitionOpt } from './autoEditPools';
 import { fxCombo, usePrefs } from '../prefs';
 import { newKey } from './keyframes';
-import { cropClip, fitSize, intoCrop, outOfCrop, type Crop } from './transform';
+import { cropClip, cropWindow, fitSize, intoCrop, outOfCrop, type Crop } from './transform';
 import { isHitFx, parseDuration } from './params';
+import type { Module } from '../modules/builtin';
 import { snapFrame } from './rulerTicks';
 import { applyProposals, type Proposal } from '../ai/projectTools';
 import { beginHistoryTransaction, docChanged, endHistoryTransaction, snapshotDoc, type HistoryDoc } from './history';
 import { beatLead } from '../ui/beatGrid';
-import type { FxTrigger } from './trigger';
+import { hasChance, type FxTrigger } from './trigger';
 
 type S = ReturnType<typeof useStore.getState>;
 
@@ -144,7 +145,13 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
     const c = makeClip({ mediaId: m.srcId ?? m.id, start, duration, in: inn + (m.from ?? 0), volume: 0 });
     // 有主角：從主角的臉開始追（框選目標），不會跟到同框的別人；沒有就一般的臉部追蹤
     // 有裁切：分析結果是框內座標，追蹤用的框要換回整個畫面
-    const anchor = sh.anchor && m.crop ? outOfCrop(sh.anchor, m.crop) : sh.anchor;
+    let anchor = sh.anchor && m.crop ? outOfCrop(sh.anchor, m.crop) : sh.anchor;
+    // 有裁切、沒有主角：一般的臉部追蹤會抓整個畫面最大的臉（可能在框外），改成從框內那張臉開始追
+    if (!anchor && m.crop && sh.face) {
+      const cd = cropDims(m, m.crop);
+      const f = sh.faceAnchor ?? { ...sh.face, t: m.kind === 'video' ? sh.in + (sp ? (sp.sourceMin + sp.sourceMax) / 2 : duration / 2) : 0 };
+      anchor = outOfCrop({ t: f.t, x: f.x, y: f.y, h: f.h, w: f.w ?? (f.h * cd.height) / cd.width }, m.crop);
+    }
     if (anchor) c.subject = { kind: 'box', anchors: [{ t: +(anchor.t + (m.kind === 'video' ? m.from ?? 0 : 0)).toFixed(4), box: padBox(anchor) }] };
     else if (sh.face) c.subject = { kind: 'face' };
     if (sh.face && sh.push) c.keys = facePush(sh.face, m.crop ? cropDims(m, m.crop) : m, s.format.w / s.format.h, duration);
@@ -161,10 +168,18 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
         y: [newKey(0, a.y, lin), newKey(duration, b.y, lin)],
       };
     }
-    // 裁切：放大位移成只看得到框內（推近 / 運鏡是對框內畫面做的，一起換算）
+    // 裁切：框內整個放進畫面（比例跟輸出不同就留邊，框外用片段遮罩擋掉）；推近 / 運鏡是對框內畫面做的，一起換算
     if (m.crop) {
+      const src = (m.width || 16) / (m.height || 9), frame = s.format.w / s.format.h;
       c.fit = 'cover';
-      Object.assign(c, cropClip(c, m.crop, (m.width || 16) / (m.height || 9), s.format.w / s.format.h));
+      Object.assign(c, cropClip(c, m.crop, src, frame, false));
+      const win = cropWindow(m.crop, src, frame);
+      if (win.w < 0.999 || win.h < 0.999) {
+        c.effects = [...(c.effects ?? []), {
+          id: uid(), moduleId: CLIP_MASK_ID, params: {}, base: true,
+          mask: { ...DEFAULT_MASK, shape: 'rect', invert: false, x: 0, y: 0, w: win.w, h: win.h, feather: 0, rotation: 0 },
+        }];
+      }
     }
     const prev = clips[clips.length - 1];
     if (sh.transition && prev && Math.abs(prev.start + prev.duration - start) < 1e-6) {
@@ -211,7 +226,7 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
       if (!main) continue;
       if (!trigger && !fx.trigger && isHitFx(main)) duration = Math.min(duration, fx.duration || parseDuration(main.code, 0.5));
       if (duration < 1 / 60) continue;
-      effects.push({ ...fx, ...(trigger ? { trigger } : {}), stack: fx.stack?.map((x) => ({ ...x, id: uid() })), id: uid(), start, duration, track });
+      effects.push({ ...fx, name: displayName(combo.name), ...(trigger ? { trigger } : {}), stack: fx.stack?.map((x) => ({ ...x, id: uid() })), id: uid(), start, duration, track });
       continue;
     }
     const mod = s.modules.find((x) => x.id === o.moduleId);
@@ -224,7 +239,48 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
     const audio = ad ? { [ad.param]: { source: 'level' as const, min: ad.min, max: ad.max, ...(src.audio ? { from: { audio: [src.audio.track] } } : {}) } } : undefined;
     effects.push({ id: uid(), moduleId: o.moduleId, params: { ...(o.params ?? {}) }, start, duration, track, ...(trigger ? { trigger } : {}), ...(audio ? { audio } : {}) });
   }
-  return { clips, effects };
+  return { clips, effects: mergeStacked(effects, s.modules) };
+}
+
+/**
+ * 範圍、觸發完全一樣的特效方塊合併成一個（後面的變成疊加的特效），空出來的特效軌收掉。
+ * 觸發沒設機率時 seed 不算（不影響結果）；有觸發時衝擊長度（主特效的 @duration）要一樣。
+ * 中間軌道上跟它重疊的特效會變成在合併的這組之後套用（自動剪輯的層順序本來就是隨意的）。
+ */
+export function mergeStacked(effects: FxItem[], modules: Module[]): FxItem[] {
+  const hitLen = (id: string) => {
+    const m = modules.find((x) => x.id === id);
+    return m && isHitFx(m) ? parseDuration(m.code, 0.5) : 0;
+  };
+  const r4 = (x: number) => Math.round(x * 1e4);
+  const trigKey = (t: FxItem['trigger']) => {
+    if (!t) return null;
+    const { seed, ...rest } = t;
+    return hasChance(t) ? t : rest;
+  };
+  const keyOf = (f: FxItem) => `${r4(f.start)}|${r4(f.duration)}|${JSON.stringify(trigKey(f.trigger))}`;
+  const alive = effects.map((f) => ({ ...f }));
+  const gone = new Set<FxItem>();
+  const groups = new Map<string, FxItem[]>();
+  for (const f of alive) if (!f.mask && f.subjectFrom === undefined) groups.set(keyOf(f), [...(groups.get(keyOf(f)) ?? []), f]);
+  for (const list of groups.values()) {
+    if (list.length < 2) continue;
+    list.sort((a, b) => a.track - b.track);
+    let head = list[0];
+    for (const f of list.slice(1)) {
+      if (f.track === head.track || (head.trigger && hitLen(head.moduleId) !== hitLen(f.moduleId))) {
+        head = f;
+        continue;
+      }
+      const main: ClipFx = { id: uid(), moduleId: f.moduleId, params: f.params, ...(f.keys ? { keys: f.keys } : {}), ...(f.audio ? { audio: f.audio } : {}), ...(f.follow !== undefined ? { follow: f.follow } : {}) };
+      head.stack = [...(head.stack ?? []), main, ...(f.stack ?? [])];
+      delete head.name; // 合併後不再是單一組合
+      gone.add(f);
+    }
+  }
+  const out = alive.filter((f) => !gone.has(f));
+  const used = [...new Set(out.map((f) => f.track))].sort((a, b) => a - b);
+  return out.map((f) => ({ ...f, track: used.indexOf(f.track) }));
 }
 
 /**
@@ -385,7 +441,7 @@ export function planOptions(st: AutoEditSettings, s: S = useStore.getState()): P
     });
   }
   const pops = st.popOn && st.popVariants.length ? { variants: st.popVariants, per32: st.popsPer32, text: st.popText } : undefined;
-  const speed = st.speedOn && st.speedVariants.length ? { variants: st.speedVariants, per32: st.speedsPer32, intensity: st.speedIntensity } : undefined;
+  const speed = st.speedOn && st.speedVariants.length ? { variants: st.speedVariants, per32: st.speedsPer32, intensity: st.speedIntensity, every: !!st.speedEvery, boost: st.speedBoost ?? 1 } : undefined;
   return { transitions: tr, accents: [], dropHit: null, rules, kenBurns: st.kenBurns, order: st.order, pops, speed };
 }
 
@@ -404,7 +460,7 @@ export type AutoEditProgress = { stage: 'music' } | { stage: 'media'; i: number;
   | { stage: 'lead'; files: number; spans: number; skipped: number; unsure?: true };
 
 /** 依目前的設定產生一版並套用（一步復原）；replaceLast：上一版之後沒有其他修改 → 先復原上一版 */
-export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditProgress) => void = () => {}, signal?: AbortSignal): Promise<{ shots: number; effects: number; pops: number; warn?: string } | { error: AutoEditError }> {
+export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditProgress) => void = () => {}, signal?: AbortSignal): Promise<{ shots: number; effects: number; pops: number; ramps?: number; rampable?: number; speedSkip?: EditPlan['speedSkip']; warn?: string } | { error: AutoEditError }> {
   const st = useAutoEdit.getState();
   let s = useStore.getState();
   const audioId = st.audioId && s.audios.some((a) => a.id === st.audioId) ? st.audioId : musicClips(s)[0]?.id;
@@ -534,7 +590,8 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
   const replace = replaceLast && canReplaceLast() ? last!.before : null;
   beginHistoryTransaction();
   let ok = false;
-  let shots = 0, nfx = 0, plannedPops = 0;
+  let shots = 0, nfx = 0, plannedPops = 0, ramps = 0, rampable = 0;
+  let speedSkip: EditPlan['speedSkip'];
   try {
     if (replace) {
       const { aux: _aux, ...proj } = replace;
@@ -559,11 +616,17 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
     ok = true;
     shots = clips.length;
     nfx = effects.length;
+    // 變速：實際套用了幾個鏡頭（曲線有在動的）/ 可以套的影片鏡頭
+    if (st.speedOn && st.speedVariants.length) {
+      ramps = clips.filter((c) => c.remap?.moduleId === 'remap-curve' && c.remap.keys?.some((k) => k.ease !== 'hold')).length;
+      rampable = plan.shots.filter((x) => [...media, ...frames].find((m) => m.id === x.mediaId)?.kind === 'video').length;
+      speedSkip = plan.speedSkip;
+    }
   } finally {
     endHistoryTransaction(ok);
   }
   last = { before: replace ?? before, after: snapshotDoc() };
-  return { shots, effects: nfx, pops: plannedPops, ...(warn ? { warn } : {}) };
+  return { shots, effects: nfx, pops: plannedPops, ...(rampable ? { ramps, rampable, speedSkip } : {}), ...(warn ? { warn } : {}) };
 }
 
 /** 執行狀態（面板的進度條）：label = 現在在做什麼、frac = 0..1（null = 不知道要多久）、result = 上一次的結果 */
@@ -651,7 +714,13 @@ export async function generateAutoEdit(replaceLast = false, quiet = false): Prom
       return done({ ok: false, text: msg });
     } else {
       const base = r.pops ? $t('已產生 {0} 個鏡頭、{1} 個主體跳出', r.shots, r.pops) : $t('已產生 {0} 個鏡頭', r.shots);
-      const text = r.effects ? `${base} · ${$t('{0} 個特效', r.effects)}` : base;
+      let text = r.effects ? `${base} · ${$t('{0} 個特效', r.effects)}` : base;
+      if (r.rampable) {
+        // 沒套上的原因（多的排前面）
+        const names: Record<string, string> = { spacing: $t('次數 / 間隔'), kind: $t('沒有適合的種類'), short: $t('素材不夠長'), cut: $t('會跨過原本的剪接點'), motion: $t('動作太小'), ban: $t('避開的範圍') };
+        const why = Object.entries(r.speedSkip ?? {}).filter(([, n]) => n).sort((x, y) => y[1]! - x[1]!).map(([k, n]) => `${names[k]} ${n}`);
+        text += ` · ${$t('變速 {0}/{1}', r.ramps ?? 0, r.rampable)}${why.length ? `（${why.join($t('、'))}）` : ''}`;
+      }
       return done(r.warn ? { ok: false, text: `${text} · ${r.warn}` } : { ok: true, text });
     }
   } catch (e) {

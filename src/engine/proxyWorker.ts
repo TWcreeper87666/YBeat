@@ -8,7 +8,7 @@ import { decodeAllFrames } from './matteDecode';
 const KEY_EVERY = 0.5;
 
 type In =
-  | { type: 'build'; id: string; url: string; w: number; h: number }
+  | { type: 'build'; id: string; url: string; w: number; h: number; bitrate: number }
   | { type: 'cancel'; id: string };
 export type ProxyOut =
   | { type: 'progress'; id: string; f: number }
@@ -18,22 +18,22 @@ export type ProxyOut =
 let cancelled: string | null = null;
 const post = (m: ProxyOut) => (self as unknown as Worker).postMessage(m);
 
-async function pickConfig(w: number, h: number, fps: number): Promise<VideoEncoderConfig | null> {
+async function pickConfig(w: number, h: number, fps: number, bitrate: number): Promise<VideoEncoderConfig | null> {
   for (const codec of ['avc1.4d401f', 'avc1.4d4028', 'avc1.42e01f', 'avc1.640028']) {
     // 軟體編碼：測試機（Windows）的硬體編碼器只要同時有解碼器在跑，輸出幾格就卡住；540p 軟體編碼也夠快（每秒 100+ 格）
-    const c: VideoEncoderConfig = { codec, width: w, height: h, bitrate: 2_500_000, framerate: fps, hardwareAcceleration: 'prefer-software' };
+    const c: VideoEncoderConfig = { codec, width: w, height: h, bitrate, framerate: fps, hardwareAcceleration: 'prefer-software' };
     if ((await VideoEncoder.isConfigSupported(c)).supported) return c;
   }
   return null;
 }
 
-async function build(id: string, url: string, w: number, h: number): Promise<Blob | null> {
+async function build(id: string, url: string, w: number, h: number, bitrate: number): Promise<Blob | null> {
   const alive = () => cancelled !== id;
   const canvas = new OffscreenCanvas(w, h);
   const g = canvas.getContext('2d')!;
   const target = new ArrayBufferTarget();
   const fps = 30;
-  const cfg = await pickConfig(w, h, fps);
+  const cfg = await pickConfig(w, h, fps, bitrate);
   if (!cfg) throw new Error('no encoder');
   const muxer = new Muxer({ target, video: { codec: 'avc', width: w, height: h, frameRate: fps }, fastStart: 'in-memory', firstTimestampBehavior: 'offset' });
   let encError: Error | null = null;
@@ -112,7 +112,7 @@ self.onmessage = async (e: MessageEvent<In>) => {
   }
   cancelled = null;
   try {
-    const blob = await build(m.id, m.url, m.w, m.h);
+    const blob = await build(m.id, m.url, m.w, m.h, m.bitrate);
     if (blob) post({ type: 'done', id: m.id, blob });
     else post({ type: 'fail', id: m.id, err: 'cancelled' });
   } catch (err) {

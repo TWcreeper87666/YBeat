@@ -10,7 +10,7 @@ export interface Usage { parts: UsagePart[]; used: number | null; quota: number 
 /** [資料庫, store（沒有 = 整個資料庫）, 名稱] */
 const PARTS: [string, string | null, () => string][] = [
   ['ybeat', 'media', () => $t('素材檔案')],
-  ['ybeat', 'proxy', () => $t('預覽代理檔')],
+  ['ybeat-proxy', null, () => $t('預覽代理檔')],
   ['ybeat', 'project', () => $t('專案')],
   ['ybeat-matte', null, () => $t('去背')],
   ['ybeat-face', null, () => $t('臉部追蹤')],
@@ -76,7 +76,11 @@ export async function measureUsage(): Promise<Usage> {
   }
   parts.push({ label: $t('設定與自訂'), bytes: ls });
   const est = await navigator.storage?.estimate?.().catch(() => null);
-  return { parts, used: est?.usage ?? null, quota: est?.quota ?? null };
+  const sum = parts.reduce((s, p) => s + p.bytes, 0);
+  // 瀏覽器算的總量比逐筆加總多的部分：刪掉了還沒回收的資料、資料庫本身的額外空間、快取
+  const other = (est?.usage ?? 0) - sum;
+  if (other >= 1024 * 1024) parts.push({ label: $t('其他'), bytes: other });
+  return { parts, used: est?.usage != null ? Math.max(est.usage, sum) : null, quota: est?.quota ?? null };
 }
 
 export function formatBytes(n: number): string {
@@ -125,20 +129,15 @@ export async function pruneCaches(keep: Set<string>): Promise<void> {
 
 /** 清掉這個網站的所有資料（專案、素材、快取、設定），然後重新載入 */
 export async function wipeAllData(): Promise<void> {
-  // 開著的連線會擋住 deleteDatabase：改成把每個 store 清空
   const names = (await indexedDB.databases?.().catch(() => []) ?? []).map((x) => x.name).filter((x): x is string => !!x);
   for (const name of new Set([...names, ...PARTS.map(([n]) => n)])) {
-    const d = await openDb(name);
-    if (!d) continue;
-    const stores = [...d.objectStoreNames];
-    if (stores.length) {
-      await new Promise<void>((res) => {
-        const tx = d.transaction(stores, 'readwrite');
-        for (const s of stores) tx.objectStore(s).clear();
-        tx.oncomplete = tx.onerror = tx.onabort = () => res();
-      });
-    }
-    d.close();
+    // 整個刪掉，空間馬上釋放；自己開著的連線收到 versionchange 會讓出來。
+    // 被別的分頁擋住時刪除會排著，等那個分頁關掉才完成，這裡不用一直等
+    await new Promise<void>((res) => {
+      const r = indexedDB.deleteDatabase(name);
+      r.onsuccess = r.onerror = () => res();
+      r.onblocked = () => setTimeout(res, 1500);
+    });
   }
   if ('caches' in window) for (const k of await caches.keys().catch(() => [])) await caches.delete(k).catch(() => {});
   localStorage.clear();

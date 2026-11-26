@@ -335,7 +335,7 @@ function SettingsDialog({ close }: { close: () => void }) {
     const l = useLayout.getState(), p = usePrefs.getState();
     return {
       layout: { previewScale: l.previewScale, upperLayerAt: l.upperLayerAt, wheelScroll: l.wheelScroll, trackSize: l.trackSize, beatLead: l.beatLead, timeGrid: l.timeGrid },
-      prefs: { stillDur: p.stillDur, transDur: p.transDur, autosave: p.autosave, proxy: p.proxy, theme: p.theme, overlay: p.overlay },
+      prefs: { stillDur: p.stillDur, transDur: p.transDur, autosave: p.autosave, proxy: p.proxy, proxyQuality: p.proxyQuality, theme: p.theme, overlay: p.overlay },
       format: useStore.getState().format,
     };
   });
@@ -369,6 +369,7 @@ function SettingsDialog({ close }: { close: () => void }) {
     { title: $t('預覽'), icon: <Eye size={13} />, rows: [
       { label: $t('預覽畫質'), desc: $t('調低編輯會比較順，不影響匯出'), ctl: <Seg value={L.previewScale} on={(q) => L.set({ previewScale: q })} opts={QUALITIES.map((q) => ({ v: q, label: q === 1 ? $t('完整') : `${Math.round(q * 100)}%` }))} /> },
       { label: $t('預覽代理檔'), desc: $t('關鍵影格很稀的影片，預覽改用小副本，不影響匯出'), inline: true, ctl: <Switch v={P.proxy} on={(v) => P.set({ proxy: v })} /> },
+      ...(P.proxy ? [{ label: $t('代理檔畫質'), desc: $t('越低檔案越小，換了會重新產生'), ctl: <Seg value={P.proxyQuality} on={(q) => P.set({ proxyQuality: q })} opts={[{ v: 'low' as const, label: $t('省空間') }, { v: 'medium' as const, label: $t('標準') }, { v: 'high' as const, label: $t('清晰') }]} /> }] : []),
     ] },
     { title: $t('時間軸'), icon: <Film size={13} />, rows: [
       { label: $t('上層軌道顯示在'), desc: $t('疊在上面的軌道放在時間軸的哪一邊'), ctl: <Seg value={L.upperLayerAt} on={(v) => L.set({ upperLayerAt: v })} opts={[{ v: 'bottom' as const, label: $t('下方') }, { v: 'top' as const, label: $t('上方') }]} /> },

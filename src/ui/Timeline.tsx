@@ -2,7 +2,7 @@ import { matteCoverage, requestMatte, useMatte } from '../engine/matte';
 import { openEditorWindow } from './EditorWindow';
 import { clickTransition, copyTransition, hasTransitionClipboard, pasteTransition, removeTransitions, useTrSel } from './trSelect';
 import { $t, displayName } from '../i18n';
-import { Repeat, ArrowLeftRight, ArrowRightLeft, CircleDashed, Eye, EyeOff, FastForward, Film, Gauge, Magnet, Minus, MoveHorizontal, Music, Plus, Redo2, Replace, Scissors, Sparkles, TriangleAlert, Undo2, Volume2, VolumeX, Group, Link2, ArrowRightFromLine, ArrowRightToLine, Drum, ChevronDown, Lock, Unlock, ScanFace, Crosshair } from 'lucide-react';
+import { Repeat, ArrowLeftRight, ArrowRightLeft, CircleDashed, Eye, EyeOff, FastForward, Film, Gauge, Magnet, Minus, MoveHorizontal, Music, Plus, Redo2, Replace, Scissors, Sparkles, TriangleAlert, Undo2, Volume2, VolumeX, Group, Link2, ArrowRightFromLine, ArrowRightToLine, Drum, ChevronDown, Lock, Unlock, ScanFace, Crosshair, Layers } from 'lucide-react';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { create } from 'zustand';
 import {
@@ -1071,7 +1071,7 @@ interface ClipViewProps {
 /** 依片段寬度切幾格檢查（每格約 3px，最多 240 格） */
 const matteCells = (w: number) => Math.max(1, Math.min(240, Math.round(w / 3)));
 
-/** 片段底部的進度條：cov 每格 1 = 好了；全部好了就不顯示；失敗時沒好的部分是紅色 */
+/** 片段底部的進度條：cov 每格 1 = 好了；全部好了就不顯示；還沒好的部分是灰色斜紋（計算中會動），失敗時是紅色 */
 function CoverageBar({ cov, busy, err, title, cls, color }: { cov: Uint8Array; busy: boolean; err?: string; title: (pct: number) => string; cls?: string; color: string }) {
   let ready = 0;
   for (const v of cov) ready += v;
@@ -1089,7 +1089,7 @@ function CoverageBar({ cov, busy, err, title, cls, color }: { cov: Uint8Array; b
   return (
     <div
       className={`clip-matte ${cls ?? ''} ${busy ? 'busy' : ''}`}
-      style={{ backgroundImage: `linear-gradient(to right, ${stops.join(', ')})` }}
+      style={{ backgroundImage: `linear-gradient(to right, ${stops.join(', ')}), var(--cov-wait)` }}
       title={err && !busy ? err : title(Math.round((ready / cov.length) * 100))}
     />
   );
@@ -1104,7 +1104,7 @@ function MatteBar({ clip, media, width }: { clip: Clip; media: Media; width: num
   const map = useMemo(() => new Map(modules.map((m) => [m.id, m])), [modules]);
   // 開了 AI 去背就開始算（不用等播放頭走到這個片段；同樣的範圍不會重複排）
   useEffect(() => requestMatte(clip, media, map), [clip, media, map]);
-  return <CoverageBar cov={matteCoverage(clip, media, map, matteCells(width))} busy={!!job} err={err} color="var(--accent2)" title={(p) => $t('AI 去背 {0}%', p)} />;
+  return <CoverageBar cov={matteCoverage(clip, media, map, matteCells(width))} busy={!!job} err={err} color="var(--progress-fill)" title={(p) => $t('AI 去背 {0}%', p)} />;
 }
 
 /** 追蹤：片段底部顯示哪些地方已經追過（加了錨點時從那裡往後重新長出來）；有 AI 去背的進度條時疊在它上面 */
@@ -1228,8 +1228,9 @@ function fxTriggerMarks(f: FxItem, trBlock: boolean): string {
     // 轉場方塊：範圍內（含兩端）會套上轉場的剪接點
     marks = cutPoints(s.clips, cutTracks(f, s.tracks), true).filter((p) => p >= f.start - 0.01 && p <= f.start + f.duration + 0.01);
   } else {
-    const pts = f.trigger.kind === 'cut' ? cutPoints(s.clips, cutTracks(f, s.tracks)) : triggerBeats(f.trigger.every);
-    marks = triggerMarks(pts, f.start, f.start + f.duration, f.trigger);
+    const tr = f.trigger;
+    if (tr.kind === 'hits') marks = tr.hits.filter((h) => h.t > 1e-4).map((h) => f.start + h.t);
+    else marks = triggerMarks(tr.kind === 'cut' ? cutPoints(s.clips, cutTracks(f, s.tracks)) : triggerBeats(tr.every), f.start, f.start + f.duration, tr);
   }
   return marks.slice(0, 400).map((p) => (p - f.start).toFixed(4)).join(',');
 }
@@ -1252,6 +1253,7 @@ const FxView = React.memo(function FxView({ f, pps, sel, name, drop, masked, mar
       {f.trigger && (tr ? <ArrowRightLeft size={10} className="link-ico" /> : <Repeat size={10} className="link-ico" />)}
       {f.group && <Group size={11} className="link-ico" />}
       <span className="clip-name" title={`${name} · ${f.duration.toFixed(2)}s`}>{name}</span>
+      {!!f.stack?.length && <span className="badge" title={$t('另外疊加 {0} 個特效', f.stack.length)}><Layers size={10} /> {f.stack.length}</span>}
       {masked && <span className="badge" title={$t('有遮罩')}><CircleDashed size={10} /></span>}
       {drop && <span className="badge replace-tag"><Replace size={10} /> {$t('取代')}</span>}
       <OpBadge k={key} />

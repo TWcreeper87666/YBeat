@@ -7,7 +7,7 @@ import { $t } from '../i18n';
 import { useStore, type Media } from '../store';
 import { Seg } from './Toggle';
 import { tc } from '../engine/rulerTicks';
-import { scrubFrame, warmScrub } from '../engine/scrubCache';
+import { holdScrubFor, scrubFrame, warmScrub } from '../engine/scrubCache';
 import { isTextField } from './focus';
 import { FULL_CROP, isFullCrop, type Crop } from '../engine/transform';
 
@@ -121,7 +121,7 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
       const { a: lo, b: hi } = cur.current;
       // 播放：只循環播選取的範圍
       if (!v.paused && target.current === null && (v.currentTime >= hi - 0.01 || v.currentTime < lo - 0.05)) v.currentTime = lo;
-      if (target.current === null) setT(v.currentTime);
+      if (target.current === null) setT((x) => (Math.abs(x - v.currentTime) > 1 / 60 ? v.currentTime : x));
       // 拖曳中精準畫面還沒出來 → 先畫快取的小張影格
       const ov = overlay.current;
       if (ov) {
@@ -140,7 +140,8 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
-    const on = () => setPlaying(!v.paused);
+    // 播放中不在背景抽拖曳用的影格（解碼器給播放用，不然會越播越卡）
+    const on = () => { setPlaying(!v.paused); holdScrubFor(v, !v.paused); };
     v.addEventListener('play', on);
     v.addEventListener('pause', on);
     warmScrub(m, req.a);
@@ -151,6 +152,10 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
       v.removeEventListener('play', on);
       v.removeEventListener('pause', on);
       v.pause();
+      holdScrubFor(v, false);
+      // 馬上放掉解碼器（等垃圾回收的話，開過很多次後會越來越卡）
+      v.removeAttribute('src');
+      v.load();
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -193,6 +198,8 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
       else if (e.key === 'Escape') close();
       else if (e.key === 'Enter') { commit(); close(); }
       else if (e.key === ' ') toggle();
+      else if (e.key === 'Home') seek(cur.current.a);
+      else if (e.key === 'End') seek(cur.current.b);
       else if ('iIqQ'.includes(e.key)) { remember(); setAB(clampIn(t, cur.current)); }
       else if ('oOwW'.includes(e.key)) { remember(); setAB(clampOut(t, cur.current)); }
       else return;
@@ -203,13 +210,53 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
     return () => window.removeEventListener('keydown', k, true);
   });
 
+  // 範圍條的顯示範圍（滾輪縮放、Shift + 滾輪 / 水平捲動平移；長影片才調得到細的範圍）
+  const [view, setView] = useState<[number, number]>([0, dur]);
+  const viewRef = useRef(view);
+  viewRef.current = view;
+  const span = Math.max(1e-6, view[1] - view[0]);
+  useEffect(() => {
+    const el = bar.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const [v0, v1] = viewRef.current;
+      const sp = v1 - v0;
+      const r = el.getBoundingClientRect();
+      if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        const d = ((e.shiftKey ? e.deltaY : e.deltaX) / r.width) * sp;
+        const n0 = Math.max(0, Math.min(dur - sp, v0 + d));
+        return setView([n0, n0 + sp]);
+      }
+      const at = v0 + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * sp;
+      const ns = Math.max(Math.min(1, dur), Math.min(dur, sp * Math.pow(1.0015, e.deltaY)));
+      const n0 = Math.max(0, Math.min(dur - ns, at - ((at - v0) / sp) * ns));
+      setView([n0, n0 + ns]);
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [dur]);
+  // 播放 / 跳轉跑出顯示範圍：捲過去
+  useEffect(() => {
+    const [v0, v1] = viewRef.current;
+    if (t >= v0 && t <= v1) return;
+    const sp = v1 - v0;
+    const n0 = Math.max(0, Math.min(dur - sp, t - sp * 0.1));
+    setView([n0, n0 + sp]);
+  }, [t, dur]);
+
   // 範圍條：拖把手 = 調入點 / 出點（畫面跟著跳），其他地方 = 移動播放位置
   const timeAt = (x: number) => {
     const r = bar.current!.getBoundingClientRect();
-    return Math.max(0, Math.min(1, (x - r.left) / r.width)) * dur;
+    const [v0, v1] = viewRef.current;
+    return v0 + Math.max(0, Math.min(1, (x - r.left) / r.width)) * (v1 - v0);
   };
   /** 滑鼠離播放頭幾 px 內 = 碰到播放頭 */
-  const nearHead = (x: number) => Math.abs(x - (bar.current!.getBoundingClientRect().left + (t / Math.max(1e-6, dur)) * bar.current!.getBoundingClientRect().width)) <= 6;
+  const nearHead = (x: number) => {
+    const r = bar.current!.getBoundingClientRect();
+    const [v0, v1] = viewRef.current;
+    return Math.abs(x - (r.left + ((t - v0) / Math.max(1e-6, v1 - v0)) * r.width)) <= 6;
+  };
   const [headHover, setHeadHover] = useState(false);
   const down = (e: React.PointerEvent, what: 'a' | 'b' | 't') => {
     if (e.button !== 0) return;
@@ -253,7 +300,9 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   };
-  const pc = (x: number) => `${(x / Math.max(1e-6, dur)) * 100}%`;
+  /** 時間點 → 範圍條上的位置；pw = 長度 → 寬度（跟著縮放） */
+  const pc = (x: number) => `${((x - view[0]) / span) * 100}%`;
+  const pw = (d: number) => `${(d / span) * 100}%`;
 
   return (
     <div className="overlay" style={{ zIndex: 300 }} onPointerDown={(e) => outsideClose && e.target === e.currentTarget && close()}>
@@ -265,8 +314,8 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
           {cropOn && <CropBox crop={crop} set={setCrop} k={k} onStart={() => remember()} onClick={toggle} />}
         </div>
         <div className="ae-range-bar" ref={bar} onPointerDown={(e) => down(e, 't')} onPointerMove={(e) => setHeadHover(nearHead(e.clientX))} onPointerLeave={() => setHeadHover(false)}>
-          {others.map((g, i) => <i key={i} className="other" style={{ left: pc(g.a), width: pc(g.b - g.a) }} />)}
-          <i className="sel" style={{ left: pc(a), width: pc(b - a) }} />
+          {others.map((g, i) => <i key={i} className="other" style={{ left: pc(g.a), width: pw(g.b - g.a) }} />)}
+          <i className="sel" style={{ left: pc(a), width: pw(b - a) }} />
           <i className={`head ${headHover ? 'hover' : ''}`} style={{ left: pc(t) }} />
           <b style={{ left: pc(a) }} onPointerDown={(e) => down(e, 'a')} />
           <b style={{ left: pc(b) }} onPointerDown={(e) => down(e, 'b')} />
@@ -276,6 +325,7 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
           <span className="ae-stat">{fmt(t)}</span>
           <span className="spacer" />
           {cropOn && !isFullCrop(crop) && <span className="ae-stat">{Math.round(crop.w * m.width)}×{Math.round(crop.h * m.height)}</span>}
+          {span < dur - 0.01 && <button className="link" title={$t('顯示整段')} onClick={() => setView([0, dur])}>{(dur / span).toFixed(1)}×</button>}
           <span className="ae-stat">{fmt(a)} – {fmt(b)} · {(b - a).toFixed(1)}s</span>
         </div>
         <div className="dialog-actions">

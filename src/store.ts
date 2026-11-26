@@ -1,4 +1,4 @@
-import { $t } from './i18n';
+import { $t, displayName } from './i18n';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { BUILTIN_MODULES, NEW_MODULE_TEMPLATES, type Module, type ModuleKind } from './modules/builtin';
@@ -381,10 +381,10 @@ export function defaultTiming(m: { kind: string; code: string } | undefined): Fx
   return m && isHitFx(m) ? { kind: 'hits', hits: [{ t: 0, d: parseDuration(m.code, 0.5) }] } : undefined;
 }
 
-/** 我的組合 → 特效方塊的內容（疊加的特效換新 id） */
+/** 組合 → 特效方塊的內容（疊加的特效換新 id；方塊名稱 = 組合名稱） */
 function comboItem(combo: FxCombo) {
   const c = structuredClone(combo.fx);
-  return { ...c, stack: c.stack?.map((x) => ({ ...x, id: uid() })) };
+  return { ...c, name: displayName(combo.name), stack: c.stack?.map((x) => ({ ...x, id: uid() })) };
 }
 /** 加片段特效：一般模組 = 一個；我的組合 = 主特效 + 疊加的特效 */
 export function comboClipFx(moduleId: string): ClipFx[] {
@@ -612,8 +612,13 @@ export const useStore = create<State>()(
           return [{ ...a, duration: local, fadeOut: 0 }, { ...a, id: uid(), start: t, duration: a.duration - local, in: a.in + local * (a.rate ?? 1), fadeIn: 0 }];
         }
         const f = it as FxItem;
-        // 有觸發的方塊：關鍵影格是「每次觸發」的時間，兩半都照原樣保留
-        if (f.trigger) return [{ ...f, duration: local }, { ...f, id: uid(), start: t, duration: f.duration - local, stack: f.stack?.map((x) => ({ ...x, id: uid() })) }];
+        // 有觸發的方塊：關鍵影格是「每次觸發」的時間，兩半都照原樣保留；手動的 Hit 分到兩段
+        if (f.trigger) {
+          const tr = f.trigger;
+          const [ta, tb] = tr.kind === 'hits' ? splitTiming({ kind: 'hits', hits: tr.hits }, local) : [];
+          const half = (x: FxTiming | undefined) => (x?.kind === 'hits' ? { ...tr, hits: x.hits } : tr);
+          return [{ ...f, duration: local, trigger: half(ta) }, { ...f, id: uid(), start: t, duration: f.duration - local, trigger: half(tb), stack: f.stack?.map((x) => ({ ...x, id: uid() })) }];
+        }
         const splitMap = (keys: Record<string, Keyframe[]> | undefined) => {
           const ka: Record<string, Keyframe[]> = {}, kb: Record<string, Keyframe[]> = {};
           for (const [p, list] of Object.entries(keys ?? {})) {
@@ -1087,9 +1092,9 @@ export const useStore = create<State>()(
               const combo = fxCombo(moduleId);
               if (combo) {
                 const c = comboItem(combo);
-                return { ...e, moduleId: c.moduleId, params: c.params, keys: { ...(c.keys ?? {}), ...keys }, audio: c.audio, stack: c.stack, trigger: c.trigger };
+                return { ...e, name: c.name, moduleId: c.moduleId, params: c.params, keys: { ...(c.keys ?? {}), ...keys }, audio: c.audio, stack: c.stack, trigger: c.trigger };
               }
-              return { ...e, moduleId, params: {}, keys };
+              return { ...e, name: undefined, moduleId, params: {}, keys };
             }),
             selection: { type: 'effect', id },
             selected: [keyOf('effect', id)],

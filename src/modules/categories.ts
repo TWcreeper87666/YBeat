@@ -85,6 +85,7 @@ const MAP: Record<string, string> = {
   'fx-spinkick': 'motion',
   'fx-squash': 'motion',
   'fx-tilt3d': 'motion',
+  'fx-randomcam': 'motion',
   'fx-tilezoom': 'frame',
   'fx-twitch': 'glitch',
   'fx-blurpulse': 'style',

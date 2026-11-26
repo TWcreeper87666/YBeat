@@ -99,17 +99,19 @@ export function speedCurve(variant: SpeedVariant, b0: number, b1: number, T: (be
       { beat: end, source, ease: linear },
       { beat: b1, source: source + at(b1) - at(end), ease: linear });
   } else if (variant === 'rewindToCut') {
-    if (n < 3) return null;
-    const rewindBeats = strength < 0.5 ? 1 : 2;
+    if (n < 1) return null;
+    // 短鏡頭（1～2 拍，快節奏）：只倒最後半拍左右
+    const rewindBeats = n >= 3 ? (strength < 0.5 ? 1 : 2) : n >= 2 ? 0.75 : 0.5;
     const turn = b1 - rewindBeats;
-    const slowStart = turn - 1;
+    const slowStart = n >= 3 ? turn - 1 : Math.max(b0, turn - Math.min(1, (turn - b0) / 2));
     const q = at(turn) - at(slowStart);
     const peak = at(slowStart) + q * 2 / 3;
     const rewindTime = at(b1) - at(turn);
-    const distance = Math.min(peak, (2 + 2 * strength) * rewindTime / 3);
+    // 倒帶平均 1～2.6 倍速（強度越高越快）；越倒越快、剪接點那一刻最快（平均的 1.5 倍，不超過 4 倍速）
+    const distance = Math.min(peak, (1 + 1.6 * strength) * rewindTime);
     if (slowStart > b0) knots.push({ beat: b0, source: 0, ease: linear });
     knots.push({ beat: slowStart, source: at(slowStart), ease: slowOut },
-      { beat: turn, source: peak, ease: accelerating },
+      { beat: turn, source: peak, ease: [1 / 3, 0, 2 / 3, 1 / 2] },
       { beat: b1, source: peak - distance, ease: linear });
   } else if (variant === 'reverseForwardB') {
     if (n < 3) return null;
@@ -217,6 +219,18 @@ export function speedCurve(variant: SpeedVariant, b0: number, b1: number, T: (be
     }
   } else return null;
   return { variant, knots, ...sourceBounds(knots) };
+}
+
+/** 整體加速：同一條曲線、素材用掉 k 倍（k = 1 不變） */
+export function boostSpeed(sp: PlanSpeed, k: number): PlanSpeed {
+  if (!(k > 1)) return sp;
+  return { ...sp, knots: sp.knots.map((x) => ({ ...x, source: x.source * k })), sourceMin: sp.sourceMin * k, sourceMax: sp.sourceMax * k };
+}
+
+/** 曲線的重點（素材位置，跟 knots 的 source 同一套）：剪前倒抽 = 開始倒帶那一刻；其他 = 鏡頭中間 */
+export function speedFocus(sp: PlanSpeed, b0: number, b1: number, T: (beat: number) => number): number {
+  if (sp.variant === 'rewindToCut') return sp.sourceMax;
+  return speedSourceAt(sp, b0, T, (beatTimeF(T, b1) - beatTimeF(T, b0)) / 2);
 }
 
 /** 與 evalKeys 使用相同的 cubic-bezier 與 hold 規則。 */

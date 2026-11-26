@@ -51,7 +51,12 @@ function db() {
   dbp ??= new Promise((res, rej) => {
     const r = indexedDB.open('ybeat-face', 1);
     r.onupgradeneeded = () => r.result.createObjectStore('tracks');
-    r.onsuccess = () => res(r.result);
+    r.onsuccess = () => {
+      const d = r.result;
+      // 清除所有資料要刪掉這個資料庫：讓出連線
+      d.onversionchange = () => { d.close(); dbp = null; };
+      res(d);
+    };
     r.onerror = () => rej(r.error);
   });
   return dbp;

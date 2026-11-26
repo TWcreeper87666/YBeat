@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 (globalThis as { requestAnimationFrame?: (f: () => void) => number }).requestAnimationFrame = () => 0;
-import { beatHits, fxWindow, normalizeHits, overwriteHits, setBeatSource, splitTiming, triggerMarks, triggerWindow, type FxTiming } from '../src/engine/trigger';
+import { beatHits, manualHits, fxWindow, normalizeHits, overwriteHits, scatterPoint, setBeatSource, splitTiming, timingIndex, triggerOpts, triggerIndex, triggerMarks, triggerWindow, type FxTiming } from '../src/engine/trigger';
 import { defaultTiming, makeClip, useStore, type FxItem } from '../src/store';
 import { usePrefs } from '../src/prefs';
 
@@ -13,6 +13,40 @@ assert.deepEqual(triggerWindow(beats, 1.5, 5, 1.7), { t0: 1.5, d: 0.5 }, '方塊
 assert.deepEqual(triggerWindow([], 1, 5, 3), { t0: 1, d: 4 }, '沒有節拍 = 整段一次');
 assert.deepEqual(triggerMarks(beats, 1, 5), [2, 3, 4], '方塊裡的觸發點（不含開頭、結尾）');
 console.log('PASS 觸發窗口');
+
+// ── 第幾次觸發（u_trigger）──
+const every: { kind: 'beat'; every: 1 } = { kind: 'beat', every: 1 };
+const idxAt = (start: number, t: number) => triggerIndex(every, beats, start, triggerWindow(beats, start, 5, t).t0);
+assert.deepEqual([1.2, 2.5, 3.5, 4.5].map((t) => idxAt(1, t)), [0, 1, 2, 3], '方塊開頭在拍上');
+assert.deepEqual([1.7, 2.5, 3.5].map((t) => idxAt(1.5, t)), [0, 1, 2], '方塊開頭在兩拍中間：開頭 = 0，第一拍 = 1');
+const half = { ...every, chance: 0.5, seed: 1 };
+assert.deepEqual([1, 2, 4].map((t0) => triggerIndex(half, beats, 1, t0)), [0, 1, 3], '有機率：沒挑中的拍子也算');
+assert.equal(timingIndex(undefined, 0), 0);
+assert.equal(timingIndex({ kind: 'hits', hits: [{ t: 0, d: 0.5 }, { t: 2, d: 1 }] }, 2), 1, '手動 Hit：第二個');
+setBeatSource(() => beats);
+assert.deepEqual([0.5, 1.5, 2.5].map((t0) => timingIndex({ kind: 'beat', every: 1, d: 0.25 }, t0, 1.5)), [0, 1, 2], '片段每拍：片段裡第一拍 = 0');
+setBeatSource(() => []);
+console.log('PASS 第幾次觸發');
+
+// ── 觸發選項：換觸發方式時留下；隨機位置固定、離邊緣至少 margin ──
+assert.deepEqual(triggerOpts({ kind: 'beat', every: 1, chance: 0.5, seed: 3, extend: true, scatter: 0.2 }), { chance: 0.5, seed: 3, extend: true, scatter: 0.2 });
+assert.deepEqual(triggerOpts({ kind: 'cut', tracks: [0] }), {}, '沒設選項 = 空的（不留 undefined）');
+for (let n = 0; n < 50; n++) {
+  const [x, y] = scatterPoint(7, n, 0.2);
+  assert.ok(x >= 0.2 && x <= 0.8 && y >= 0.2 && y <= 0.8, '在邊距裡');
+}
+assert.deepEqual(scatterPoint(7, 3, 0.2), scatterPoint(7, 3, 0.2), '同 seed 同一次觸發 = 同一點');
+assert.notDeepEqual(scatterPoint(7, 3, 0.2), scatterPoint(7, 4, 0.2), '下一次觸發換位置');
+console.log('PASS 觸發選項');
+
+// ── 切到手動：觸發點展開成方塊（方塊內時間）──
+assert.deepEqual(manualHits(undefined, beats, 1, 4), [{ t: 0, d: 4 }], '整段一次 = 一個蓋滿的');
+assert.deepEqual(manualHits(every, beats, 1.5, 3), [{ t: 0, d: 0.5 }, { t: 0.5, d: 1 }, { t: 1.5, d: 1 }, { t: 2.5, d: 0.5 }], '方塊開頭也是一次；長度到下一拍');
+assert.deepEqual(manualHits(every, beats, 1, 3, 0.4).map((h) => h.d), [0.4, 0.4, 0.4], '衝擊特效最長 @duration');
+assert.deepEqual(manualHits({ ...every, extend: true }, beats, 1, 3, 0.4).map((h) => h.d), [1, 1, 1], '延伸：到下一拍');
+const hitsTr = { kind: 'hits' as const, hits: [{ t: 0.5, d: 0.2 }] };
+assert.equal(manualHits(hitsTr, [], 0, 2), hitsTr.hits, '已經是手動 = 照舊');
+console.log('PASS 切到手動');
 
 // ── 分割：疊加的特效關鍵影格也切開；有觸發的照原樣 ──
 const key = (t: number, v: number) => ({ id: 'k' + t, t, v, ease: [0, 0, 1, 1] as [number, number, number, number] });

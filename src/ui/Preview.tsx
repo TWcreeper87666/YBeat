@@ -318,8 +318,9 @@ function FxPreviewLabel() {
   const fx = usePreviewFx((s) => s.fx);
   const text = usePreviewFx((s) => s.text?.name);
   const name = useStore((s) => (fx ? s.modules.find((m) => m.id === fx.moduleId)?.name : null));
-  const combo = usePrefs((s) => (fx ? s.fxCombos.find((c) => c.id === fx.moduleId)?.name : undefined));
-  const label = name ? displayName(name) : combo ?? text;
+  usePrefs((s) => s.fxCombos); // 改名後更新
+  const combo = fx ? fxCombo(fx.moduleId)?.name : undefined;
+  const label = name ? displayName(name) : combo ? displayName(combo) : text;
   if (!label) return null;
   return (
     <div className="fx-preview-label">

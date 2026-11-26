@@ -15,7 +15,7 @@ import { clipTransformAt } from './transform';
 import { evalKeys, type Keyframe } from './keyframes';
 import { fitOf, followOf, subjectRectInFrame, tracking, withOffset, type Follow, type FollowMap } from './follow';
 import { animFrameAt, animImage, animImageReady } from './animImage';
-import { chanceWindow, cutPoints, cutTracks, fxWindow, hasChance, hitWindow, triggerBeats, triggerWindow } from './trigger';
+import { chanceWindow, cutPoints, cutTracks, fxWindow, hasChance, hitWindow, scatterPoint, timingIndex, triggerBeats, triggerIndex, triggerWindow, type FxTrigger } from './trigger';
 
 export interface RenderCtx {
   clips: Clip[];
@@ -39,7 +39,7 @@ const ADJ_EPS = 0.01;
 /** 播放時提前多少秒開始播放下一段影片 */
 const PREROLL = 0.4;
 /** 還沒開始的片段：多久之內才建立 <video>（太早建立的話，片段多時幾十個影片同時預載、搶解碼器） */
-const CREATE_AHEAD = 1.5;
+const CREATE_AHEAD = 4;
 /** 整串都播完超過這麼久的 <video>：放掉（解碼器、記憶體）；倒回去時再建立 */
 const RELEASE_AFTER = 0.5;
 
@@ -124,8 +124,9 @@ function curveSpans(clip: Clip, media: Media, ctx: Pick<RenderCtx, 'modules'>): 
 }
 /** 預覽：現在 ~ 4 秒後會播到的倒播片段，先把影格解好 */
 function prefetchReverse(ctx: RenderCtx, t: number) {
-  for (const list of ctx.videoTracks) for (const c of list) {
-    if (c.start > t + 4 || c.start + c.duration < t) continue;
+  // 近的先排（解碼一次只做兩段）
+  for (const c of ctx.videoTracks.flat().sort((x, y) => x.start - y.start)) {
+    if (c.start > t + 8 || c.start + c.duration < t) continue;
     const m = ctx.media.get(c.mediaId);
     if (!m || m.missing) continue;
     const cs = curveSpans(c, m, ctx);
@@ -192,6 +193,7 @@ uniform float u_duration;
 uniform float u_progress;
 uniform float u_level;   // 目前音量 0~1（音訊反應）
 uniform float u_beat;    // 節拍脈衝：打到拍 = 1，之後衰減
+uniform float u_trigger; // 第幾次觸發（0 起算；沒有觸發 = 0）
 `;
 
 export const GLSL_LIB = `
@@ -555,7 +557,11 @@ export class Renderer {
     gl.uniform1f(this.loc(p, 'u_progress'), Math.min(1, Math.max(0, progress)));
     gl.uniform1f(this.loc(p, 'u_level'), this.sig.level);
     gl.uniform1f(this.loc(p, 'u_beat'), this.sig.beat);
+    gl.uniform1f(this.loc(p, 'u_trigger'), this.trig);
   }
+
+  /** 目前套用中的特效是第幾次觸發（setCommon 用；套完要歸零） */
+  private trig = 0;
 
   /** 這一格的音訊訊號（render 開頭算一次） */
   private sig: AudioSignal = { level: 0, beat: 0 };
@@ -617,6 +623,15 @@ export class Renderer {
       // 跟著這個點的範圍參數（@fit）= 目標大小（倍率在 setParams 乘）
       for (const z of g.defs) if (z.fit?.of === d.name && fitOf(z, g.defs, map)) out[z.name] = [...r.s];
     }
+    return out;
+  }
+
+  /** 觸發的隨機位置：「中心」類的參數（@follow 的 point）換成第 n 次觸發的隨機點（蓋過追蹤） */
+  private scattered(g: Prog, tr: FxTrigger | undefined, n: number, base: Record<string, number[]> | undefined) {
+    if (tr?.scatter === undefined) return base;
+    let out = base;
+    const p = scatterPoint(tr.seed ?? 0, n, tr.scatter);
+    for (const d of g.defs) if (d.type === 'point' && d.follow && !d.fit) (out = { ...out })[d.name] = p;
     return out;
   }
 
@@ -894,7 +909,9 @@ export class Renderer {
       const out = cur === CA ? CB : CA;
       // 特效內時間從這次播放開始算；參數 / 遮罩的關鍵影格仍然用片段內時間
       const w = wins.get(f.id)!;
+      this.trig = timingIndex(f.timing, w.t0, clip.start);
       this.runEffect(cur, out, CM, f, g, t, local - w.t0, w.d, local, this.followed(g, f.follow, () => ({ clip, local }), ctx));
+      this.trig = 0;
       cur = out;
     });
     this.pass(target, this.blit, (p) => this.bindTex(p, 'u_tex', cur.tex, 0), blend);
@@ -949,10 +966,11 @@ export class Renderer {
           }
         }
       }
-      // 暫停中拖播放頭：精準的 seek 還沒完成（長 GOP 影片很慢）就先用快取的小張影格
-      if (mode === 'preview' && !playing) {
+      // 暫停中拖播放頭：精準的 seek 還沒完成（長 GOP 影片很慢）就先用快取的小張影格；
+      // 播放中影片還沒載入 / 還沒跟上（差很多）也一樣，不要整格黑掉
+      if (mode === 'preview') {
         const shown = this.texTime.get('vid:' + this.rootOf(clip.id));
-        if (shown === undefined || Math.abs(shown - src) > 0.1) {
+        if (shown === undefined || Math.abs(shown - src) > (playing ? 0.5 : 0.1)) {
           let sf = scrubFrameAt(media, src);
           // 附近還沒抽好：上一張快取影格如果比 <video> 目前的畫面更接近，就先沿用（不要閃回 seek 前的舊畫面）
           const prev = this.lastScrub.get(clip.id);
@@ -1212,20 +1230,34 @@ export class Renderer {
       const list = (fxByLevel.get(lv) ?? []).sort((a, b) => a.track - b.track || a.start - b.start);
       for (const fx of list) {
         // 觸發：特效內時間從最近一次觸發開始算
-        const pts = fx.trigger ? (fx.trigger.kind === 'cut' ? cutsFor(fx) : triggerBeats(fx.trigger.every)) : null;
-        const raw = !pts ? { t0: fx.start, d: fx.duration }
-          : hasChance(fx.trigger) ? chanceWindow(fx.trigger!, pts, fx.start, fx.start + fx.duration, t)
-            : triggerWindow(pts, fx.start, fx.start + fx.duration, t);
-        // 衝擊特效每次觸發只打一下（長度 = 主特效的 @duration）
-        const w = pts ? hitWindow(raw, t, this.hitLen(ctx.modules.get(fx.moduleId))) : raw;
-        // 有機率的觸發：沒挑中的拍子不作用
+        const tr = fx.trigger;
+        let w: { t0: number; d: number } | null;
+        if (tr?.kind === 'hits') {
+          // 手動：方塊之間不作用；每個 Hit 播多長就是多長
+          const timing = { kind: 'hits' as const, hits: tr.hits };
+          const h = fxWindow(timing, t - fx.start, fx.duration);
+          w = h && { t0: fx.start + h.t0, d: h.d };
+          this.trig = h ? timingIndex(timing, h.t0) : 0;
+        } else {
+          const pts = tr ? (tr.kind === 'cut' ? cutsFor(fx) : triggerBeats(tr.every)) : null;
+          const raw = !pts ? { t0: fx.start, d: fx.duration }
+            : hasChance(tr) ? chanceWindow(tr!, pts, fx.start, fx.start + fx.duration, t)
+              : triggerWindow(pts, fx.start, fx.start + fx.duration, t);
+          // 衝擊特效每次觸發只打一下（長度 = 主特效的 @duration）；設了延伸就播到下一次觸發
+          w = pts && !tr?.extend ? hitWindow(raw, t, this.hitLen(ctx.modules.get(fx.moduleId))) : raw;
+          this.trig = pts && w ? triggerIndex(tr, pts, fx.start, w.t0) : 0;
+        }
+        // 有機率 / 手動：沒挑中的拍子、方塊之間不作用
         if (!w) continue;
         // 主特效 + 疊加的特效，依序套用
         for (const f of [fx, ...(fx.stack ?? []).filter((x) => x.enabled !== false)]) {
           const m = ctx.modules.get(f.moduleId);
           const g = m ? this.moduleProg(m) : null;
-          if (g) cur = this.applyFx(cur, f, g, t, t - w.t0, w.d, this.followed(g, f.follow, () => subjectClipUnder(ctx, lv, t, fx.subjectFrom), ctx));
+          if (!g) continue;
+          const followPts = this.followed(g, f.follow, () => subjectClipUnder(ctx, lv, t, fx.subjectFrom), ctx);
+          cur = this.applyFx(cur, f, g, t, t - w.t0, w.d, this.scattered(g, tr, this.trig, followPts));
         }
+        this.trig = 0;
       }
     };
 
@@ -1364,7 +1396,7 @@ export class Renderer {
         continue;
       }
       if (!v.paused) v.pause();
-      if (ahead > 0 && ahead < 1.5 && !v.seeking) {
+      if (ahead > 0 && ahead < CREATE_AHEAD && !v.seeking) {
         const { src } = clipSource(c, 0, media, ctx.modules);
         if (Math.abs(v.currentTime - src) > 0.01) v.currentTime = src;
       }

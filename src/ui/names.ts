@@ -12,5 +12,5 @@ export function itemName(type: ItemType, it: AnyItem, media: Media[], modules: M
   if (type === 'audio') return media.find((m) => m.id === (it as AudioClip).mediaId)?.name ?? $t('未知素材');
   const f = it as FxItem;
   const m = modules.find((x) => x.id === f.moduleId);
-  return (m ? displayName(m.name) : $t('（遺失模組）')) + (f.stack?.length ? ` +${f.stack.length}` : '');
+  return m ? displayName(m.name) : $t('（遺失模組）');
 }

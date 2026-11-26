@@ -9,6 +9,8 @@ import { colorBlob } from './colorBlob';
 import { usePrefs } from '../prefs';
 import { PackError, readPack, writePack, type PackProgress } from './ybeatPack';
 import { pruneCaches } from './storageUsage';
+import { useAutoEdit, type AeSeg } from './autoEditSettings';
+import { clearProxyBlobs, deleteProxyBlob, proxyBlobIds } from './proxyStore';
 
 /** 專案自動存檔：素材檔案（Blob）與時間軸存在 IndexedDB，重新整理不會遺失 */
 
@@ -17,15 +19,20 @@ let dbp: Promise<IDBDatabase> | null = null;
 
 function db() {
   dbp ??= new Promise((res, rej) => {
-    const r = indexedDB.open(DB_NAME, 2);
+    const r = indexedDB.open(DB_NAME, 3);
     r.onupgradeneeded = () => {
       const have = r.result.objectStoreNames;
       if (!have.contains('media')) r.result.createObjectStore('media');
       if (!have.contains('project')) r.result.createObjectStore('project');
-      // 預覽代理檔（proxy.ts）：key = 素材 id
-      if (!have.contains('proxy')) r.result.createObjectStore('proxy');
+      // 代理檔改存在 ybeat-proxy（proxyStore.ts）
+      if (have.contains('proxy')) r.result.deleteObjectStore('proxy');
     };
-    r.onsuccess = () => res(r.result);
+    r.onsuccess = () => {
+      const d = r.result;
+      // 清除所有資料要刪掉這個資料庫：讓出連線
+      d.onversionchange = () => { d.close(); dbp = null; };
+      res(d);
+    };
     r.onerror = () => rej(r.error);
   });
   return dbp;
@@ -50,9 +57,6 @@ async function run<T>(store: string, mode: IDBTransactionMode, fn: (os: IDBObjec
 export const saveMediaBlob = (id: string, blob: Blob) => run('media', 'readwrite', (os) => os.put(blob, id));
 export const deleteMediaBlob = (id: string) => run('media', 'readwrite', (os) => os.delete(id)).catch(() => {});
 export const loadMediaBlob = (id: string) => run<Blob | undefined>('media', 'readonly', (os) => os.get(id));
-export const saveProxyBlob = (id: string, blob: Blob) => run('proxy', 'readwrite', (os) => os.put(blob, id));
-export const deleteProxyBlob = (id: string) => run('proxy', 'readwrite', (os) => os.delete(id)).catch(() => {});
-export const loadProxyBlob = (id: string) => run<Blob | undefined>('proxy', 'readonly', (os) => os.get(id));
 
 interface Saved {
   media: Media[];
@@ -63,6 +67,16 @@ interface Saved {
   tracks: Tracks;
   format?: Format;
   modules?: Module[];
+  /** 自動剪輯的素材清單（全部素材 / 自選的片段） */
+  autoEdit?: AutoEditPart;
+}
+
+type AutoEditPart = { pick: 'all' | 'list'; segs: AeSeg[] };
+const autoEditPart = (): AutoEditPart => { const a = useAutoEdit.getState(); return { pick: a.pick, segs: a.segs }; };
+/** 載入 / 開新專案：素材清單換成這個專案的（不存在的素材拿掉） */
+function setAutoEditPart(p: AutoEditPart | undefined, media: { id: string }[]) {
+  const ids = new Set(media.map((m) => m.id));
+  useAutoEdit.setState({ pick: p?.pick ?? 'all', segs: (p?.segs ?? []).filter((g) => ids.has(g.mediaId)) });
 }
 
 /** 存檔狀態（顯示在標題列） */
@@ -73,11 +87,13 @@ let saveTimer = 0;
 let started = false;
 
 /** 上次存檔時的專案內容（物件參照）：復原回這個狀態 = 跟存檔一樣，不用再存 */
-type SavedRefs = Pick<ReturnType<typeof useStore.getState>, 'media' | 'clips' | 'effects' | 'audios' | 'markers' | 'tracks' | 'format'>;
+type StoreRefs = Pick<ReturnType<typeof useStore.getState>, 'media' | 'clips' | 'effects' | 'audios' | 'markers' | 'tracks' | 'format'>;
+type SavedRefs = StoreRefs & { aeSegs: AeSeg[]; aePick: string };
 let savedRefs: SavedRefs | null = null;
-const refsOf = (s: SavedRefs): SavedRefs => ({ media: s.media, clips: s.clips, effects: s.effects, audios: s.audios, markers: s.markers, tracks: s.tracks, format: s.format });
-const sameRefs = (a: SavedRefs, b: SavedRefs) =>
+const refsOf = (s: StoreRefs): SavedRefs => ({ media: s.media, clips: s.clips, effects: s.effects, audios: s.audios, markers: s.markers, tracks: s.tracks, format: s.format, aeSegs: useAutoEdit.getState().segs, aePick: useAutoEdit.getState().pick });
+const sameStore = (a: StoreRefs, b: StoreRefs) =>
   a.media === b.media && a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.markers === b.markers && a.tracks === b.tracks && a.format.w === b.format.w && a.format.h === b.format.h; // 比例每次都是新物件，比數值
+const sameRefs = (a: SavedRefs, b: SavedRefs) => sameStore(a, b) && a.aeSegs === b.aeSegs && a.aePick === b.aePick;
 
 async function save() {
   useSaveState.setState({ state: 'saving' });
@@ -95,6 +111,7 @@ async function save() {
     tracks: s.tracks,
     format: s.format,
     modules: s.modules,
+    autoEdit: autoEditPart(),
   };
   try {
     await run('project', 'readwrite', (os) => os.put(data, 'current'));
@@ -122,17 +139,19 @@ const saveSoon = () => {
 function startAutosave() {
   if (started) return;
   started = true;
-  useStore.subscribe((s, p) => {
-    if (sameRefs(s, p)) return;
+  const changed = () => {
     clearTimeout(saveTimer);
     // 復原回存檔時的狀態 = 已儲存
-    if (savedRefs && sameRefs(s, savedRefs)) return useSaveState.setState({ state: 'saved' });
+    if (savedRefs && sameRefs(refsOf(useStore.getState()), savedRefs)) return useSaveState.setState({ state: 'saved' });
     useSaveState.setState({ state: 'dirty' });
     if (!usePrefs.getState().autosave) return;
     // 拖曳中不存，放開才存
     if (pointerHeld()) afterRelease(saveSoon);
     else saveTimer = window.setTimeout(save, 600);
-  });
+  };
+  useStore.subscribe((s, p) => { if (!sameStore(s, p)) changed(); });
+  // 自動剪輯的素材清單也存在專案裡
+  useAutoEdit.subscribe((s, p) => { if (s.segs !== p.segs || s.pick !== p.pick) changed(); });
   // 重新打開自動儲存：有沒存的變更就馬上存
   usePrefs.subscribe((s, p) => {
     if (s.autosave && !p.autosave && useSaveState.getState().state === 'dirty') saveSoon();
@@ -156,7 +175,7 @@ async function loadProject() {
         const keep = new Set(data.media.map((m) => m.id));
         const keys = await run<IDBValidKey[]>('media', 'readonly', (os) => os.getAllKeys());
         for (const id of keys) if (typeof id === 'string' && !keep.has(id)) await deleteMediaBlob(id);
-        const pk = await run<IDBValidKey[]>('proxy', 'readonly', (os) => os.getAllKeys());
+        const pk = await proxyBlobIds().catch(() => []);
         for (const id of pk) if (typeof id === 'string' && !keep.has(id)) await deleteProxyBlob(id);
         await pruneCaches(keep);
       } catch (e) { console.warn($t('素材清理失敗'), e); }
@@ -198,6 +217,7 @@ async function loadProject() {
         format: data.format ?? DEFAULT_FORMAT,
         ...(data.modules ? { modules: mergeModules(data.modules) } : {}),
       });
+      setAutoEditPart(data.autoEdit, media);
     }
   } catch (e) {
     console.warn($t('讀取專案失敗'), e);
@@ -214,9 +234,10 @@ export async function newProject() {
     media: [], clips: [], effects: [], audios: [], markers: [], tracks: DEFAULT_TRACKS, format: DEFAULT_FORMAT,
     selection: null, selected: [], time: 0, playing: false, loop: null,
   });
+  setAutoEditPart(undefined, []);
   resetHistory();
   await run('media', 'readwrite', (os) => os.clear()).catch(() => {});
-  await run('proxy', 'readwrite', (os) => os.clear()).catch(() => {});
+  await clearProxyBlobs();
   await pruneCaches(new Set());
   await saveNow();
 }
@@ -224,6 +245,7 @@ export async function newProject() {
 const packProject = (s: ReturnType<typeof useStore.getState>): Saved => ({
   media: s.media.map((m) => ({ ...m, url: '', thumb: m.kind === 'image' ? '' : m.thumb })),
   clips: s.clips, effects: s.effects, audios: s.audios, markers: s.markers, tracks: s.tracks, format: s.format, modules: s.modules,
+  autoEdit: autoEditPart(),
 });
 
 /** 可攜專案包：時間軸、模組及所有可用素材放進同一個檔案（格式見 ybeatPack.ts）。 */
@@ -286,6 +308,7 @@ export async function importProjectPack(file: Blob, onProgress?: PackProgress): 
     ...(project.modules ? { modules: mergeModules(project.modules) } : {}),
     selection: null, selected: [], time: 0, playing: false, loop: null,
   });
+  setAutoEditPart(project.autoEdit, media);
   resetHistory();
   await pruneCaches(ids);
   await saveNow();

@@ -1,6 +1,7 @@
 import { dropMatte } from './matte';
 import { dropFaces } from './face';
 import { dropMediaAnalysis } from './analysisStore';
+import { useAutoEdit } from './autoEditSettings';
 import { dropBoxTracks } from './boxTrack';
 import { colorBlob } from './colorBlob';
 import { $t } from '../i18n';
@@ -195,6 +196,9 @@ export function removeMedia(id: string, quiet = false) {
   dropMatte(id);
   dropFaces(id);
   dropMediaAnalysis(id);
+  // 自動剪輯清單裡這個素材的片段一起拿掉
+  const ae = useAutoEdit.getState();
+  if (ae.segs.some((g) => g.mediaId === id)) useAutoEdit.setState({ segs: ae.segs.filter((g) => g.mediaId !== id) });
   dropBoxTracks(id);
   if (used) {
     useStore.setState({ media: s.media.map((x) => (x.id === id ? { ...x, url: '', thumb: x.kind === 'image' ? '' : x.thumb, missing: true } : x)) });

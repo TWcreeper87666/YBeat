@@ -11,10 +11,38 @@ export type BeatEvery = 0.5 | 1 | 2 | 4;
 /**
  * cut：tracks = 看哪幾條影片軌的剪接點（沒有 = 這條特效軌下面的所有影片軌）。
  * chance：只在挑中的觸發點播（0..1，沒有 = 每個都播）；seed 決定挑哪些，同一個 seed 每次都挑一樣的。
+ * extend：衝擊特效（@hit）不截在 @duration，一路延伸到下一次觸發前。
+ * scatter：每次觸發把「中心」類的參數（@follow 的 point）換到隨機位置；值 = 離畫面邊緣的距離（0..0.45），位置也由 seed 決定。
+ * hits：手動排的觸發（方塊內時間，已排序、不重疊）；每個 Hit 播多長就是多長，不用 chance / extend。
  */
+interface TriggerOpts { chance?: number; seed?: number; extend?: true; scatter?: number }
 export type FxTrigger =
-  | { kind: 'beat'; every: BeatEvery; chance?: number; seed?: number }
-  | { kind: 'cut'; tracks?: number[]; chance?: number; seed?: number };
+  | ({ kind: 'beat'; every: BeatEvery } & TriggerOpts)
+  | ({ kind: 'cut'; tracks?: number[] } & TriggerOpts)
+  | ({ kind: 'hits'; hits: Hit[] } & TriggerOpts);
+
+/** 換觸發方式時要留下的選項（機率、延伸、隨機位置） */
+export function triggerOpts(t?: FxTrigger): TriggerOpts {
+  if (!t) return {};
+  const { chance, seed, extend, scatter } = t;
+  return Object.fromEntries(Object.entries({ chance, seed, extend, scatter }).filter(([, v]) => v !== undefined));
+}
+
+/** 新的 seed（第一次設機率 / 隨機位置時給，之後固定） */
+export const newSeed = () => (Math.random() * 2 ** 31) >>> 0;
+
+const hash32 = (a: number, b: number) => {
+  let h = (Math.imul(a ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(b, 0xc2b2ae35)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x7feb352d) >>> 0;
+  h = Math.imul(h ^ (h >>> 15), 0x846ca68b) >>> 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+};
+
+/** 隨機位置：第 n 次觸發的點（畫面座標 0..1，y 向下），離邊緣至少 margin */
+export function scatterPoint(seed: number, n: number, margin: number): [number, number] {
+  const m = Math.min(0.5, Math.max(0, margin));
+  return [m + (1 - 2 * m) * hash32(seed, n * 2), m + (1 - 2 * m) * hash32(seed, n * 2 + 1)];
+}
 
 /** 有設機率（< 1） */
 export const hasChance = (t?: FxTrigger): t is FxTrigger & { chance: number } => t?.chance !== undefined && t.chance < 1;
@@ -25,10 +53,7 @@ const pointKey = (t: FxTrigger, pts: number[], i: number) => (t.kind === 'beat' 
 /** 這個觸發點有沒有被挑中（0..1 的雜湊 < chance） */
 export function picked(t: FxTrigger, pts: number[], i: number): boolean {
   if (!hasChance(t)) return true;
-  let h = (Math.imul((t.seed ?? 0) ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(pointKey(t, pts, i), 0xc2b2ae35)) >>> 0;
-  h = Math.imul(h ^ (h >>> 16), 0x7feb352d) >>> 0;
-  h = Math.imul(h ^ (h >>> 15), 0x846ca68b) >>> 0;
-  return ((h ^ (h >>> 16)) >>> 0) / 4294967296 < t.chance;
+  return hash32(t.seed ?? 0, pointKey(t, pts, i)) < t.chance;
 }
 
 /** 剪接點觸發看哪幾條影片軌 */
@@ -99,6 +124,45 @@ export function chanceWindow(trigger: FxTrigger, pts: number[], start: number, e
 export function hitWindow(w: { t0: number; d: number } | null, t: number, len: number): { t0: number; d: number } | null {
   if (!w || !(len > 0) || w.d <= len) return w;
   return t - w.t0 < len ? { t0: w.t0, d: len } : null;
+}
+
+/**
+ * 這是方塊裡第幾次觸發（0 起算；shader 的 u_trigger）。t0 = 這次觸發的開始（triggerWindow / chanceWindow 的結果）。
+ * 一般觸發：方塊開頭 = 0，之後每個觸發點 +1；有機率：從方塊開頭（含）起算的第幾個觸發點，沒挑中的也算。
+ */
+export function triggerIndex(trigger: FxTrigger | undefined, pts: number[], start: number, t0: number): number {
+  if (hasChance(trigger)) return Math.max(0, lowerBound(pts, t0 - EPS) - lowerBound(pts, start - EPS));
+  if (t0 <= start + EPS) return 0;
+  return Math.max(0, lowerBound(pts, t0 - EPS) - lowerBound(pts, start + EPS)) + 1;
+}
+
+/** 片段特效的第幾次播放（0 起算）；t0 = fxWindow 的結果（片段內時間） */
+export function timingIndex(timing: FxTiming | undefined, t0: number, start = 0): number {
+  if (!timing) return 0;
+  if (timing.kind === 'hits') return timing.hits.filter((h) => h.t < t0 - EPS).length;
+  const pts = triggerBeats(timing.every);
+  return Math.max(0, lowerBound(pts, start + t0 - EPS) - lowerBound(pts, start - EPS));
+}
+
+/**
+ * 目前的觸發展開成手動的 Hit（方塊內時間；切到「手動」時用）：每個觸發點一個，長度到下一個觸發點；
+ * 衝擊特效（hitLen > 0）最長 hitLen，除非設了延伸。pts = 這個觸發的觸發點（beat / cut）。
+ */
+export function manualHits(trigger: FxTrigger | undefined, pts: number[], start: number, len: number, hitLen = 0): Hit[] {
+  if (!trigger) return [{ t: 0, d: len }];
+  if (trigger.kind === 'hits') return trigger.hits;
+  const end = start + len;
+  const chance = hasChance(trigger);
+  const marks = triggerMarks(pts, start, end, trigger);
+  if (!chance && !marks.some((m) => Math.abs(m - start) < EPS)) marks.unshift(start);
+  const out: Hit[] = [];
+  for (const m of marks) {
+    const w = chance ? chanceWindow(trigger, pts, start, end, m) : triggerWindow(pts, start, end, m);
+    if (!w) continue;
+    const d = hitLen > 0 && !trigger.extend ? Math.min(w.d, hitLen) : w.d;
+    out.push({ t: Math.max(0, m - start), d: Math.max(HIT_MIN, d) });
+  }
+  return normalizeHits(out, len);
 }
 
 /** 方塊裡所有的觸發點（含開頭；有機率 = 只有挑中的；時間軸上畫細線用） */

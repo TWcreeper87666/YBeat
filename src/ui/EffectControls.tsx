@@ -519,6 +519,8 @@ export interface TimingLane {
   defD: number;
   /** 片段長度（秒） */
   len: number;
+  /** 只有手動（特效方塊的「手動」觸發）：沒有模式選單，模式由別的列決定；排在區塊的其他列後面 */
+  fixed?: true;
 }
 
 /** 最近一層可以上下捲的容器（屬性面板 / 編輯視窗） */
@@ -965,13 +967,14 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
             </div>
             {!isCol && (
               <>
-                {sec.timing && <TimingRow tm={sec.timing} dur={dur} lc={lc} view={view} localAt={localAt} seek={seek} />}
+                {sec.timing && !sec.timing.fixed && <TimingRow tm={sec.timing} dur={dur} lc={lc} view={view} localAt={localAt} seek={seek} />}
                 {sec.rows?.map((r, i) => (
                   <div key={`${i}:${r.label}`} className={`ec-row ${r.sub ? 'sub' : ''}`}>
                     <div className="ec-left ec-plain" onContextMenu={(e) => sectionResetMenu(e, sec)}><span className="ec-label" title={typeof r.label === 'string' ? r.label : undefined}>{r.label}</span><div className="ec-node">{r.node}</div></div>
                     <div className="ec-right ec-dim" onPointerDown={startMarquee} onContextMenu={(e) => laneMenu(e)} />
                   </div>
                 ))}
+                {sec.timing?.fixed && <TimingRow tm={sec.timing} dur={dur} lc={lc} view={view} localAt={localAt} seek={seek} />}
                 {sec.channels?.map((ch) => {
                   const animated = ch.keys.length > 0;
                   const here = keyAt(ch.keys, lc);
@@ -1492,6 +1495,7 @@ function TimingRow({ tm, dur, lc, view, localAt, seek }: { tm: TimingLane; dur: 
   };
   const menuItems = (): MenuItem[] => {
     const cur = tm.get();
+    if (tm.fixed) return [{ label: $t('在播放頭觸發'), action: () => addAt(lc) }];
     return [
       { label: $t('在播放頭觸發'), action: () => addAt(lc) },
       { label: $t('每拍觸發'), submenu: BEATS.map((b) => ({ label: b.label(), checked: cur?.kind === 'beat' && cur.every === b.every, action: () => tm.set({ kind: 'beat', every: b.every, d: beatD() }) })) },
@@ -1591,8 +1595,8 @@ function TimingRow({ tm, dur, lc, view, localAt, seek }: { tm: TimingLane; dur: 
   return (
     <div className="ec-row">
       <div className="ec-left ec-plain">
-        <span className="ec-label">{$t('作用')}</span>
-        <div className="ec-node">
+        <span className="ec-label">{tm.fixed ? $t('觸發時間') : $t('作用')}</span>
+        {!tm.fixed && <div className="ec-node">
           {timing?.kind === 'beat' && <DragNumber variant="text" value={timing.d} step={0.05} min={HIT_MIN} suffix="s" onChange={(v) => tm.set({ ...timing, d: Math.max(HIT_MIN, v) })} />}
           <select
             className="select"
@@ -1608,7 +1612,7 @@ function TimingRow({ tm, dur, lc, view, localAt, seek }: { tm: TimingLane; dur: 
             <option value="hits">{$t('手動')}</option>
             {BEATS.map((b) => <option key={b.every} value={`b${b.every}`}>{b.label()}</option>)}
           </select>
-        </div>
+        </div>}
       </div>
       <div ref={laneRef} className="ec-right ec-hits" onPointerDown={(e) => e.target === e.currentTarget && useHitSel.setState({ id: tm.id, is: [] })} onContextMenu={laneMenu} onDoubleClick={(e) => e.target === e.currentTarget && addAt(qLocal(tm, localAt(e.clientX)))}>
         {!timing && <div className="ec-hit all" />}

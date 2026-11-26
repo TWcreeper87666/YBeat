@@ -72,11 +72,13 @@ export function Seg<T extends string | number | boolean>({ value, opts, on, clas
   );
 }
 
-export interface SegToggle { key: string; v: boolean; on: (v: boolean) => void; label: React.ReactNode; title?: string }
+/** hover：滑鼠移進 / 移出這格（null = 移出），例如顯示說明卡片 */
+export interface SegToggle { key: string; v: boolean; on: (v: boolean) => void; label: React.ReactNode; title?: string; hover?: (el: HTMLElement | null) => void }
 
 export const SegToggles = ({ items, className }: { items: SegToggle[]; className?: string }) => (
   <div className={`seg ${className ?? ''}`}>
-    {items.map((i) => <button key={i.key} className={i.v ? 'on' : ''} title={i.title} {...paintProps(i.v, i.on)} onClick={(e) => e.detail === 0 && i.on(!i.v)}>{i.label}</button>)}
+    {items.map((i) => <button key={i.key} className={i.v ? 'on' : ''} title={i.title} {...paintProps(i.v, i.on)} onClick={(e) => e.detail === 0 && i.on(!i.v)}
+      {...(i.hover ? { onMouseEnter: (e: React.MouseEvent<HTMLElement>) => i.hover!(e.currentTarget), onMouseLeave: () => i.hover!(null) } : {})}>{i.label}</button>)}
   </div>
 );
 

@@ -15,7 +15,12 @@
 
 ## 驗證
 
-- 改完跑 `npx tsc --noEmit -p .` 和 `npm test`，不要自己開瀏覽器測試（慢又耗 token）；最後列出使用者該點哪些地方確認。
+- 依改動範圍驗證，不要每次都跑整套 `npm test`（很慢）：
+  - 只改 CSS：不用驗證；只改介面文字 / 排版 / JSX：只跑 `npx tsc --noEmit -p .`
+  - 動到某塊邏輯：`tsc` + `npm test -- <相關的測試檔名>`（例如 `npm test -- combos autoEdit`）
+  - 改到共用核心（store、renderer、params、儲存格式）或一次改很多地方：`tsc` + 整套 `npm test`
+- 測試指令只跑一次，不要用 grep 過濾掉結尾的總結再重跑。
+- 不要自己開瀏覽器測試（慢又耗 token）；最後列出使用者該點哪些地方確認。
 
 ## 開關 / 選擇元件
 

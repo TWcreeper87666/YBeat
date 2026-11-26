@@ -8,6 +8,7 @@ import { uid, type useStore } from '../store';
 import { usePrefs } from '../prefs';
 import { mediaBeats } from '../engine/beats';
 import { categoryOf } from '../modules/categories';
+import { BUILTIN_COMBOS } from '../modules/combos';
 import { RECIPES, type FxRule, type Recipe, type RecipeId, type RuleWhen } from '../engine/autoEdit';
 import { transitionOpt } from '../engine/autoEditPools';
 import { footage, lastTake, musicClips, myStyleSettings, styleSettings, useAutoEdit, wholeSeg, type AutoEditSettings } from '../engine/autoEditSettings';
@@ -71,7 +72,7 @@ export const AUTO_EDIT_DECLS = [
         transition_beats: num('transition length in beats (0.25..4); doubled at sections'),
         music: { type: 'string', description: 'audio clip id to cut to' },
         range: { type: 'string', enum: ['all', 'loop'], description: 'whole music clip or the loop range' },
-        order: { type: 'string', enum: ['library', 'shuffle'] },
+        order: { type: 'string', enum: ['library', 'shuffle', 'bag'], description: 'library = list order; shuffle = random, picks what fits each section; bag = every media once per round in a shuffled order, segments of the same video kept apart' },
         ken_burns: { type: 'boolean', description: 'slow push in / pull out on images; shots with a detected face (videos too) push in on the face' },
         analyze: { type: 'boolean', description: 'pick video segments by motion / quality / avoiding cuts already inside the source video' },
         director: { type: 'boolean', description: 'AI director: before cutting, an AI looks at frames of every media file and decides which sections each suits, its priority and best moments' },
@@ -96,11 +97,11 @@ export const AUTO_EDIT_DECLS = [
         },
         speed_ramps: {
           type: 'object',
-          description: 'Beat-synced speed ramps on video shots. on: master switch; variants: beatPulse = fast through each beat, slow in between; hitRamp = accelerates into a hard cut at a drop / section change; drift = gentle slow motion in quiet parts; holdHit = brief freeze on an accent; rewindToCut = rewinds over the last beat or two into a cut / strong transition; reverseForwardB = the shot after a section change starts reversed and snaps forward on the next beat; rewindReturn = forward, rewind one beat, forward; beatBoomerang = every beat forward-back-forward; slowPocket = slow motion between beats, short burst on each beat; tapeStop = slows to a stop before a drop / section change; whooshRamp = speeds up into a whip / zoom transition; beatStutter = repeats a short slice on the last beat of the shot. Reverse kinds are only used on footage with motion. per_32: at most this many per 32 beats (0..8); intensity 0..1.',
+          description: 'Beat-synced speed ramps on video shots. on: master switch; variants: beatPulse = fast through each beat, slow in between; hitRamp = accelerates into a hard cut at a drop / section change; drift = gentle slow motion in quiet parts; holdHit = brief freeze on an accent; rewindToCut = rewinds over the last beat or two into a cut / strong transition; reverseForwardB = the shot after a section change starts reversed and snaps forward on the next beat; rewindReturn = forward, rewind one beat, forward; beatBoomerang = every beat forward-back-forward; slowPocket = slow motion between beats, short burst on each beat; tapeStop = slows to a stop before a drop / section change; whooshRamp = speeds up into a whip / zoom transition; beatStutter = repeats a short slice on the last beat of the shot. Reverse kinds are only used on footage with motion. per_32: at most this many per 32 beats (0..8); every: apply to every video shot (ignores per_32; e.g. rewindToCut on every cut, even 1-beat shots); boost: overall speed-up of ramped shots, 1..3 (1 = normal); intensity 0..1. The moment with the most motion is aligned to the ramp\'s focus (the rewind turn for rewindToCut).',
           properties: {
             on: { type: 'boolean' },
             variants: { type: 'array', items: { type: 'string', enum: SPEED_VARIANTS } },
-            per_32: num(''), intensity: num(''),
+            per_32: num(''), intensity: num(''), every: { type: 'boolean' }, boost: num(''),
           },
         },
         media: PICK('media'),
@@ -122,7 +123,7 @@ function pools(s: S) {
     transitions: s.modules.filter((m) => m.kind === 'transition').map((m) => ({ id: m.id, name: displayName(m.name), cat: categoryOf(m) })),
     effects: [
       ...s.modules.filter((m) => m.kind === 'effect').map((m) => ({ id: m.id, name: displayName(m.name), cat: categoryOf(m) })),
-      ...combos.map((c) => ({ id: c.id, name: c.name, cat: 'combo' })),
+      ...[...combos, ...BUILTIN_COMBOS].map((c) => ({ id: c.id, name: displayName(c.name), cat: 'combo' })),
     ],
   };
 }
@@ -164,7 +165,7 @@ export function readAutoEdit(s: S): Record<string, unknown> {
     order: st.order, ken_burns: st.kenBurns,
     energy: { gain: st.shape.gain, contrast: st.shape.contrast, points: st.shape.points.map((p) => ({ at: r2(p.x), offset: r2(p.y) })) },
     subject_pop: { on: st.popOn, variants: st.popVariants, per_32: st.popsPer32, text: st.popText },
-    speed_ramps: { on: st.speedOn, variants: st.speedVariants, per_32: st.speedsPer32, intensity: st.speedIntensity },
+    speed_ramps: { on: st.speedOn, variants: st.speedVariants, per_32: st.speedsPer32, intensity: st.speedIntensity, every: !!st.speedEvery, boost: st.speedBoost ?? 1 },
     analyze: st.analyze, director: st.director, director_note: st.directorNote,
     ...(st.direction ? { last_direction: st.direction } : {}),
     media: P.media.map((m) => ({ ...m, on: st.pick !== 'list' || st.segs.some((g) => g.mediaId === m.id) })),
@@ -273,8 +274,8 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
     changed++;
   }
   if (a.order !== undefined) {
-    if (a.order !== 'library' && a.order !== 'shuffle') fail('order must be library or shuffle');
-    patch.order = a.order as 'library' | 'shuffle';
+    if (a.order !== 'library' && a.order !== 'shuffle' && a.order !== 'bag') fail('order must be library, shuffle or bag');
+    patch.order = a.order as 'library' | 'shuffle' | 'bag';
     changed++;
   }
   if (a.ken_burns !== undefined) {
@@ -321,7 +322,7 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
     }
     changed++;
   }
-  const sr = a.speed_ramps as { on?: unknown; variants?: unknown; per_32?: unknown; intensity?: unknown } | undefined;
+  const sr = a.speed_ramps as { on?: unknown; variants?: unknown; per_32?: unknown; intensity?: unknown; every?: unknown; boost?: unknown } | undefined;
   if (sr && typeof sr === 'object') {
     if (sr.on !== undefined) patch.speedOn = !!sr.on;
     if (sr.variants !== undefined) {
@@ -336,6 +337,11 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
       if (v === undefined) continue;
       if (typeof v !== 'number' || !Number.isFinite(v)) fail(`speed_ramps.${k} must be a number`);
       patch[field] = Math.min(hi, Math.max(0, v as number));
+    }
+    if (sr.every !== undefined) patch.speedEvery = !!sr.every;
+    if (sr.boost !== undefined) {
+      if (typeof sr.boost !== 'number' || !Number.isFinite(sr.boost)) fail('speed_ramps.boost must be a number');
+      patch.speedBoost = Math.min(3, Math.max(1, sr.boost as number));
     }
     changed++;
   }

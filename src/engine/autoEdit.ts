@@ -2,7 +2,7 @@ import type { MusicInfo } from './musicAnalysis';
 import { banned, bestIn, faceIn, freeRoom, type FaceBox, type MediaInfo, type Span } from './mediaAnalysis';
 import type { SectionKind } from './musicAnalysis';
 import type { PlanPop, PopVariant } from './subjectPop';
-import { speedCurve, type PlanSpeed, type SpeedVariant } from './speedRamp';
+import { boostSpeed, speedCurve, speedFocus, type PlanSpeed, type SpeedVariant } from './speedRamp';
 import type { BeatEvery } from './trigger';
 
 export interface Recipe {
@@ -64,9 +64,11 @@ export interface PlanOptions {
   accents: AccentOpt[];
   dropHit: string | null;
   kenBurns: boolean;
-  order: 'library' | 'shuffle';
+  /** library = 清單順序（每 3 個一組小洗牌）；shuffle = 每輪全部洗牌、依適合度挑；bag = 每輪洗牌後照順序用完（同一支影片的片段盡量分開） */
+  order: 'library' | 'shuffle' | 'bag';
   pops?: { variants: PopVariant[]; per32: number; text?: string };
-  speed?: { variants: SpeedVariant[]; per32: number; intensity: number };
+  /** every = 每個影片鏡頭都套用（不看次數、間隔）；boost = 整體加速（素材用掉的倍數，1 = 不加速） */
+  speed?: { variants: SpeedVariant[]; per32: number; intensity: number; every?: boolean; boost?: number };
   /** 特效層（依清單順序；同優先度時前面的贏） */
   rules?: RuleOpt[];
 }
@@ -124,6 +126,8 @@ export interface PlanShot {
   b0: number; b1: number; mediaId: string; in: number; motion?: KenBurns; transition?: PlanTransition; speed?: PlanSpeed; face?: FaceBox; push?: true;
   /** 主角的臉（素材時間，不含指定片段的起點）：片段從這裡開始追主角 */
   anchor?: { t: number; x: number; y: number; w: number; h: number };
+  /** 鏡頭中間附近實際偵測到的最大的臉（裁切過的片段沒有主角時，從這裡開始追） */
+  faceAnchor?: { t: number; x: number; y: number; w?: number; h: number };
 }
 export interface PlanOverlay {
   b0: number; b1: number; moduleId: string; params?: Record<string, number | boolean>; everyBeat?: boolean;
@@ -132,7 +136,9 @@ export interface PlanOverlay {
   /** 特效層產生的：第幾層（options.rules 的索引；套用時每層一條特效軌）；沒有 = 舊的點綴 */
   lane?: number;
 }
-export interface EditPlan { seed: number; recipe: string; shots: PlanShot[]; overlays: PlanOverlay[]; pops: PlanPop[] }
+/** speedSkip：變速沒套上的影片鏡頭，各原因幾個（產生結果裡顯示，方便調整） */
+export type SpeedSkip = 'spacing' | 'kind' | 'short' | 'cut' | 'motion' | 'ban';
+export interface EditPlan { seed: number; recipe: string; shots: PlanShot[]; overlays: PlanOverlay[]; pops: PlanPop[]; speedSkip?: Partial<Record<SpeedSkip, number>> }
 export interface PlanInput {
   beats: { t: number; down: boolean }[];
   music: MusicInfo;
@@ -256,7 +262,10 @@ export function planEdit(input: PlanInput): EditPlan {
     (p.mediaId === id || p.revealMediaId === id) && b0 < p.b1 && p.b0 < b1);
 
   const speedOptions = settings.speed;
-  const reserveReverse = !!speedOptions?.per32 && speedOptions.variants.some((v) =>
+  const every = !!speedOptions?.every;
+  const boost = Math.max(1, speedOptions?.boost ?? 1);
+  // 每個鏡頭都套用：不另外預留倒播的位置（每個鏡頭本來就會輪到）
+  const reserveReverse = !every && !!speedOptions?.per32 && speedOptions.variants.some((v) =>
     v === 'rewindToCut' || v === 'reverseForwardB' || v === 'rewindReturn');
   const speedRng = reserveReverse ? random(seed ^ 0x53504545) : undefined;
   const speedBudget = new Map<number, number>();
@@ -301,8 +310,9 @@ export function planEdit(input: PlanInput): EditPlan {
         Math.floor(speedOptions.per32) + (speedRng() < speedOptions.per32 % 1 ? 1 : 0));
       if ((speedCounts.get(bucket) ?? 0) >= speedBudget.get(bucket)!) continue;
       if (others && (reserveCounts.get(bucket) ?? 0) >= Math.max(1, Math.ceil(speedBudget.get(bucket)! / 2))) continue;
-      const curve = speedCurve(variant, b0, b1, (b) => beatTime(beats, b), speedOptions.intensity);
-      if (!curve) continue;
+      const raw = speedCurve(variant, b0, b1, (b) => beatTime(beats, b), speedOptions.intensity);
+      if (!raw) continue;
+      const curve = boostSpeed(raw, boost);
       const window = curve.sourceMax - curve.sourceMin;
       const sectionKind = music.sections.find((s) => s.b0 <= b0 && b0 < s.b1)?.kind;
       const candidates = media.filter((m) => m.kind === 'video' &&
@@ -327,7 +337,8 @@ export function planEdit(input: PlanInput): EditPlan {
         .sort((a, b) => b.rank - a.rank || a.m.id.localeCompare(b.m.id));
       const choice = candidates[0];
       if (!choice) continue;
-      fixed.set(b0, { b0, b1, mediaId: choice.m.id, in: choice.w0 - curve.sourceMin, speed: curve });
+      const w0 = alignPeak(choice.m, choice.w0, window, speedFocus(curve, b0, b1, (b) => beatTime(beats, b)) - curve.sourceMin, usedReverse.get(choice.m.id) ?? []);
+      fixed.set(b0, { b0, b1, mediaId: choice.m.id, in: w0 - curve.sourceMin, speed: curve });
       const regions = usedReverse.get(choice.m.id) ?? [];
       regions.push({ t0: choice.w0, t1: choice.w1 });
       usedReverse.set(choice.m.id, regions);
@@ -342,8 +353,34 @@ export function planEdit(input: PlanInput): EditPlan {
   let previousMedia = '';
   const normal = media.filter((item) => !item.popOnly);
   const rotation = normal.some((item) => item.weight !== 0) ? normal.filter((item) => item.weight !== 0) : normal;
+  /** 指定片段來自哪支影片（同一支的片段要分開） */
+  const srcOf = (m: PlanMedia) => (m as PlanMedia & { srcId?: string }).srcId ?? m.id;
+  let previousSrc = '';
   const refill = () => {
     queue = [];
+    if (settings.order === 'bag') {
+      // 洗牌後重排：每次從「跟上一個不同影片」的裡面，挑剩最多片段的那支影片（同分隨機），同一支影片的片段就會盡量分開
+      const groups = new Map<string, PlanMedia[]>();
+      for (const m of rotation) groups.set(srcOf(m), [...(groups.get(srcOf(m)) ?? []), m]);
+      for (const g of groups.values()) for (let j = g.length - 1; j > 0; j--) {
+        const k = Math.floor(rng() * (j + 1));
+        [g[j], g[k]] = [g[k], g[j]];
+      }
+      let lastSrc = previousSrc;
+      while (groups.size) {
+        const keys = [...groups.keys()];
+        const other = keys.filter((k) => k !== lastSrc);
+        const pool = other.length ? other : keys;
+        const most = Math.max(...pool.map((k) => groups.get(k)!.length));
+        const top = pool.filter((k) => groups.get(k)!.length === most);
+        const k = top[Math.floor(rng() * top.length)];
+        const g = groups.get(k)!;
+        queue.push(g.shift()!);
+        if (!g.length) groups.delete(k);
+        lastSrc = k;
+      }
+      return;
+    }
     const groupSize = settings.order === 'shuffle' ? rotation.length : 3;
     for (let i = 0; i < rotation.length; i += groupSize) {
       const group = rotation.slice(i, i + groupSize);
@@ -371,6 +408,7 @@ export function planEdit(input: PlanInput): EditPlan {
       if (index >= 0) queue.splice(index, 1);
       plan.shots.push(fixedShot);
       previousMedia = fixedShot.mediaId;
+      { const fm = media.find((m) => m.id === fixedShot.mediaId); if (fm) previousSrc = srcOf(fm); }
       previousTransition = '';
       b0 = fixedShot.b1;
       continue;
@@ -396,7 +434,10 @@ export function planEdit(input: PlanInput): EditPlan {
     const sectionKind = music.sections.find((section) => section.b0 <= b0 && b0 < section.b1)?.kind;
     let choice = -1, bestScore = -Infinity;
     const reserved = reveal.get(b0);
-    for (let i = 0; i < queue.length && !reserved; i++) {
+    // 輪流隨機：照排好的順序，第一個能用的就用（不看適合度）
+    if (settings.order === 'bag' && !reserved)
+      choice = queue.findIndex((m) => !blockedMedia(m.id, b0, b1) && m.id !== previousMedia && (m.kind !== 'video' || freeRoom(m.duration, m.ban) + 1e-9 >= shotSec));
+    for (let i = 0; i < queue.length && !reserved && settings.order !== 'bag'; i++) {
       const m = queue[i];
       if (blockedMedia(m.id, b0, b1) || m.id === previousMedia || m.kind === 'video' && freeRoom(m.duration, m.ban) + 1e-9 < shotSec) continue;
       const roleMatch = m.roles === undefined ? 0.5 : sectionKind && m.roles.includes(sectionKind) ? 1 : 0;
@@ -452,11 +493,15 @@ export function planEdit(input: PlanInput): EditPlan {
         ? { from: { scale: 1, x: 0, y: 0 }, to: { scale: 1 + delta, x, y } }
         : { from: { scale: 1 + delta, x, y }, to: { scale: 1, x: 0, y: 0 } };
     }
-    if (plan.shots.length && settings.transitions.length && !reserved &&
-      plan.shots.at(-1)?.speed?.variant !== 'rewindToCut') {
+    if (plan.shots.length && settings.transitions.length && !reserved) {
       const special = hard.has(b0) && b0 !== start;
+      // 上一個鏡頭剪前倒抽：倒帶衝進硬切或強烈的轉場（柔和的轉場會把倒帶的力道吃掉）
+      const rewound = plan.shots.at(-1)?.speed?.variant === 'rewindToCut';
       if (rng() < (special ? recipe.sectionTransitionRate : recipe.transitionRate)) {
-        const options = settings.transitions.filter((option) => option.id !== previousTransition && (option.weight ?? 1) > 0);
+        const usable = settings.transitions.filter((option) => (option.weight ?? 1) > 0 && (!rewound || STRONG_TR.has(option.id)));
+        // 不連續用同一個；只開了一種（例如全部都要 Crash Zoom）就照用
+        const fresh = usable.filter((option) => option.id !== previousTransition);
+        const options = fresh.length ? fresh : usable;
         if (options.length) {
           const target = music.drops.includes(b0) ? 1 : special ? 0.8 : level / 2;
           const weights = options.map(({ strength, weight }) => Math.exp(-((strength - target) ** 2) / 0.08) * (weight ?? 1));
@@ -472,6 +517,7 @@ export function planEdit(input: PlanInput): EditPlan {
     if (!shot.transition) previousTransition = '';
     plan.shots.push(shot);
     previousMedia = item.id;
+    previousSrc = srcOf(item);
     b0 = b1;
   }
 
@@ -531,8 +577,11 @@ export function planEdit(input: PlanInput): EditPlan {
   plan.overlays = selected.filter((item, i) => (flashes.includes(item) || i === 0 || item.moduleId !== selected[i - 1].moduleId) &&
     !plan.pops.some((p) => item.b0 < p.b1 && p.b0 < item.b1));
 
-  if (speedOptions?.variants.length && speedOptions.per32 > 0) {
+  if (speedOptions?.variants.length && (speedOptions.per32 > 0 || every)) {
     const assignmentRng = speedRng ?? random(seed ^ 0x53504545);
+    const skip: Partial<Record<SpeedSkip, number>> = {};
+    const skipped = (k: SpeedSkip) => { skip[k] = (skip[k] ?? 0) + 1; };
+    plan.speedSkip = skip;
     const enabled = new Set(speedOptions.variants);
     const regions = new Map<string, { t0: number; t1: number }[]>();
     const regionOf = new Map<PlanShot, { t0: number; t1: number }>();
@@ -556,12 +605,12 @@ export function planEdit(input: PlanInput): EditPlan {
       if (shot.speed) { lastEnd = shot.b1; continue; }
       const item = media.find((m) => m.id === shot.mediaId);
       const nextFixed = reserveReverse ? plan.shots.slice(i + 1).find((s) => !!s.speed) : undefined;
-      if (item?.kind !== 'video' || shot.b0 - lastEnd < 4 ||
-        nextFixed && nextFixed.b0 - shot.b1 < 4) continue;
+      if (item?.kind !== 'video') continue;
+      if (!every && (shot.b0 - lastEnd < 4 || nextFixed && nextFixed.b0 - shot.b1 < 4)) { skipped('spacing'); continue; }
       const bucket = Math.floor((shot.b0 - start) / 32);
       if (!speedBudget.has(bucket)) speedBudget.set(bucket,
         Math.floor(speedOptions.per32) + (assignmentRng() < speedOptions.per32 % 1 ? 1 : 0));
-      if ((speedCounts.get(bucket) ?? 0) >= speedBudget.get(bucket)!) continue;
+      if (!every && (speedCounts.get(bucket) ?? 0) >= speedBudget.get(bucket)!) { skipped('spacing'); continue; }
       const level = music.level[shot.b0] ?? 1;
       const length = shot.b1 - shot.b0;
       const hits = [...new Set([...music.accents, ...beats.flatMap((beat, b) => beat.down ? [b] : [])])]
@@ -582,8 +631,8 @@ export function planEdit(input: PlanInput): EditPlan {
       if (enabled.has('drift') && level === 0 && length >= 4) candidates.push({ variant: 'drift' });
       if (enabled.has('holdHit') && level === 2 && length >= 3 && hits.length)
         candidates.push({ variant: 'holdHit', hitBeat: hits[Math.floor(assignmentRng() * hits.length)] });
-      if (!reserveReverse && enabled.has('rewindToCut') && level >= 1 && length >= 3 &&
-        (boundaryEnd && !plan.shots[i + 1]?.transition || nextStrong)) candidates.push({ variant: 'rewindToCut' });
+      if (!reserveReverse && enabled.has('rewindToCut') && (every ? length >= 1 : level >= 1 && length >= 3 &&
+        (boundaryEnd && !plan.shots[i + 1]?.transition || nextStrong))) candidates.push({ variant: 'rewindToCut' });
       if (!reserveReverse && enabled.has('reverseForwardB') && level >= 1 && length >= 3 &&
         (boundaryStart || ownStrong) && !reveal.has(shot.b0)) candidates.push({ variant: 'reverseForwardB' });
       if (!reserveReverse && enabled.has('rewindReturn') && level === 2 && length >= 4) candidates.push({ variant: 'rewindReturn' });
@@ -596,29 +645,36 @@ export function planEdit(input: PlanInput): EditPlan {
         candidates.push({ variant: 'whooshRamp' });
       if (enabled.has('beatStutter') && level === 2 && length >= 2)
         candidates.push({ variant: 'beatStutter' });
-      if (!candidates.length) continue;
+      if (!candidates.length) { skipped('kind'); continue; }
       const pick = candidates[Math.floor(assignmentRng() * candidates.length)];
-      const speed = speedCurve(pick.variant, shot.b0, shot.b1, (b) => beatTime(beats, b),
+      const raw = speedCurve(pick.variant, shot.b0, shot.b1, (b) => beatTime(beats, b),
         speedOptions.intensity, { hitBeat: pick.hitBeat });
-      if (!speed) continue;
+      if (!raw) { skipped('kind'); continue; }
+      // 加速後素材不夠長：這個鏡頭不加速
+      let speed = boostSpeed(raw, boost);
+      if (speed.sourceMax - speed.sourceMin > item.duration - 0.02) speed = raw;
       const window = speed.sourceMax - speed.sourceMin;
       const latest = item.duration - 0.02 - speed.sourceMax;
-      if (!(window > 0) || latest < -speed.sourceMin) continue;
+      if (!(window > 0) || latest < -speed.sourceMin) { skipped('short'); continue; }
       const prior = regions.get(item.id) ?? [];
       const own = prior.indexOf(regionOf.get(shot)!);
       if (own >= 0) prior.splice(own, 1);
-      const w0 = item.info
+      const pick0 = item.info
         ? bestIn(item.info, window, level / 2, prior, assignmentRng, item.highlights, item.ban)
         : assignmentRng() * Math.max(0, latest + speed.sourceMin);
+      // 動作最大的那格對準曲線的重點（剪前倒抽 = 開始倒帶那一刻）
+      const w0 = alignPeak(item, pick0, window, speedFocus(speed, shot.b0, shot.b1, (b) => beatTime(beats, b)) - speed.sourceMin, prior, every);
       const sourceEnd = w0 + window;
       const margin = reverseVariants.has(pick.variant) ? (item.info?.step ?? 0.2) / 2 : 0.1;
       const meanMotion = item.info ? item.info.motion
         .slice(Math.max(0, Math.floor(w0 / item.info.step)), Math.min(item.info.motion.length, Math.ceil(sourceEnd / item.info.step)))
         .reduce((sum, value, _, samples) => sum + value / samples.length, 0) : 1;
-      const valid = w0 >= -1e-8 && sourceEnd <= item.duration - 0.02 + 1e-8 && !banned(item.ban, w0, sourceEnd) &&
-        !item.info?.cuts.some((cut) => w0 < cut + margin && sourceEnd > cut - margin) &&
-        (!reverseVariants.has(pick.variant) && pick.variant !== 'beatStutter' || meanMotion >= 0.15);
-      if (!valid) {
+      const why: SpeedSkip | null = !(w0 >= -1e-8 && sourceEnd <= item.duration - 0.02 + 1e-8) ? 'short'
+        : banned(item.ban, w0, sourceEnd) ? 'ban'
+          : item.info?.cuts.some((cut) => w0 < cut + margin && sourceEnd > cut - margin) ? 'cut'
+            : !every && (reverseVariants.has(pick.variant) || pick.variant === 'beatStutter') && meanMotion < 0.15 ? 'motion' : null;
+      if (why) {
+        skipped(why);
         prior.push(regionOf.get(shot)!);
         continue;
       }
@@ -702,7 +758,8 @@ export function planEdit(input: PlanInput): EditPlan {
       for (let b = overlay.b0; b < overlay.b1; b++) {
         const allowed = (ambient || !groupBeats.has(b) && (counts.get(b) ?? 0) < 4) &&
           (ambient || rule.when === 'drop' || !breath.has(b)) &&
-          (rule.group !== 'zoom' || rule.when === 'drop' || !inRamp(b)) &&
+          // 變速期間不疊一直在動的縮放（每拍 / 整段）；剪接點、重音、drop 這種打一下的照樣打（落點正好是變速衝進去的那一拍）
+          (rule.group !== 'zoom' || (rule.when !== 'beat' && rule.when !== 'section') || !inRamp(b)) &&
           (ambient || rule.group === 'flash' || rule.group === 'color' ||
             !plan.pops.some((p) => b >= p.b0 && b < p.b1 + 1));
         if (allowed) {
@@ -729,6 +786,13 @@ export function planEdit(input: PlanInput): EditPlan {
     // 取樣大約每秒一格：短鏡頭可能夾在兩格中間，前後放寬 1 秒
     const pt = m.leadPts?.filter((p) => p.t >= t0 - 1 && p.t <= t1 + 1).sort((a, b) => Math.abs(a.t - mid) - Math.abs(b.t - mid))[0];
     if (pt) shot.anchor = pt;
+    else if (m.kind === 'video' && m.info?.faces) {
+      const { step, faces } = m.info;
+      let bi = -1;
+      for (let i = Math.max(0, Math.floor(t0 / step)); i <= Math.min(faces.length - 1, Math.ceil(t1 / step)); i++)
+        if (faces[i] && faces[i]!.h >= FACE_MIN_H && (bi < 0 || Math.abs(i * step - mid) < Math.abs(bi * step - mid))) bi = i;
+      if (bi >= 0) shot.faceAnchor = { ...faces[bi]!, t: bi * step };
+    }
     if (settings.kenBurns) {
       delete shot.motion;
       shot.push = true;
@@ -750,3 +814,33 @@ export function planStats(plan: EditPlan): { shots: number; avgBeatsPerShot: num
     overlays: plan.overlays.length,
   };
 }
+
+/**
+ * 變速鏡頭：在原本挑的位置附近（前後一個鏡頭長），找動作最大的那一格，讓它落在 focus（相對片段開頭的素材秒數）。
+ * AI 導演標的精彩秒數加分；放不下（超出素材、跨過剪接點、避開的範圍、跟已經用過的重疊）的位置不考慮；找不到就照原本。
+ */
+function alignPeak(m: { duration: number; info?: MediaInfo; highlights?: number[]; ban?: Span[] }, w0: number, window: number, focus: number,
+  used: { t0: number; t1: number }[], wide = false): number {
+  const info = m.info;
+  if (!info?.motion.length || !(window > 0)) return w0;
+  const end = m.duration - 0.02;
+  const half = info.step / 2;
+  // wide（每個鏡頭都套用）：整個素材都找，原本的位置放不下也能換到別處
+  const lo = wide ? 0 : Math.max(0, w0 - window), hi = wide ? end : Math.min(end, w0 + 2 * window);
+  let best = -Infinity, at = w0;
+  for (let i = Math.max(1, Math.floor(lo / info.step)); i < info.motion.length && (i - 0.5) * info.step <= hi; i++) {
+    // 動作量是這格跟上一格的差：動作發生在兩格中間
+    const t = (i - 0.5) * info.step;
+    const w = t - focus;
+    if (w < 0 || w + window > end || banned(m.ban, w, w + window) ||
+      info.cuts.some((c) => w < c + half && w + window > c - half)) continue;
+    // 跟已經用過的重疊：扣分（素材不夠時還是可以用）
+    const reused = used.some((u) => w < u.t1 && w + window > u.t0) ? 1 : 0;
+    const score = info.motion[i] + (m.highlights?.some((h) => Math.abs(h - t) <= info.step) ? 0.3 : 0) - reused;
+    if (score > best) { best = score; at = w; }
+  }
+  return at;
+}
+
+/** 強烈的轉場：剪前倒抽可以衝進去（跟變速挑種類時的判斷一樣） */
+const STRONG_TR = new Set(['tr-whip', 'tr-zoomblur', 'tr-crashzoom', 'tr-flash', 'tr-rgbsplit', 'tr-glitch']);

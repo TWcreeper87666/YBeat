@@ -83,7 +83,13 @@ for (const variant of reverseVariants) for (const intensity of [0, 0.5, 1]) {
     `boomerang beat ${beat} turn and gain`);
   }
 }
-ok(speedCurve('rewindToCut', 0, 2, T, 1) === null && speedCurve('reverseForwardB', 0, 2, T, 1) === null &&
+// 剪前倒抽：快節奏的 1～2 拍鏡頭也能用（只倒最後半拍左右），倒帶起點在曲線最高點
+for (const n of [1, 2]) {
+  const c = speedCurve('rewindToCut', 0, n, T, 1)!;
+  const end = speedSourceAt(c, 0, T, T(n));
+  ok(!!c && c.sourceMax > end + 1e-6 && end >= -1e-9, `rewind to cut on a ${n}-beat shot`);
+}
+ok(speedCurve('rewindToCut', 0, 0.5, T, 1) === null && speedCurve('reverseForwardB', 0, 2, T, 1) === null &&
   speedCurve('rewindReturn', 0, 3, T, 1) === null && speedCurve('beatBoomerang', 0, 5, T, 1) === null,
   'reverse variant length limits');
 

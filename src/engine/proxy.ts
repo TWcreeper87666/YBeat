@@ -1,26 +1,27 @@
 /**
  * 預覽代理檔：關鍵影格很稀（> 1 秒）或解析度很高的影片，在背景產生一份
  * 短邊 540px、每 0.5 秒一個關鍵影格的 H.264 副本，只給時間軸預覽 / 素材預覽用（跳轉快很多）。
- * 匯出、AI 去背、追蹤、素材分析一律用原檔。代理檔存在 IndexedDB（proxy 物件庫），重開專案直接用。
+ * 匯出、AI 去背、追蹤、素材分析一律用原檔。代理檔存在 IndexedDB（ybeat-proxy 資料庫），重開專案直接用。
  */
 import { create } from 'zustand';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { useStore, type Media } from '../store';
-import { usePrefs } from '../prefs';
+import { usePrefs, type ProxyQuality } from '../prefs';
 import { keyframeInfo } from './matteDecode';
 import type { ProxyOut } from './proxyWorker';
+import { clearProxyBlobs, deleteProxyBlob, loadProxyBlob, saveProxyBlob } from './proxyStore';
 
-// 存檔模組用到時才載入（渲染器會 import 這裡；測試環境不能連帶載入專案存檔）
-const db = () => import('./project');
-const deleteProxyBlob = (id: string) => db().then((d) => d.deleteProxyBlob(id));
 
 const SHORT_SIDE = 540;
+/** 代理檔畫質（設定）→ 位元率 */
+export const PROXY_BITRATE: Record<ProxyQuality, number> = { low: 800_000, medium: 1_500_000, high: 2_500_000 };
+const bitrate = () => PROXY_BITRATE[usePrefs.getState().proxyQuality] ?? PROXY_BITRATE.medium;
 const KEY_EVERY = 0.5;
 /** 關鍵影格間隔超過這麼久才需要代理檔 */
 const MAX_KEY_GAP = 1;
 
-/** 代理檔的網址（素材 id → blob URL）與產生進度（0..1） */
-export const useProxy = create<{ urls: Record<string, string>; progress: Record<string, number> }>(() => ({ urls: {}, progress: {} }));
+/** 代理檔的網址（素材 id → blob URL）、產生進度（0..1）、排隊等著做的素材 */
+export const useProxy = create<{ urls: Record<string, string>; progress: Record<string, number>; queued: Record<string, true> }>(() => ({ urls: {}, progress: {}, queued: {} }));
 
 /** 預覽要用的網址：有代理檔（而且設定沒關）就用代理檔 */
 export function previewUrl(m: Media): string {
@@ -69,7 +70,7 @@ function buildInWorker(m: Media, alive: () => boolean, onProgress: (f: number) =
   const worker = takeWorker();
   return new Promise((res) => {
     jobs.set(m.id, { res, prog: onProgress });
-    worker.postMessage({ type: 'build', id: m.id, url: m.url, w, h });
+    worker.postMessage({ type: 'build', id: m.id, url: m.url, w, h, bitrate: bitrate() });
     // 素材被移除 / 換檔 / 關掉代理檔：叫 Worker 放棄
     const watch = setInterval(() => {
       if (!jobs.has(m.id)) return clearInterval(watch);
@@ -84,10 +85,10 @@ function size(m: Media) {
   return { w: even(m.width), h: even(m.height) };
 }
 
-async function pickConfig(w: number, h: number, fps: number): Promise<VideoEncoderConfig | null> {
+async function pickConfig(w: number, h: number, fps: number, rate = bitrate()): Promise<VideoEncoderConfig | null> {
   for (const codec of ['avc1.4d401f', 'avc1.4d4028', 'avc1.42e01f', 'avc1.640028']) {
     // 軟體編碼：這台測試機（Windows）的硬體編碼器只要同時有解碼器在跑，輸出幾格就卡住；540p 軟體編碼也夠快（每秒 100+ 格）
-    const c: VideoEncoderConfig = { codec, width: w, height: h, bitrate: 2_500_000, framerate: fps, hardwareAcceleration: 'prefer-software' };
+    const c: VideoEncoderConfig = { codec, width: w, height: h, bitrate: rate, framerate: fps, hardwareAcceleration: 'prefer-software' };
     if ((await VideoEncoder.isConfigSupported(c)).supported) return c;
   }
   return null;
@@ -204,33 +205,81 @@ async function buildByPlayback(
   }
 }
 
-// ───────────── 排程：同時最多 PARALLEL 支 ─────────────
+// ───────────── 排程：先檢查要不要做，再同時最多 PARALLEL 支 ─────────────
 
 /** 已經判斷過不需要代理檔的素材 */
 const skip = new Set<string>();
+/** 檢查過、要做代理檔的素材 → 用哪種方法 */
+const kinds = new Map<string, 'worker' | 'play'>();
 const running = new Set<string>();
+let classifying = false;
+
+const candidates = () => {
+  const urls = useProxy.getState().urls;
+  return useStore.getState().media.filter((m) => m.kind === 'video' && !m.missing && !m.color && !urls[m.id] && !skip.has(m.id) && !running.has(m.id));
+};
+
+/** 排隊中的素材（素材卡片顯示等待的斜紋） */
+function publishQueue() {
+  const ids = usePrefs.getState().proxy ? candidates().filter((m) => kinds.has(m.id)).map((m) => m.id) : [];
+  const cur = useProxy.getState().queued;
+  if (ids.length === Object.keys(cur).length && ids.every((id) => cur[id])) return;
+  useProxy.setState({ queued: Object.fromEntries(ids.map((id) => [id, true as const])) });
+}
+
+/** 一支一支檢查還沒看過的素材：存過的直接載入；不需要的記到 skip；需要的記下方法 */
+async function classify() {
+  if (classifying) return;
+  classifying = true;
+  try {
+    for (;;) {
+      if (!usePrefs.getState().proxy) return;
+      const m = candidates().find((x) => !kinds.has(x.id));
+      if (!m) return;
+      const id = m.id, url = m.url;
+      const saved = await loadProxyBlob(id).catch(() => undefined);
+      const same = () => useStore.getState().media.some((x) => x.id === id && x.url === url);
+      if (!same()) continue;
+      if (saved) {
+        useProxy.setState((p) => ({ urls: { ...p.urls, [id]: URL.createObjectURL(saved) } }));
+      } else {
+        const kind = await proxyKind(m);
+        if (!same()) continue;
+        if (kind) kinds.set(id, kind);
+        else skip.add(id);
+      }
+      publishQueue();
+      pump();
+    }
+  } finally {
+    classifying = false;
+    publishQueue();
+  }
+}
 
 function pump() {
+  publishQueue();
   if (!usePrefs.getState().proxy) return;
+  void classify();
   while (running.size < PARALLEL) {
-    const s = useStore.getState();
-    const urls = useProxy.getState().urls;
-    const todo = s.media.filter((m) => m.kind === 'video' && !m.missing && !m.color && !urls[m.id] && !skip.has(m.id) && !running.has(m.id));
+    const todo = candidates().filter((m) => kinds.has(m.id));
     if (!todo.length) return;
     // 時間軸上用到的先做
-    const used = new Set(s.clips.map((c) => c.mediaId));
+    const used = new Set(useStore.getState().clips.map((c) => c.mediaId));
     const next = todo.find((m) => used.has(m.id)) ?? todo[0];
     running.add(next.id);
-    void one(next).finally(() => {
+    publishQueue();
+    void one(next, kinds.get(next.id)!).finally(() => {
       running.delete(next.id);
       setTimeout(pump, 0);
     });
   }
 }
 
-async function one(next: Media) {
+async function one(next: Media, kind: 'worker' | 'play') {
   const id = next.id, url = next.url;
-  const alive = () => useStore.getState().media.some((m) => m.id === id && m.url === url) && usePrefs.getState().proxy;
+  const q = usePrefs.getState().proxyQuality;
+  const alive = () => useStore.getState().media.some((m) => m.id === id && m.url === url) && usePrefs.getState().proxy && usePrefs.getState().proxyQuality === q;
   const setProg = (f: number | null) => useProxy.setState((p) => {
     const progress = { ...p.progress };
     if (f === null) delete progress[id];
@@ -238,23 +287,12 @@ async function one(next: Media) {
     return { progress };
   });
   try {
-    // 之前產生過：直接載入
-    const saved = await db().then((d) => d.loadProxyBlob(id)).catch(() => undefined);
-    if (saved) {
-      useProxy.setState((p) => ({ urls: { ...p.urls, [id]: URL.createObjectURL(saved) } }));
-      return;
-    }
-    const kind = await proxyKind(next);
-    if (!kind) {
-      skip.add(id);
-      return;
-    }
     setProg(0);
     const blob = kind === 'worker' ? await buildInWorker(next, alive, (f) => setProg(f)) : await buildByPlay(next, alive, (f) => setProg(f));
     if (blob && alive()) {
-      await db().then((d) => d.saveProxyBlob(id, blob)).catch(() => {});
+      await saveProxyBlob(id, blob).catch(() => {});
       useProxy.setState((p) => ({ urls: { ...p.urls, [id]: URL.createObjectURL(blob) } }));
-    } else skip.add(id);
+    } else if (alive()) skip.add(id); // 被取消的（關掉、換畫質、素材換檔）之後還要再做
   } catch (e) {
     console.warn('proxy failed', next.name, e);
     skip.add(id);
@@ -295,6 +333,7 @@ export function startProxies() {
         useProxy.setState((p) => { const urls = { ...p.urls }; delete urls[m.id]; return { urls }; });
         void deleteProxyBlob(m.id);
         skip.delete(m.id);
+        kinds.delete(m.id);
       }
     }
     urlOf = new Map(media.map((m) => [m.id, m.url]));
@@ -303,5 +342,21 @@ export function startProxies() {
   };
   useStore.subscribe((s, p) => { if (s.media !== p.media) check(); });
   usePrefs.subscribe((s, p) => { if (s.proxy !== p.proxy) check(); });
+  // 換畫質：停一下（設定視窗裡可能連點、取消會還原）再把代理檔全部重做
+  let built = usePrefs.getState().proxyQuality;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  usePrefs.subscribe((s, p) => {
+    if (s.proxyQuality === p.proxyQuality) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const q = usePrefs.getState().proxyQuality;
+      if (q === built) return;
+      built = q;
+      for (const u of Object.values(useProxy.getState().urls)) URL.revokeObjectURL(u);
+      useProxy.setState({ urls: {} });
+      skip.clear();
+      void clearProxyBlobs().finally(pump);
+    }, 1500);
+  });
   check();
 }

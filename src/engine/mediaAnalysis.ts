@@ -8,14 +8,25 @@ export function grayOf(rgba: ArrayLike<number>, w: number, h: number): Float32Ar
   return gray;
 }
 
-export function frameStats(gray: Float32Array, w: number, h: number, prev?: Float32Array): { luma: number; sharp: number; diff: number } {
+export function frameStats(gray: Float32Array, w: number, h: number, prev?: Float32Array): { luma: number; sharp: number; diff: number; gdiff: number } {
   const n = Math.min(gray.length, w * h);
-  if (!n) return { luma: 0, sharp: 0, diff: 0 };
-  let luma = 0, diff = 0;
+  if (!n) return { luma: 0, sharp: 0, diff: 0, gdiff: 0 };
+  let luma = 0;
+  // 動作量：畫面切成 8×8 格，取變化最大的 1/4 格的平均（人在動、背景不動時，整張平均會被背景稀釋）
+  const G = 8;
+  const cell = new Float64Array(G * G), cnt = new Float64Array(G * G);
   for (let i = 0; i < n; i++) {
     luma += gray[i];
-    if (prev && i < prev.length) diff += Math.abs(gray[i] - prev[i]);
+    if (prev && i < prev.length) {
+      const k = Math.min(G - 1, Math.floor(((i % w) / w) * G)) + G * Math.min(G - 1, Math.floor((Math.floor(i / w) / h) * G));
+      cell[k] += Math.abs(gray[i] - prev[i]);
+      cnt[k]++;
+    }
   }
+  const all = cell.reduce((s, v) => s + v, 0) / Math.max(1, cnt.reduce((s, v) => s + v, 0));
+  const cells = Array.from(cell, (v, k) => (cnt[k] ? v / cnt[k] : 0)).sort((a, b) => b - a);
+  const top = cells.slice(0, (G * G) / 4);
+  const diff = top.reduce((s, v) => s + v, 0) / top.length;
   let sum = 0, sumSq = 0, count = 0;
   for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
     const i = y * w + x;
@@ -24,10 +35,11 @@ export function frameStats(gray: Float32Array, w: number, h: number, prev?: Floa
     sumSq += lap * lap;
     count++;
   }
-  return { luma: luma / n, sharp: count ? Math.max(0, sumSq / count - (sum / count) ** 2) : 0, diff: prev ? diff / n : 0 };
+  return { luma: luma / n, sharp: count ? Math.max(0, sumSq / count - (sum / count) ** 2) : 0, diff: prev ? diff : 0, gdiff: prev ? all : 0 };
 }
 
-export interface FrameSample { t: number; luma: number; sharp: number; diff: number }
+/** diff = 動作量（變化最大的那些格）；gdiff = 整張的平均變化（找原本的剪接點用：局部大動作不會被當成剪接點） */
+export interface FrameSample { t: number; luma: number; sharp: number; diff: number; gdiff?: number }
 import type { FacesAt } from './faceLead';
 
 /** 一格畫面裡最大的那張臉（素材畫面 0..1：中心、高度） */
@@ -94,9 +106,10 @@ export function analyzeSamples(samples: FrameSample[], duration: number): MediaI
   const cuts: number[] = [];
   const motion = samples.map((s) => clamp01(s.diff / 0.08));
   for (let i = 0; i < samples.length; i++) {
-    const before = samples.slice(Math.max(0, i - 3), i).map((s) => s.diff);
-    const after = samples.slice(i + 1, i + 4).map((s) => s.diff);
-    if (samples[i].diff > 0.18 && samples[i].diff > 4 * Math.max(median(before), median(after))) {
+    const g = (s: FrameSample) => s.gdiff ?? s.diff;
+    const before = samples.slice(Math.max(0, i - 3), i).map(g);
+    const after = samples.slice(i + 1, i + 4).map(g);
+    if (g(samples[i]) > 0.18 && g(samples[i]) > 4 * Math.max(median(before), median(after))) {
       cuts.push(samples[i].t);
     }
   }

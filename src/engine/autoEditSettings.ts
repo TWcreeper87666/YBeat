@@ -52,6 +52,10 @@ export interface AutoEditSettings {
   speedsPer32: number;
   /** 強度 0..1 */
   speedIntensity: number;
+  /** 每個影片鏡頭都套用變速 */
+  speedEvery: boolean;
+  /** 整體加速（1 = 原速；變速的鏡頭素材用得更快） */
+  speedBoost: number;
   /** 分析影片內容（運動量、畫質、原本的剪接點）來挑片段 */
   analyze: boolean;
   /** AI 導演：Gemini 看素材畫面，決定每個素材適合哪些段落、優先度、精彩時間點 */
@@ -144,12 +148,12 @@ const DEFAULTS = (): Omit<AutoEditSettings, 'analysis' | 'direction' | 'myStyles
   audioId: null, range: 'all', pick: 'all', segs: [], recipe: 'rhythm', params: { ...RECIPES.rhythm }, ...styleFields('rhythm'), density: 1, intensity: 0.5,
   kenBurns: true, order: 'library', analyze: true, director: false, directorNote: '', shape: FLAT_SHAPE(),
   popOn: true, popVariants: ['step'], popsPer32: 1, popText: '',
-  speedOn: true, speedVariants: ['beatPulse'], speedsPer32: 2, speedIntensity: 0.5,
+  speedOn: true, speedVariants: ['beatPulse'], speedsPer32: 2, speedIntensity: 0.5, speedEvery: false, speedBoost: 1,
 });
 /** 存在 localStorage 的欄位（個人口味）；音樂、範圍、素材勾選、能量曲線跟專案 / 歌曲有關，不存 */
 const PERSISTED = [
   'recipe', 'params', 'rules', 'trWeights', 'density', 'intensity', 'kenBurns', 'order',
-  'popOn', 'popVariants', 'popsPer32', 'popText', 'speedOn', 'speedVariants', 'speedsPer32', 'speedIntensity',
+  'popOn', 'popVariants', 'popsPer32', 'popText', 'speedOn', 'speedVariants', 'speedsPer32', 'speedIntensity', 'speedEvery', 'speedBoost',
   'analyze', 'director', 'directorNote', 'myStyles',
 ] as const satisfies readonly (keyof AutoEditSettings)[];
 

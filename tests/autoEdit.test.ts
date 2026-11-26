@@ -53,12 +53,25 @@ ok(shortVideo.shots.every((s) => s.in + (s.b1 - s.b0) * 60 / 128 <= 1.1 + 1e-6),
 const ranged = planEdit({ ...input, range: [16, 96] });
 ok(ranged.shots[0].b0 === 16 && ranged.shots.at(-1)?.b1 === 96, '指定範圍連續');
 
+// 輪流隨機：每輪每個素材用一次；同一支影片的片段盡量分開
+{
+  const segs = [
+    { id: 'A@1', srcId: 'A', kind: 'video', duration: 30 }, { id: 'A@2', srcId: 'A', kind: 'video', duration: 30 }, { id: 'A@3', srcId: 'A', kind: 'video', duration: 30 },
+    { id: 'B@1', srcId: 'B', kind: 'video', duration: 30 }, { id: 'C@1', srcId: 'C', kind: 'video', duration: 30 }, { id: 'D@1', srcId: 'D', kind: 'video', duration: 30 },
+  ] as PlanMedia[];
+  const bag = planEdit({ ...input, media: segs, options: options({ order: 'bag', transitions: [] }), seed: 7 });
+  const ids = bag.shots.map((s) => s.mediaId);
+  const src = (id: string) => id.split('@')[0];
+  ok(ids.length >= 12 && new Set(ids.slice(0, 6)).size === 6 && new Set(ids.slice(6, 12)).size === 6, '輪流：每輪每個素材用一次');
+  ok(ids.slice(0, 12).every((id, i) => i === 0 || src(id) !== src(ids[i - 1])), '輪流：同一支影片的片段不相鄰');
+}
+
 const chosen = withOptions(options({ transitions: [{ id: 'soft', strength: 0.1 }, { id: 'hard', strength: 0.9 }] }));
 ok(chosen.shots.every((s) => !s.transition || ['soft', 'hard'].includes(s.transition.moduleId)), '轉場只用指定 id');
 ok(withOptions(options({ transitions: [] })).shots.every((s) => !s.transition), '空轉場清單全硬切');
 const always: Recipe = { ...RECIPES.rhythm, id: 'custom', transitionRate: 1, sectionTransitionRate: 1, accentsPer32: 12 };
 const single = withOptions(options({ transitions: [{ id: 'one', strength: 0.5 }] }), 42, always);
-ok(single.shots.every((s, i) => i === 0 || !s.transition || !single.shots[i - 1].transition), '單一轉場隔鏡使用');
+ok(single.shots.filter((s) => s.transition?.moduleId === 'one').length > single.shots.length / 2, '只開一種轉場：每個剪接點都可以用（不再隔鏡）');
 ok(single.recipe === 'custom', '自訂配方 id 保留');
 ok(single.shots.every((s) => !s.transition || s.transition.beats === (s.b0 === 32 || s.b0 === 64 ? 1 : 0.5)), '轉場長度依切點加倍');
 ok(withOptions(options({ transitions: [{ id: 'soft', strength: 0.1 }] }), 42, always).shots.some((s) => s.transition?.moduleId === 'soft'), '純柔和轉場可用');

@@ -87,10 +87,13 @@ export interface Crop { x: number; y: number; w: number; h: number }
 export const FULL_CROP: Crop = { x: 0, y: 0, w: 1, h: 1 };
 export const isFullCrop = (c?: Crop | null) => !c || (c.x <= 0.001 && c.y <= 0.001 && c.w >= 0.999 && c.h >= 0.999);
 
-/** 只看得到裁切框、框內剛好填滿畫面（fit = cover）時的縮放與位移 */
-export function cropView(c: Crop, srcAspect: number, frameAspect: number): { s: number; x: number; y: number } {
+/**
+ * 裁切框放進畫面時的縮放與位移（片段要用 fit = cover）。
+ * cover = 框內填滿畫面（比例不同就切掉一些）；false = 框內整個放進畫面（比例不同就留邊，框外的畫面要另外用遮罩擋掉）
+ */
+export function cropView(c: Crop, srcAspect: number, frameAspect: number, cover = true): { s: number; x: number; y: number } {
   const F = fitSize(true, srcAspect, frameAspect);
-  const G = fitSize(true, (srcAspect * c.w) / c.h, frameAspect);
+  const G = fitSize(cover, (srcAspect * c.w) / c.h, frameAspect);
   const s = G[0] / (c.w * F[0]);
   const cx = c.x + c.w / 2, cy = c.y + c.h / 2;
   return { s, x: ((0.5 - cx) * F[0] * s) / frameAspect, y: (0.5 - cy) * F[1] * s };
@@ -100,8 +103,8 @@ export function cropView(c: Crop, srcAspect: number, frameAspect: number): { s: 
  * 片段套上裁切：原本的縮放 / 位移（含關鍵影格）當作是對「裁切後的畫面」做的，換算成對整個素材的值。
  * 有動畫時在每個 key 的時間點重算（片段要用 fit = cover）。
  */
-export function cropClip(clip: Animatable, crop: Crop, srcAspect: number, frameAspect: number): { transform: Transform; keys: Keys } {
-  const v = cropView(crop, srcAspect, frameAspect);
+export function cropClip(clip: Animatable, crop: Crop, srcAspect: number, frameAspect: number, cover = true): { transform: Transform; keys: Keys } {
+  const v = cropView(crop, srcAspect, frameAspect, cover);
   const map = (t: Transform) => ({ scaleX: t.scaleX * v.s, scaleY: t.scaleY * v.s, x: t.scaleX * v.x + t.x, y: t.scaleY * v.y + t.y });
   const keys = clip.keys ?? {};
   const props = ['scaleX', 'scaleY', 'x', 'y'] as const;
@@ -113,6 +116,12 @@ export function cropClip(clip: Animatable, crop: Crop, srcAspect: number, frameA
   const out: Keys = { ...keys };
   for (const p of props) out[p] = times.map((t, i) => newKey(t, vals[i][p], easeAt(t)));
   return { transform: clip.transform, keys: out };
+}
+
+/** 裁切框整個放進畫面（cropView 的 cover = false）時，框在畫面上的大小（畫面寬 / 高為 1） */
+export function cropWindow(c: Crop, srcAspect: number, frameAspect: number): { w: number; h: number } {
+  const G = fitSize(false, (srcAspect * c.w) / c.h, frameAspect);
+  return { w: G[0] / frameAspect, h: G[1] };
 }
 
 /** 臉 / 框（素材畫面 0..1）換到裁切框裡的座標；中心在框外 = null */

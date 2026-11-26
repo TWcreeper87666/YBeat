@@ -5,7 +5,7 @@
  * - music：音樂分析（key = 素材 id:第一拍:拍數）
  * 每筆記版本，分析方式改了就把 STORE_VERSION +1，讀到舊版本直接丟掉重算。
  */
-const STORE_VERSION = 1;
+const STORE_VERSION = 2;
 const MEDIA_LIMIT = 200 * 1024 * 1024;
 type StoreName = 'media' | 'meta' | 'director' | 'music';
 
@@ -16,7 +16,12 @@ function db() {
     r.onupgradeneeded = () => {
       for (const n of ['media', 'meta', 'director', 'music']) r.result.createObjectStore(n);
     };
-    r.onsuccess = () => res(r.result);
+    r.onsuccess = () => {
+      const d = r.result;
+      // 清除所有資料要刪掉這個資料庫：讓出連線
+      d.onversionchange = () => { d.close(); dbp = null; };
+      res(d);
+    };
     r.onerror = () => rej(r.error);
   });
   return dbp;

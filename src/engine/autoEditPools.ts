@@ -63,7 +63,7 @@ export function comboAccentOpt(c: FxCombo, modules: Module[]): AccentOpt {
 
 /** 特效層的衝突組：先照分類推，再用這張表修正（分類太粗：晃動、縮放都在「運鏡」） */
 const FX_GROUP: Record<string, FxGroup> = {
-  'fx-crashzoom': 'zoom', 'fx-zoompulse': 'zoom', 'fx-chromazoom': 'zoom', 'fx-spinkick': 'zoom', 'fx-squash': 'zoom', 'fx-tilt3d': 'zoom',
+  'fx-crashzoom': 'zoom', 'fx-zoompulse': 'zoom', 'fx-chromazoom': 'zoom', 'fx-spinkick': 'zoom', 'fx-squash': 'zoom', 'fx-tilt3d': 'zoom', 'fx-randomcam': 'zoom',
   'fx-blurpulse': 'zoom', 'fx-zoomecho': 'zoom', 'fx-tilezoom': 'zoom', 'fx-lens': 'zoom', 'fx-wave': 'zoom', 'fx-twirl': 'zoom', 'fx-shockwave': 'zoom',
   'fx-shake': 'shake', 'fx-shakeblur': 'shake', 'fx-handheld': 'shake', 'fx-twitch': 'shake', 'fx-motionblur': 'shake',
   'fx-flash': 'flash', 'fx-strobe': 'flash', 'fx-invert': 'flash',

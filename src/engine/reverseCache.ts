@@ -6,16 +6,31 @@
 import type { Media } from '../store';
 import { decodeFrames } from './matteDecode';
 
-/** 快取影格的高度上限（預覽畫面不大，夠用就好） */
-const MAX_H = 480;
-/** 全部影片合計最多幾格（480p 一格約 1.6MB） */
-const MAX_FRAMES = 240;
+/** 快取影格的高度上限（預覽畫面不大，夠用就好；倒播的那一下看不出差別） */
+const MAX_H = 360;
+/** 全部影片合計最多用多少記憶體（每個鏡頭都倒播時要放得下很多段） */
+const MAX_BYTES = 420 * 1024 * 1024;
+/** 同時解幾段（太多段一起解，每段都來不及；照要求的順序，近的先） */
+const PARALLEL = 2;
 
-interface Frame { pts: number; bm: ImageBitmap; used: number }
+interface Frame { pts: number; bm: ImageBitmap; used: number; bytes: number }
 interface Entry { frames: Frame[]; fps: number; done: [number, number][]; jobs: Map<string, Promise<void>> }
 const cache = new Map<string, Entry>();
 let tick = 0;
 let total = 0;
+let running = 0;
+const queue: (() => void)[] = [];
+/** 排隊：輪到了才開始解 */
+function slot<T>(fn: () => Promise<T>): Promise<T> {
+  return new Promise<T>((res, rej) => {
+    const go = () => {
+      running++;
+      fn().then(res, rej).finally(() => { running--; queue.shift()?.(); });
+    };
+    if (running < PARALLEL) go();
+    else queue.push(go);
+  });
+}
 
 const entry = (id: string) => {
   let e = cache.get(id);
@@ -25,16 +40,17 @@ const entry = (id: string) => {
 
 /** 超過上限：丟掉最久沒用的影格 */
 function evict() {
-  if (total <= MAX_FRAMES) return;
+  if (total <= MAX_BYTES) return;
   const all: { e: Entry; f: Frame }[] = [];
   for (const e of cache.values()) for (const f of e.frames) all.push({ e, f });
   all.sort((a, b) => a.f.used - b.f.used);
-  for (const { e, f } of all.slice(0, total - MAX_FRAMES)) {
+  for (const { e, f } of all) {
+    if (total <= MAX_BYTES) break;
     f.bm.close();
     e.frames.splice(e.frames.indexOf(f), 1);
     // 這一段不完整了，下次要重解
     e.done = e.done.filter(([a, b]) => !(f.pts >= a && f.pts <= b));
-    total--;
+    total -= f.bytes;
   }
 }
 
@@ -70,7 +86,7 @@ export function ensureReverseFrames(media: Media, a: number, b: number): Promise
   const scale = Math.min(1, MAX_H / Math.max(1, media.height || MAX_H));
   const w = Math.max(2, Math.round((media.width || 16) * scale)), h = Math.max(2, Math.round((media.height || 9) * scale));
   const pending: Promise<void>[] = [];
-  const job = decodeFrames({
+  const job = slot(() => decodeFrames({
     url: media.url, from: a, to: b, alive: () => cache.get(media.id) === e,
     onFrame: (pts, frame) => {
       // WebGL 對 ImageBitmap 不套 UNPACK_FLIP_Y（會上下顛倒）：跟 scrubCache 一樣先翻好
@@ -79,11 +95,11 @@ export function ensureReverseFrames(media: Media, a: number, b: number): Promise
         // 依時間插入：解碼途中預覽就會來查（二分搜尋），陣列要一直保持排序
         let i = e.frames.length;
         while (i > 0 && e.frames[i - 1].pts > pts) i--;
-        e.frames.splice(i, 0, { pts, bm, used: ++tick });
-        total++;
+        e.frames.splice(i, 0, { pts, bm, used: ++tick, bytes: w * h * 4 });
+        total += w * h * 4;
       }).finally(() => frame.close()));
     },
-  }).then(async (fps) => {
+  })).then(async (fps) => {
     await Promise.all(pending);
     e.fps = fps;
     e.done.push([a, b]);
@@ -100,7 +116,7 @@ export function clearReverseFrames(id?: string) {
   for (const [k, e] of cache) {
     if (id && k !== id) continue;
     for (const f of e.frames) f.bm.close();
-    total -= e.frames.length;
+    total -= e.frames.reduce((s, f) => s + f.bytes, 0);
     cache.delete(k);
   }
 }

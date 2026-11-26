@@ -5,6 +5,7 @@ import { uid, useStore } from '../store';
 import { usePrefs } from '../prefs';
 import { mediaBeats } from '../engine/beats';
 import { categoryOf, CATEGORIES } from '../modules/categories';
+import { BUILTIN_COMBOS } from '../modules/combos';
 import { type FxRule, type Recipe, type RecipeId } from '../engine/autoEdit';
 import { STYLE_IDS } from '../engine/autoEditStyles';
 import { deleteMyStyle, myStyleSettings, renameMyStyle, saveMyStyle, styleSettings, type StyleKey } from '../engine/autoEditSettings';
@@ -19,6 +20,7 @@ import { SPEED_VARIANTS, type SpeedVariant } from '../engine/speedRamp';
 import { DragNumber } from './DragNumber';
 import { AeRangeDialog, SegList, roleName } from './AeSegments';
 import { pausePreviews } from './SourcePanel';
+import { SpeedCurveCard } from './SpeedCurveCard';
 import { useDrag } from './uiStore';
 
 /** 面板上改設定：預覽先停（不然一邊播一邊改） */
@@ -282,6 +284,8 @@ export function AutoEditPanel() {
   const [open, setOpen] = useState<Set<string>>(() => new Set());
   // 另存 / 改名自己的風格：名稱輸入框
   const [naming, setNaming] = useState<{ mode: 'save' | 'rename'; text: string } | null>(null);
+  // 跟拍變速：滑過的種類顯示曲線卡片
+  const [speedHover, setSpeedHover] = useState<{ el: HTMLElement; v: SpeedVariant } | null>(null);
   const toggle = (id: string) => setOpen((o) => { const n = new Set(o); if (n.has(id)) n.delete(id); else n.add(id); return n; });
 
   // 音樂分析（段落條）
@@ -309,6 +313,7 @@ export function AutoEditPanel() {
   ].map((g) => ({ ...g, items: g.items.map((m) => ({ id: m.id, label: displayName(m.name) })) }));
   const fxGroups = [
     { id: 'effect:combo', label: $t('我的組合'), items: combos.map((c) => ({ id: c.id, label: c.name })) },
+    { id: 'effect:builtin-combo', label: $t('組合'), items: BUILTIN_COMBOS.map((c) => ({ id: c.id, label: displayName(c.name) })) },
     ...groupsOf('effect', fxMods),
   ];
   const trOn = trMods.filter((m) => (st.trWeights[m.id] ?? 1) > 0).length;
@@ -457,9 +462,9 @@ export function AutoEditPanel() {
                 {knob($t('鏡頭最長'), <DragNumber value={p.maxShotSec} min={0.5} max={30} step={0.5} decimals={1} suffix="s" onChange={(v) => setParam('maxShotSec', Math.max(v, p.minShotSec))} />)}
                 {knob($t('隨機變化'), pct(p.jitter, (v) => setParam('jitter', v)))}
               </div>
-              <div className="ae-line">
+              <div className="ae-line ae-order">
                 <span className="ae-label">{$t('素材順序')}</span>
-                <Seg value={st.order} on={(v) => set({ order: v })} opts={[{ v: 'library', label: $t('清單順序') }, { v: 'shuffle', label: $t('隨機') }]} />
+                <Seg value={st.order} on={(v) => set({ order: v })} opts={[{ v: 'library', label: $t('清單順序') }, { v: 'shuffle', label: $t('隨機') }, { v: 'bag', label: $t('輪流') }]} />
               </div>
               <Check v={st.kenBurns} on={(v) => set({ kenBurns: v })}>{$t('推近 / 拉遠')}</Check>
             </Fold>
@@ -491,15 +496,18 @@ export function AutoEditPanel() {
                 <input className="text-input" value={st.popText} placeholder={$t('主體後面的文字')} onChange={(e) => set({ popText: e.target.value })} />
               )}
             </Addon>
+            {speedHover && st.speedOn && <SpeedCurveCard anchor={speedHover.el} variant={speedHover.v} name={speedName(speedHover.v)} intensity={st.speedIntensity} />}
             <Addon title={$t('跟拍變速')} on={st.speedOn} right={<Switch v={st.speedOn} on={(v) => set({ speedOn: v })} />}>
               <SegToggles className="ae-style ae-grid4" items={SPEED_VARIANTS.map((v) => ({
-                key: v, label: speedName(v), v: st.speedVariants.includes(v),
+                key: v, label: speedName(v), v: st.speedVariants.includes(v), hover: (el) => setSpeedHover(el ? { el, v } : null),
                 on: (on: boolean) => { const l = useAutoEdit.getState().speedVariants; set({ speedVariants: on ? [...l.filter((x) => x !== v), v] : l.filter((x) => x !== v) }); },
               }))} />
               <div className="ae-grid3">
-                {knob($t('次數'), <DragNumber value={st.speedsPer32} min={0} max={8} step={0.5} decimals={1} suffix={$t(' / 32 拍')} onChange={(v) => set({ speedsPer32: v })} />)}
+                {knob($t('次數'), st.speedEvery ? <span className="ae-every">{$t('每個鏡頭')}</span> : <DragNumber value={st.speedsPer32} min={0} max={8} step={0.5} decimals={1} suffix={$t(' / 32 拍')} onChange={(v) => set({ speedsPer32: v })} />)}
                 {knob($t('強度'), pct(st.speedIntensity, (v) => set({ speedIntensity: v })))}
+                {knob($t('整體加速'), <DragNumber value={Math.round((st.speedBoost ?? 1) * 100)} min={100} max={300} step={10} decimals={0} def={100} suffix="%" onChange={(v) => set({ speedBoost: Math.round(v) / 100 })} />)}
               </div>
+              <Check v={!!st.speedEvery} on={(v) => set({ speedEvery: v })}>{$t('每個鏡頭都套用')}</Check>
             </Addon>
           </div>
         </div>

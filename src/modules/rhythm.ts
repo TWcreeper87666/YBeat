@@ -112,6 +112,48 @@ vec4 effect(vec2 uv) {
 }
 `;
 
+const randomCam = `// 隨機運鏡：每次觸發推到畫面上隨機一個點（帶點傾斜），下一次觸發再移到新的點
+// @duration 4
+// @param zoom: float = 1.6 (1..4) "放大"
+// @param zoomRand: float = 0.3 (0..1) "放大隨機"
+// @param margin: float = 0.2 (0..0.45) "邊距"
+// @param tilt: float = 8 (0..45) "傾斜（度）"
+// @param blur: float = 0.5 (0..1) "動態模糊"
+// @param seed: int = 0 (0..99) "隨機種子"
+// @param ease: curve = expoOut "曲線"
+struct Cam { vec2 c; float z; float a; };
+// 第 n 次觸發的鏡頭；n < 0 = 原畫面（方塊開頭從原畫面推過去）
+Cam camAt(float n) {
+  if (n < 0.0) return Cam(vec2(0.5), 1.0, 0.0);
+  float s = float(seed) * 7.31;
+  float z = max(1.0, zoom * (1.0 + zoomRand * 0.5 * (rand(vec2(n, s + 3.1)) * 2.0 - 1.0)));
+  vec2 p = margin + (1.0 - 2.0 * margin) * vec2(rand(vec2(n, s + 1.7)), rand(vec2(n, s + 2.3)));
+  // 放大後鏡頭不拍到畫面外
+  float h = 0.5 / z;
+  p = clamp(p, vec2(h), vec2(1.0 - h));
+  return Cam(p, z, radians(tilt) * (rand(vec2(n, s + 4.9)) * 2.0 - 1.0));
+}
+vec2 view(vec2 uv, Cam a, Cam b, float k) {
+  float z = exp(mix(log(a.z), log(b.z), k));
+  vec2 p = uv - 0.5;
+  p.x *= ASPECT;
+  p = rot(mix(a.a, b.a, k)) * p / z;
+  p.x /= ASPECT;
+  return mix(a.c, b.c, k) + p;
+}
+vec4 effect(vec2 uv) {
+  Cam a = camAt(u_trigger - 1.0);
+  Cam b = camAt(u_trigger);
+  vec4 acc = vec4(0.0);
+  // 一次運鏡延伸到下一次觸發前（曲線跑滿這次觸發的長度），不會半路停住
+  for (int i = 0; i < 12; i++) {
+    float t = u_local - blur * 0.08 * float(i) / 11.0;
+    acc += tex(mirrorUV(view(uv, a, b, curve(ease, clamp(t / u_duration, 0.0, 1.0)))));
+  }
+  return acc / 12.0;
+}
+`;
+
 const tileZoom = `// 鏡像拼貼：拉遠露出鏡像拼貼的畫面再推回來
 // @duration 0.5
 // @hit
@@ -450,6 +492,7 @@ export const RHYTHM_MODULES: Module[] = [
   mk('fx-spinkick', 'effect', '旋轉衝擊 Spin Kick', spinKick, 4),
   mk('fx-squash', 'effect', '彈跳擠壓 Squash', squash, 4),
   mk('fx-tilt3d', 'effect', '3D 擺動 3D Swing', tilt3d, 2),
+  mk('fx-randomcam', 'effect', '隨機運鏡 Random Camera', randomCam, 2),
   mk('fx-tilezoom', 'effect', '鏡像拼貼 Tile Zoom', tileZoom, 4),
   mk('fx-twitch', 'effect', '抽動 Twitch', twitch, 2),
   mk('fx-blurpulse', 'effect', '模糊脈衝 Blur Pulse', blurPulse, 2),

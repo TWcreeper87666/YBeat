@@ -39,7 +39,7 @@ Write exactly:  vec4 transition(vec2 uv) { ... }
 - getFrom(uv) = outgoing clip, getTo(uv) = incoming clip, progress = 0→1 over the transition.
 
 ### Built-in uniforms (GLSL)
-u_resolution (vec2, px), u_time (project seconds), u_local (seconds since the item started), u_duration (seconds), u_progress (0→1 over the item), u_level (current audio loudness 0..1), u_beat (1.0 on a beat, then decays).
+u_resolution (vec2, px), u_time (project seconds), u_local (seconds since the item started), u_duration (seconds), u_progress (0→1 over the item), u_level (current audio loudness 0..1), u_beat (1.0 on a beat, then decays), u_trigger (float: which trigger this is inside the block, 0 = first; u_local / u_progress restart on every trigger; 0 without triggers).
 
 ### Built-in GLSL helpers (already defined, do not redefine)
 ${GLSL_LIB.trim()}

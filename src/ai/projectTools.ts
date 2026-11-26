@@ -621,7 +621,7 @@ function readTimeline(s: S, a: Record<string, unknown>) {
     }),
     effects: cut(effects).map((e) => ({
       id: e.id, track: e.track, start: r3(e.start), end: r3(e.start + e.duration), module: e.moduleId,
-      ...(e.trigger ? { trigger: (e.trigger.kind === 'beat' ? `every ${e.trigger.every} beat` : 'cut') + (e.trigger.chance !== undefined && e.trigger.chance < 1 ? ` (${Math.round(e.trigger.chance * 100)}%)` : '') } : {}),
+      ...(e.trigger ? { trigger: (e.trigger.kind === 'beat' ? `every ${e.trigger.every} beat` : e.trigger.kind === 'hits' ? `manual, ${e.trigger.hits.length} hits` : 'cut') + (e.trigger.chance !== undefined && e.trigger.chance < 1 ? ` (${Math.round(e.trigger.chance * 100)}%)` : '') } : {}),
       ...(e.stack?.length ? { stacked: e.stack.map((f) => f.moduleId) } : {}),
       ...pv(e.params),
     })),

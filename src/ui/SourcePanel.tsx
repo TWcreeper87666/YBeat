@@ -4,7 +4,7 @@ import { create } from 'zustand';
 import { Pause, Play, X } from 'lucide-react';
 import { mediaUsable, useStore, type Media } from '../store';
 import { $t } from '../i18n';
-import { scrubFrame, warmScrub } from '../engine/scrubCache';
+import { holdScrubFor, scrubFrame, warmScrub } from '../engine/scrubCache';
 import { tc } from '../engine/rulerTicks';
 import type { Crop } from '../engine/transform';
 import { useDock } from './Dock';
@@ -108,9 +108,12 @@ type Keys = { toggle(): void };
 /** 滑鼠目前在哪個素材預覽上（給全域快捷鍵用） */
 let activeKeys: React.MutableRefObject<Keys | null> | null = null;
 
-/** App 的快捷鍵先問這裡：滑鼠在素材預覽上時，Space 給它用 */
+/** 目前打開的素材預覽（只會有一個） */
+let openKeys: React.MutableRefObject<Keys | null> | null = null;
+
+/** App 的快捷鍵先問這裡：滑鼠在素材預覽上、或在素材分頁上而且素材預覽開著時，Space 給它用 */
 export function sourceHotkey(e: KeyboardEvent): boolean {
-  const k = activeKeys?.current;
+  const k = activeKeys?.current ?? (useSource.getState().open && document.querySelector('.media-panel:hover') ? openKeys?.current : null);
   if (!k || e.ctrlKey || e.metaKey || e.altKey || e.key !== ' ') return false;
   k.toggle();
   e.preventDefault();
@@ -152,7 +155,7 @@ function SourceView({ media, range, label, crop }: { media: Media; range: [numbe
     const tick = () => {
       // 片段：只循環播範圍內
       if (range && !el.paused && target.current === null && (el.currentTime >= range[1] - 0.01 || el.currentTime < range[0] - 0.05)) el.currentTime = range[0];
-      if (target.current === null) setT(el.currentTime);
+      if (target.current === null) setT((x) => (Math.abs(x - el.currentTime) > 1 / 60 ? el.currentTime : x));
       // 拖曳中、精準畫面還沒出來 → 先畫快取的小張影格
       const ov = overlay.current;
       if (ov && media.kind === 'video') {
@@ -174,7 +177,8 @@ function SourceView({ media, range, label, crop }: { media: Media; range: [numbe
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
-    const on = () => setPlaying(!el.paused);
+    // 播放中不在背景抽拖曳用的影格（解碼器給播放用）
+    const on = () => { setPlaying(!el.paused); holdScrubFor(el, !el.paused); };
     el.addEventListener('play', on);
     el.addEventListener('pause', on);
     // 先在背景抽拖曳用的小張影格
@@ -188,6 +192,10 @@ function SourceView({ media, range, label, crop }: { media: Media; range: [numbe
       el.removeEventListener('play', on);
       el.removeEventListener('pause', on);
       el.pause();
+      holdScrubFor(el, false);
+      // 馬上放掉解碼器（等垃圾回收的話，開過很多次後會越來越卡）
+      el.removeAttribute('src');
+      el.load();
     };
   }, []);
 
@@ -230,8 +238,12 @@ function SourceView({ media, range, label, crop }: { media: Media; range: [numbe
 
   // 滑鼠在這個分頁上時，Space 作用在素材預覽（不是時間軸）
   keys.current = { toggle };
-  useEffect(() => () => {
-    if (activeKeys === keys) activeKeys = null;
+  useEffect(() => {
+    openKeys = keys;
+    return () => {
+      if (activeKeys === keys) activeKeys = null;
+      if (openKeys === keys) openKeys = null;
+    };
   }, []);
 
   const pct = (v: number) => `${dur ? (v / dur) * 100 : 0}%`;

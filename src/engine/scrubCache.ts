@@ -10,6 +10,8 @@ import { previewUrl } from './proxy';
 
 const H = 200; // 影格高度（px）
 const MAX_FRAMES = 480;
+/** 最多留幾個素材的影格（一個最多約 130 MB；用過很多素材後越來越卡 → 只留最近用的） */
+const MAX_MEDIA = 3;
 
 interface Entry {
   id: string;
@@ -31,11 +33,25 @@ interface Entry {
 let runner: Entry | null = null;
 const waiting = new Set<Entry>();
 let held = false;
-/** 時間軸播放中：停止抽影格（渲染器每格呼叫） */
-export function holdScrub(on: boolean) {
+let playHeld = false;
+/** 其他正在播放的預覽（素材預覽、選範圍視窗）：播放中也停止抽影格 */
+const holders = new Set<object>();
+const sync = () => {
+  const on = playHeld || holders.size > 0;
   if (held === on) return;
   held = on;
   if (!on) kick();
+};
+/** 時間軸播放中：停止抽影格（渲染器每格呼叫） */
+export function holdScrub(on: boolean) {
+  playHeld = on;
+  sync();
+}
+/** 某個預覽開始 / 停止播放（token = 那個預覽自己）：播放中解碼器留給它 */
+export function holdScrubFor(token: object, on: boolean) {
+  if (on) holders.add(token);
+  else holders.delete(token);
+  sync();
 }
 function kick(e?: Entry) {
   if (e && !e.failed) waiting.add(e);
@@ -77,11 +93,20 @@ function entryFor(m: Media): Entry {
     e.url = url;
     if (e.video && !e.running) { e.video.removeAttribute('src'); e.video.load(); e.video = null; }
   }
-  if (e && e.url === url) return e;
+  if (e && e.url === url) {
+    // 最近用過的排到最後（超過上限時從最前面丟）
+    cache.delete(m.id);
+    cache.set(m.id, e);
+    return e;
+  }
   e?.frames.forEach((f) => f?.close());
   const step = Math.max(0.25, m.duration / MAX_FRAMES);
   e = { id: m.id, url, step, frames: new Array(Math.ceil(m.duration / step) + 1).fill(null), video: null, running: false, want: 0, asked: 0 };
   cache.set(m.id, e);
+  for (const [id, x] of cache) {
+    if (cache.size <= MAX_MEDIA) break;
+    if (x !== runner && x !== e) dropScrub(id);
+  }
   return e;
 }
 
