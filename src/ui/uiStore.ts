@@ -89,8 +89,9 @@ useLayout.subscribe((s, p) => {
 // ───────────── 提示訊息 ─────────────
 
 interface Toast { id: number; text: string; kind: 'info' | 'error' }
-export const useToast = create<{ toasts: Toast[]; /** 進行中的工作（不會自動消失，null = 沒有） */ busy: string | null }>(() => ({ toasts: [], busy: null }));
-export const setBusy = (busy: string | null) => useToast.setState({ busy });
+/** busy：進行中的工作（不會自動消失，null = 沒有）；busyFrac：進度 0..1（null = 不顯示進度條） */
+export const useToast = create<{ toasts: Toast[]; busy: string | null; busyFrac: number | null }>(() => ({ toasts: [], busy: null, busyFrac: null }));
+export const setBusy = (busy: string | null, frac: number | null = null) => useToast.setState({ busy, busyFrac: busy === null ? null : frac });
 let toastId = 0;
 export function toast(text: string, kind: Toast['kind'] = 'info') {
   const id = ++toastId;
@@ -218,4 +219,6 @@ export const useTrimView = create<{ t: number | null }>(() => ({ t: null }));
 
 // ───────────── 在素材分頁選中某個素材（從別的面板跳過去） ─────────────
 
-export const useLibFocus = create<{ id: string | null; n: number }>(() => ({ id: null, n: 0 }));
+/** 要求素材分頁選中某些素材（ids 沒給 = 只有 id）；n 變了才動作 */
+export const useLibFocus = create<{ id: string | null; ids?: string[]; n: number }>(() => ({ id: null, n: 0 }));
+export const focusLibrary = (ids: string[]) => useLibFocus.setState((s) => ({ id: ids[0] ?? null, ids, n: s.n + 1 }));

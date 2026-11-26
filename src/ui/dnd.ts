@@ -6,7 +6,7 @@ import { TR_BLOCK_DUR, attachedAudioIds, comboClipFx, keyOf, useStore, mediaUsab
 import { beginHistoryTransaction, endHistoryTransaction } from '../engine/history';
 import { showPendingPlacement } from './Timeline';
 import { parseDuration } from '../engine/params';
-import { addMediaBlob, colorMedia } from '../engine/media';
+import { addMediaBlob, addMediaFiles, colorMedia } from '../engine/media';
 import { fitInGap, fitStart } from '../engine/overlap';
 import { laneSnapPoints } from '../engine/snap';
 import { fxCombo, stillDur, userTextStyle } from '../prefs';
@@ -393,10 +393,7 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
   }
   else if (files) {
     let t = target.time;
-    for (const f of files) {
-      const m = await addMediaBlob(f, f.name).catch(() => null);
-      if (m) t += place(m.id, t);
-    }
+    await addMediaFiles(files, (m) => { t += place(m.id, t); });
   }
 }
 
@@ -418,8 +415,7 @@ async function replaceFx(fxId: string, moduleId: string) {
 }
 
 async function importMany(files: File[]) {
-  let n = 0;
-  for (const f of files) if (await addMediaBlob(f, f.name).catch(() => null)) n++;
+  const { ok: n } = await addMediaFiles(files);
   if (n) toast($t('已匯入 {0} 個檔案', n));
   else toast($t('無法匯入這些檔案'), 'error');
 }

@@ -822,6 +822,8 @@ export class Renderer {
   private texTime = new Map<string, number>();
   private bitmaps = new Map<string, ImageBitmap>();
   /** 拖播放頭時的快取影格貼圖 */
+  /** 每個片段最後畫的快取影格（拖播放頭時接不上就沿用） */
+  private lastScrub = new Map<string, { bm: ImageBitmap; t: number }>();
   private bitmapTex(key: string, bm: ImageBitmap) {
     if (this.bitmaps.get(key) === bm) return this.textures.get(key)!;
     this.bitmaps.set(key, bm);
@@ -951,8 +953,12 @@ export class Renderer {
       if (mode === 'preview' && !playing) {
         const shown = this.texTime.get('vid:' + this.rootOf(clip.id));
         if (shown === undefined || Math.abs(shown - src) > 0.1) {
-          const sf = scrubFrameAt(media, src);
+          let sf = scrubFrameAt(media, src);
+          // 附近還沒抽好：上一張快取影格如果比 <video> 目前的畫面更接近，就先沿用（不要閃回 seek 前的舊畫面）
+          const prev = this.lastScrub.get(clip.id);
+          if (!sf && prev && (shown === undefined || Math.abs(prev.t - src) < Math.abs(shown - src))) sf = prev;
           if (sf) {
+            this.lastScrub.set(clip.id, sf);
             tex = this.bitmapTex('scrub:' + clip.id, sf.bm);
             // 快取影格不一定剛好在 src（間隔至少 0.25 秒）：遮罩要用這張影格自己的時間，才會跟畫面對上
             matteSrc = sf.t;

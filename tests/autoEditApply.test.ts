@@ -198,10 +198,11 @@ ok(S().clips.length === 0 && useAutoEdit.getState().kenBurns, '巢狀交易一�
   reset();
   const long: Media = { ...media[0], id: 'L', duration: 60 };
   useStore.setState({ media: [...media, long] });
-  const st = { ...useAutoEdit.getState(), segs: [{ id: 's1', mediaId: 'L', a: 10, b: 13 }, { id: 's2', mediaId: 'L', a: 40, b: 50 }, { id: 's3', mediaId: 'i', a: 0, b: 0 }, { id: 's4', mediaId: 'gone', a: 0, b: 1 }] };
+  const st = { ...useAutoEdit.getState(), pick: 'list' as const, segs: [{ id: 's1', mediaId: 'L', a: 10, b: 13 }, { id: 's2', mediaId: 'L', a: 40, b: 50 }, { id: 's3', mediaId: 'i', a: 0, b: 0 }, { id: 's4', mediaId: 'gone', a: 0, b: 1 }] };
   const feet = aeFootage(S(), st);
   ok(feet.length === 3 && feet[0].id === 'L@s1' && feet[0].duration === 3 && feet[0].from === 10 && feet[0].srcId === 'L' && feet[2].id === 'i', '片段 → 虛擬素材；圖片用原素材；不存在的素材略過');
-  ok(aeFootage(S(), { ...st, segs: [] }).length === 3, '沒有片段 → 素材庫全部');
+  ok(aeFootage(S(), { ...st, pick: 'all', segs: [] }).length === 3, '全部素材 → 素材庫全部');
+  ok(aeFootage(S(), { ...st, segs: [] }).length === 0, '自選清單清空 → 沒有素材');
   const segPlan: EditPlan = { seed: 1, recipe: 'rhythm', overlays: [], shots: [
     { b0: 0, b1: 4, mediaId: 'L@s1', in: 2 },
     { b0: 4, b1: 8, mediaId: 'L@s2', in: 1 },

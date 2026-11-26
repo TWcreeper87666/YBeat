@@ -32,7 +32,9 @@ export interface AutoEditSettings {
   intensity: number;
   kenBurns: boolean;
   order: PlanOptions['order'];
-  /** 片段清單（從素材分頁拖進來）；空的 = 用素材庫全部（清單上顯示素材庫的每個素材） */
+  /** 'all' = 用素材庫全部（清單上顯示素材庫的每個素材，segs 不用）；'list' = 只用 segs（可以是空的） */
+  pick: 'all' | 'list';
+  /** 片段清單（從素材分頁拖進來） */
   segs: AeSeg[];
   /** 使用者調整的能量曲線（控制點的位置 = 整段音樂的比例） */
   shape: EnergyShape;
@@ -82,7 +84,7 @@ export type Footage = Media & { from?: number; srcId?: string; /** 只用畫面�
 /** 這次要剪的素材：有指定片段就用片段，沒有就用素材庫（扣掉取消勾選的） */
 export function aeFootage(s: S, st: AutoEditSettings): Footage[] {
   const lib = footage(s);
-  if (!st.segs.length) return lib;
+  if (st.pick !== 'list') return lib;
   const out: Footage[] = [];
   for (const g of st.segs) {
     const m = lib.find((x) => x.id === g.mediaId);
@@ -139,7 +141,7 @@ export function deleteMyStyle(id: string) {
 }
 
 const DEFAULTS = (): Omit<AutoEditSettings, 'analysis' | 'direction' | 'myStyles'> => ({
-  audioId: null, range: 'all', segs: [], recipe: 'rhythm', params: { ...RECIPES.rhythm }, ...styleFields('rhythm'), density: 1, intensity: 0.5,
+  audioId: null, range: 'all', pick: 'all', segs: [], recipe: 'rhythm', params: { ...RECIPES.rhythm }, ...styleFields('rhythm'), density: 1, intensity: 0.5,
   kenBurns: true, order: 'library', analyze: true, director: false, directorNote: '', shape: FLAT_SHAPE(),
   popOn: true, popVariants: ['step'], popsPer32: 1, popText: '',
   speedOn: true, speedVariants: ['beatPulse'], speedsPer32: 2, speedIntensity: 0.5,
@@ -169,13 +171,16 @@ export const useAutoEdit = create<AutoEditSettings & { set(p: Partial<AutoEditSe
 );
 
 
-// 面板設定可以 Ctrl+Z（分析結果、AI 導演的結果是算出來的，不記錄）
+// 面板設定可以 Ctrl+Z（分析結果、AI 導演的結果是算出來的，不記錄；AI 導演開關在 AI 分頁，跟「自動套用」一樣是偏好，也不記錄）
 trackHistory(
   'autoEdit',
   useAutoEdit,
-  ({ analysis: _a, direction: _d, set: _s, reset: _r, ...rest }) => rest as Record<string, unknown>,
+  ({ analysis: _a, direction: _d, director: _dr, set: _s, reset: _r, ...rest }) => rest as Record<string, unknown>,
   (v) => useAutoEdit.setState(v as Partial<AutoEditSettings>),
 );
+
+/** 上一版還能不能被「再一版」換掉（autoEditApply 設定；給 AI 工具看，避免 import 循環） */
+export const lastTake = { replaceable: () => false };
 
 /** 可以當配樂的音訊片段：有節拍、不是影片連結的原音；長的排前面 */
 export function musicClips(s: S): AudioClip[] {

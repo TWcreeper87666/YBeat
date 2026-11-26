@@ -14,7 +14,7 @@ import {
 import { sortClips, transitionWindow, makeCtx, type TrWindow } from '../engine/renderer';
 import { cutPoints, cutTracks, triggerBeats, triggerMarks } from '../engine/trigger';
 import { nextStart, prevEnd, selectedItemsAtTime, spansOverlap, type Span } from '../engine/overlap';
-import { snapTargetIfApplied } from '../engine/snap';
+import { markerSnapPoints, snapTargetIfApplied } from '../engine/snap';
 import { plainSpeed } from '../engine/remap';
 import { audioBufferPeak, getAudioBuffer, setScrubbing, waveformLevels } from '../engine/audio';
 import { fps, PPS_MAX, PPS_MIN, rulerLabel, rulerSteps, snapFrame } from '../engine/rulerTicks';
@@ -22,6 +22,7 @@ import { undo, redo, useHistory, beginHistoryTransaction, endHistoryTransaction 
 import { relinkWithPicker } from '../engine/media';
 import { projectRestored } from '../engine/project';
 import { rememberScroll, savedScroll } from './timelineView';
+import { revealMedia } from './Dock';
 import { confirmDialog, openMenu, promptDialog, stopPreviewFx, toast, useDrag, useLayout, useReveal, useSnapLine, useMenu, useTrimView, type MenuItem } from './uiStore';
 import { itemName } from './names';
 import { clickTrack, moveRows, moveRowsToEnd, parseRowKey, rowKey, useTrackSel, type Row } from './trackSel';
@@ -129,9 +130,9 @@ function nearest(v: number, pts: number[], _pps?: number) {
   return { v: best, d: best === v ? Infinity : bd };
 }
 
-function snapPoints(exclude: Set<string>) {
+function snapPoints(exclude: Set<string>, includePlayhead = true) {
   const s = useStore.getState();
-  const pts = [0, s.time, ...beatSnapPoints()];
+  const pts = [0, ...(includePlayhead ? [s.time] : []), ...beatSnapPoints(), ...s.markers.filter((m) => !exclude.has(`marker:${m.id}`)).map((m) => m.t)];
   (['clip', 'effect', 'audio'] as ItemType[]).forEach((type) => {
     for (const c of s[LIST[type]] as AnyItem[]) if (!exclude.has(keyOf(type, c.id))) pts.push(c.start, c.start + c.duration);
   });
@@ -867,6 +868,7 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
   if (grouped) items.push({ label: $t('解除群組'), shortcut: 'Ctrl+Shift+G', action: () => S.ungroupSelected() });
   else if (n > 1) items.push({ label: $t('建立群組'), shortcut: 'Ctrl+G', action: () => S.groupSelected() });
   if ((type === 'clip' || type === 'audio') && media) {
+    items.push({ label: $t('在素材分頁顯示'), action: () => revealMedia(media.id) });
     items.push({ label: mediaUsable(media) ? $t('替換素材…') : $t('重新連結素材…'), action: () => relinkWithPicker(media.id) });
   }
   items.push(
@@ -1359,6 +1361,7 @@ export function Timeline() {
   const clips = useStore((s) => s.clips);
   const effects = useStore((s) => s.effects);
   const audios = useStore((s) => s.audios);
+  const markers = useStore((s) => s.markers);
   const tracks = useStore((s) => s.tracks);
   const labelW = 180 + Math.max(0, Math.max(...(['video', 'fx', 'audio'] as TrackKind[]).map((k) => String(tracks[k].length).length)) - 2) * 9;
   const media = useStore((s) => s.media);
@@ -1411,7 +1414,7 @@ export function Timeline() {
   /** 看得到的時間軸寬度（秒）與垂直捲軸寬度（自訂水平捲軸要扣掉） */
   const [view, setView] = useState({ w: 800, sbw: 0 });
   // 時間軸長度：預設 MIN_LEN 秒；專案更長就是專案長度再多 10%（不會無限往右延伸）；至少填滿看得到的寬度
-  const dur = projectDuration({ clips, effects, audios });
+  const dur = Math.max(projectDuration({ clips, effects, audios }), ...markers.map((m) => m.t));
   const end = Math.max(MIN_LEN, dur * 1.1 + 2, view.w / pps);
   /** 縮放時要固定在畫面上同一個位置的時間點（滑鼠 / 播放頭 / 畫面中間） */
   const zoomAnchor = useRef<{ t: number; off: number } | null>(null);
@@ -1585,12 +1588,12 @@ export function Timeline() {
     e.stopPropagation();
     stopPreviewFx();
     // 播放頭對齊到 1/60 秒一格
-    S.setTime(snapFrame(timeAt(e.clientX)));
+    S.setTime(nearest(snapFrame(timeAt(e.clientX)), markerSnapPoints(S.markers)).v);
     document.body.classList.add('resizing-v');
     listen(
       (ev) => {
         setScrubbing(true); // 真的拖了才播聲音（單擊不出聲）
-        S.setTime(snapFrame(timeAt(ev.clientX)));
+        S.setTime(nearest(snapFrame(timeAt(ev.clientX)), markerSnapPoints(useStore.getState().markers)).v);
       },
       () => {
         setScrubbing(false);
@@ -2021,6 +2024,7 @@ export function Timeline() {
 
           <div className="tl-overlay" style={{ left: labelW }}>
             <BeatLines pps={pps} />
+            <MarkerLines pps={pps} />
             <Playhead pps={pps} labelW={labelW} scrollRef={scrollRef} />
             <SnapLine pps={pps} />
           </div>
@@ -2160,15 +2164,58 @@ const Ruler = React.memo(function Ruler({ end, pps, onPointerDown }: { end: numb
   const ticks: number[] = [];
   for (let f = 0; f / fps() <= end; f += n) ticks.push(f / fps());
   const loop = useStore((s) => s.loop);
+  const markers = useStore((s) => s.markers);
   const w = minor * pps;
+  const clear = async () => {
+    if (!useStore.getState().markers.length) return;
+    if (await confirmDialog({ title: $t('清除所有標記'), message: $t('清除所有標記？'), ok: $t('清除'), danger: true })) useStore.getState().clearMarkers();
+  };
+  const rename = async (id: string) => {
+    const marker = useStore.getState().markers.find((m) => m.id === id);
+    if (!marker) return;
+    const name = await promptDialog({ title: $t('重新命名標記'), value: marker.name });
+    if (name?.trim()) useStore.getState().updateMarker(id, { name: name.trim() });
+  };
+  const menu = (e: React.MouseEvent, id?: string) => {
+    e.preventDefault(); e.stopPropagation();
+    const items: MenuItem[] = id ? [
+      { label: $t('重新命名…'), action: () => { void rename(id); } },
+      { label: $t('刪除標記'), danger: true, action: () => useStore.getState().removeMarker(id) },
+    ] : [
+      { label: $t('在這裡加標記'), action: () => useStore.getState().addMarker(qf(timeAtX(e.clientX))) },
+      { label: $t('在播放頭加標記'), action: () => useStore.getState().addMarker(useStore.getState().time) },
+    ];
+    items.push({ separator: true }, { label: $t('清除所有標記'), disabled: !markers.length, danger: true, action: () => { void clear(); } });
+    openMenu(e.clientX, e.clientY, items);
+  };
   return (
-    <div className="ruler" onPointerDown={onPointerDown} style={{ backgroundImage: `repeating-linear-gradient(90deg, color-mix(in srgb, var(--text) 7%, transparent) 0 1px, transparent 1px ${w}px)` }}>
+    <div className="ruler" onPointerDown={onPointerDown} onContextMenu={(e) => menu(e)} style={{ backgroundImage: `repeating-linear-gradient(90deg, color-mix(in srgb, var(--text) 7%, transparent) 0 1px, transparent 1px ${w}px)` }}>
       {ticks.map((s) => (
         <div key={s} className="tick" style={{ left: s * pps }}>
           {rulerLabel(s, major)}
         </div>
       ))}
       {loop && <div className="loop-region" style={{ left: loop.a * pps, width: (loop.b - loop.a) * pps }} />}
+      {markers.map((marker) => <div key={marker.id} className="ruler-marker" style={{ left: marker.t * pps, '--marker-color': marker.color || 'var(--marker)' } as React.CSSProperties}
+        title={marker.name}
+        onContextMenu={(e) => menu(e, marker.id)}
+        onDoubleClick={(e) => { e.stopPropagation(); void rename(marker.id); }}
+        onPointerDown={(e) => {
+          if (e.button !== 0) return;
+          e.stopPropagation(); e.preventDefault();
+          const x0 = e.clientX, t0 = marker.t;
+          let moved = false;
+          useStore.getState().setTime(t0);
+          listen((ev) => {
+            if (!moved && Math.abs(ev.clientX - x0) < 3) return;
+            moved = true;
+            const raw = Math.max(0, t0 + timeAtX(ev.clientX) - timeAtX(x0));
+            const grid = qf(raw);
+            const snapped = nearest(raw, snapPoints(new Set([`marker:${marker.id}`]), false)).v;
+            useStore.getState().updateMarker(marker.id, { t: snapped === raw ? grid : snapped });
+          });
+        }}
+      ><span className="marker-flag">◆</span><span className="marker-name">{marker.name}</span></div>)}
       <RulerHead pps={pps} />
     </div>
   );
@@ -2203,6 +2250,11 @@ function BeatLines({ pps }: { pps: number }) {
       {beats.map((b) => (b.down || spacing >= 24 ? <div key={b.t} className={`beat-line ${b.down ? 'down' : ''}`} style={{ transform: `translateX(${b.t * pps}px)` }} /> : null))}
     </>
   );
+}
+
+function MarkerLines({ pps }: { pps: number }) {
+  const markers = useStore((s) => s.markers);
+  return <>{markers.map((m) => <div key={m.id} className="marker-line" style={{ transform: `translateX(${m.t * pps}px)`, '--marker-color': m.color || 'var(--marker)' } as React.CSSProperties} />)}</>;
 }
 
 function RulerHead({ pps }: { pps: number }) {

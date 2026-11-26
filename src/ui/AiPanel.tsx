@@ -1,14 +1,16 @@
 import { $t, displayName } from '../i18n';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { BookOpen, Check, CircleAlert, Copy, ExternalLink, Eye, EyeOff, Image as ImageIcon, Info, LoaderCircle, Paperclip, Plus, RefreshCw, Send, Settings, Sparkles, Square, Trash2, Wand2, Zap } from 'lucide-react';
+import { BookOpen, Check, Clapperboard, CircleAlert, Copy, ExternalLink, Eye, EyeOff, Image as ImageIcon, Info, LoaderCircle, Paperclip, Plus, RefreshCw, Send, Settings, Sparkles, Square, Trash2, Wand2, X, Zap } from 'lucide-react';
 import {
-  MAX_FIXES, aiErrorText, applyChatProposalsToast, clearChat, refreshModels, sendChat, stopChat, useAiChat, useAiModels, useAiSettings,
+  MAX_FIXES, aiErrorText, applyChatProposalsToast, clearChat, isApplied, rewindChat, stepsSince, refreshModels, sendChat, stopChat, useAiChat, useAiModels, useAiSettings,
   type ChatMsg,
 } from '../ai/assistant';
 import { codeBlocks, detectKind, guessName, validateModule } from '../ai/validate';
 import { currentModule, openNewModule, setModuleCode, useCodeEditor } from './CodePanel';
-import { toast } from './uiStore';
+import { openMenu, toast } from './uiStore';
 import { useStore } from '../store';
+import { useHistory } from '../engine/history';
+import { useAutoEdit } from '../engine/autoEditApply';
 import { Switch, ToggleChip } from './Toggle';
 
 const KEY_URL = 'https://aistudio.google.com/apikey';
@@ -202,12 +204,13 @@ function CodeCard({ code, lang, live, msg }: { code: string; lang: string; live:
 function ProposalCard({ msg }: { msg: ChatMsg }) {
   const list = msg.proposals!;
   const apply = () => applyChatProposalsToast(msg.id);
+  useHistory((h) => h.ver); // 復原 / 重做後重新判斷「已套用」
   return (
     <div className="ai-code">
       <div className="ai-code-head">
         <span className="ai-code-lang">{$t('修改')}</span>
         <span className="spacer" />
-        {msg.applied ? (
+        {isApplied(msg) ? (
           <span className="ok-line"><Check size={12} /> {$t('已套用')}</span>
         ) : (
           <button className="btn small-h" disabled={!!msg.streaming} onClick={apply}><Wand2 size={12} /> {$t('套用')}</button>
@@ -234,8 +237,19 @@ function MsgBody({ msg }: { msg: ChatMsg }) {
 
 function Message({ msg }: { msg: ChatMsg }) {
   if (msg.role === 'user') {
+    const menu = (e: React.MouseEvent) => {
+      e.preventDefault();
+      const sel = getSelection()?.toString();
+      const steps = stepsSince(msg);
+      openMenu(e.clientX, e.clientY, [
+        { label: $t('複製'), action: () => navigator.clipboard?.writeText(sel || msg.text).then(() => toast($t('已複製'))) },
+        { separator: true },
+        { label: $t('從這裡重來'), action: () => rewindChat(msg.id) },
+        { label: steps ? $t('從這裡重來並復原 {0} 步', steps) : $t('從這裡重來並復原修改'), action: steps ? () => rewindChat(msg.id, true) : undefined, danger: true },
+      ]);
+    };
     return (
-      <div className="ai-msg user">
+      <div className="ai-msg user" onContextMenu={menu}>
         <div className="ai-bubble">
           {msg.attach && <span className="ai-chip" title={msg.attach.code}><Paperclip size={11} /> {msg.attach.name}</span>}
           {msg.image && <img className="ai-shot" src={msg.image} alt="" />}
@@ -281,8 +295,13 @@ export function AiPanel() {
   const { msgs, busy } = useAiChat();
   const [setup, setSetup] = useState(false);
   const [text, setText] = useState('');
+  // 從這裡重來：訊息放回輸入框
+  const draft = useAiChat((s) => s.draft);
+  useEffect(() => { if (draft) setText(draft.text); }, [draft?.n]); // eslint-disable-line react-hooks/exhaustive-deps
   const [attachOn, setAttachOn] = useState(true);
   const [frameOn, setFrameOn] = useState(false);
+  const director = useAutoEdit((x) => x.director);
+  const directorNote = useAutoEdit((x) => x.directorNote);
   const autoOn = useAiSettings((s) => s.auto);
   const setAi = useAiSettings((s) => s.set);
   // 程式碼分頁目前打開的模組（可以附加到問題裡）
@@ -357,6 +376,15 @@ export function AiPanel() {
           <ToggleChip v={autoOn} on={(v) => setAi({ auto: v })} title={$t('AI 提議的修改直接套用')}>
             <Zap size={11} /> {$t('自動套用')}
           </ToggleChip>
+          <ToggleChip v={director} on={(v) => useAutoEdit.getState().set({ director: v })} title={directorNote || $t('自動剪輯時 AI 先看過素材再分配')}>
+            <Clapperboard size={11} /> {$t('AI 導演')}
+          </ToggleChip>
+          {director && directorNote && (
+            <span className="ai-chip ai-note" title={directorNote}>
+              <span>{directorNote}</span>
+              <button title={$t('清除指示')} onClick={() => useAutoEdit.getState().set({ directorNote: '' })}><X size={10} /></button>
+            </span>
+          )}
         </div>
         <div className="ai-input-row">
           <textarea

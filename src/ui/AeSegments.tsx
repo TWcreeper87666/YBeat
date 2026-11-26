@@ -1,6 +1,6 @@
 /**
  * 自動剪輯的素材清單：從素材分頁把影片 / 圖片拖到自動剪輯分頁 → 選範圍加入（按住 Alt = 整段）。
- * 同一支影片可以加很多段，片段可以改名。清單是空的 = 用素材庫全部（清單上照樣列出每個素材）。
+ * 同一支影片可以加很多段，片段可以改名。「全部素材」時清單列出素材庫每個素材；改了任何一列就變成自選清單（可以清空）。
  */
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
@@ -10,10 +10,10 @@ import { $t } from '../i18n';
 import { mediaUsable, uid, useStore, type Media } from '../store';
 import { tc } from '../engine/rulerTicks';
 import { footage, useAutoEdit, wholeSeg, type AeSeg } from '../engine/autoEditSettings';
-import { useLibFocus } from './uiStore';
-import { useDock } from './Dock';
+import { revealMedia, useDock } from './Dock';
 import { RangePicker, isFullCrop, type Crop } from './RangePicker';
-import { openSource, useSource } from './SourcePanel';
+import { openSource, pausePreviews, useSource } from './SourcePanel';
+import { focusLibrary } from './uiStore';
 
 export const roleName = (k: string) => ({ intro: $t('開頭'), build: $t('鋪陳'), drop: $t('高潮'), body: $t('主體'), outro: $t('結尾') } as Record<string, string>)[k] ?? k;
 
@@ -22,15 +22,16 @@ interface RangeReq { mediaId: string; segId?: string; a: number; b: number; queu
 const useRange = create<{ req: RangeReq | null }>(() => ({ req: null }));
 
 const segsNow = () => useAutoEdit.getState().segs;
-const setSegs = (segs: AeSeg[]) => useAutoEdit.getState().set({ segs });
-/** 清單是空的（= 素材庫全部）時，先把素材庫展開成整段的片段，再做修改 */
-const explicit = (): AeSeg[] => (segsNow().length ? segsNow() : footage(useStore.getState()).map((m) => wholeSeg(m, uid())));
+const setSegs = (segs: AeSeg[]) => { pausePreviews(); useAutoEdit.getState().set({ segs, pick: 'list' }); };
+const listMode = () => useAutoEdit.getState().pick === 'list';
+/** 「全部素材」時，先把素材庫展開成整段的片段，再做修改 */
+const explicit = (): AeSeg[] => (listMode() ? segsNow() : footage(useStore.getState()).map((m) => wholeSeg(m, uid())));
 /**
  * 加進清單：清單是空的（= 素材庫全部）時先展開成整段，同一個素材的那一列換成新加的（位置不變）；
  * 已經有一模一樣的（同素材、同範圍）就不重複加
  */
 function addSegs(list: AeSeg[]) {
-  const implicit = !segsNow().length;
+  const implicit = !listMode();
   const out: AeSeg[] = [];
   const rest = [...list];
   for (const g of explicit()) {
@@ -48,12 +49,16 @@ export function dropToAutoEdit(ids: string[], all: boolean) {
   const list = ids.map((id) => media.find((m) => m.id === id)).filter((m): m is Media => mediaUsable(m) && m.kind !== 'audio');
   if (!list.length) return;
   useDock.getState().activatePanel('auto');
+  // 素材分頁也選中拖進來的；預覽先停
+  focusLibrary(list.map((m) => m.id));
+  pausePreviews();
   const videos = list.filter((m) => m.kind === 'video');
   if (all || list.length > 1 || !videos.length) return addSegs(list.map((m) => wholeSeg(m, uid())));
   openRange(videos[0]);
 }
 
 function openRange(m: Media, seg?: AeSeg, queue: string[] = [], implicit = false) {
+  pausePreviews();
   useRange.setState({ req: { mediaId: m.id, segId: seg?.id, a: seg?.a ?? 0, b: seg?.b ?? m.duration, queue, implicit } });
 }
 
@@ -63,12 +68,13 @@ const fmt = (t: number) => tc(t);
 
 export function SegList() {
   const segs = useAutoEdit((x) => x.segs);
+  const list = useAutoEdit((x) => x.pick === 'list');
   const direction = useAutoEdit((x) => (x.director ? x.direction : null));
   const media = useStore((x) => x.media);
   const src = useSource((x) => (x.open ? `${x.mediaId}:${x.range?.join('-') ?? ''}` : null));
   const [renaming, setRenaming] = useState<string | null>(null);
-  // 清單空的 = 素材庫全部（每個素材一列，id = 素材 id）
-  const rows: { seg: AeSeg; m: Media; implicit: boolean }[] = segs.length
+  // 全部素材：每個素材一列（id = 素材 id）
+  const rows: { seg: AeSeg; m: Media; implicit: boolean }[] = list
     ? segs.flatMap((g) => { const m = media.find((x) => x.id === g.mediaId); return m ? [{ seg: g, m, implicit: false }] : []; })
     : footage({ ...useStore.getState(), media }).map((m) => ({ seg: wholeSeg(m, m.id), m, implicit: true }));
 
@@ -78,13 +84,10 @@ export function SegList() {
     const g = row.implicit ? list.find((x) => x.mediaId === row.seg.mediaId) : list.find((x) => x.id === row.seg.id);
     if (g) setSegs(fn(list, g));
   };
-  const preview = (g: AeSeg, m: Media, video: boolean) =>
-    openSource(m.id, video && (g.a > 0 || g.b < m.duration - 0.01) ? [g.a, g.b] : null, g.name ?? null);
-  const reveal = (m: Media) => {
-    useDock.getState().activatePanel('media');
-    useLibFocus.setState((s) => ({ id: m.id, n: s.n + 1 }));
-  };
-  if (!rows.length) return <div className="ae-empty">{$t('沒有可用的素材')}</div>;
+  /** 選取一列 = 在預覽面板看（片段只循環播那一段，有裁切就顯示框）；autoplay = false：只選取、不播（例如按鉛筆編輯） */
+  const preview = (g: AeSeg, m: Media, video: boolean, autoplay = true) =>
+    openSource(m.id, video && (g.a > 0 || g.b < m.duration - 0.01) ? [g.a, g.b] : null, g.name ?? null, { crop: g.crop && !isFullCrop(g.crop) ? g.crop : null, autoplay });
+  if (!rows.length) return <div className="ae-empty">{list ? $t('把素材拖到這裡') : $t('沒有可用的素材')}</div>;
   return (
     <div className="ae-segs">
       {rows.map((row) => {
@@ -120,9 +123,9 @@ export function SegList() {
             {g.crop && <CropIcon size={11} className="ae-crop" aria-label={$t('已裁切')} />}
             <span className="ae-stat">{!video ? $t('圖片') : ranged ? `${fmt(g.a)} – ${fmt(g.b)}` : fmt(m.duration)}</span>
             <span className="ae-seg-btns" onClick={(e) => e.stopPropagation()}>
-              {video && <button className="ec-icon" title={$t('調整範圍')} onClick={() => openRange(m, row.implicit ? undefined : g, [], row.implicit)}><Pencil size={12} /></button>}
-              <button className="ec-icon" title={$t('在素材分頁顯示')} onClick={() => reveal(m)}><Images size={12} /></button>
-              <button className="ec-icon" title={$t('移除')} disabled={rows.length <= 1} onClick={() => edit(row, (list, x) => list.filter((y) => y !== x))}><X size={12} /></button>
+              {video && <button className="ec-icon" title={$t('調整範圍')} onClick={() => { preview(g, m, video, false); openRange(m, row.implicit ? undefined : g, [], row.implicit); }}><Pencil size={12} /></button>}
+              <button className="ec-icon" title={$t('在素材分頁顯示')} onClick={() => revealMedia(m.id)}><Images size={12} /></button>
+              <button className="ec-icon" title={$t('移除')} onClick={() => edit(row, (list, x) => list.filter((y) => y !== x))}><X size={12} /></button>
             </span>
           </div>
         );
@@ -151,8 +154,13 @@ function RangeDialog({ req, m }: { req: RangeReq; m: Media }) {
   const commit = (a: number, b: number, c?: Crop) => {
     const crop = isFullCrop(c) ? undefined : c;
     if (req.segId) setSegs(segsNow().map((g) => (g.id === req.segId ? { ...g, a, b, crop } : g)));
-    else if (req.implicit && !segsNow().length) setSegs(explicit().map((g) => (g.mediaId === m.id ? { ...g, a, b, crop } : g)));
+    else if (req.implicit && !listMode()) setSegs(explicit().map((g) => (g.mediaId === m.id ? { ...g, a, b, crop } : g)));
     else addSegs([{ id: uid(), mediaId: m.id, a, b, ...(crop ? { crop } : {}) }]);
+    // 預覽面板正在看這個片段（按鉛筆編輯時選取的）：換成改好的範圍 / 裁切框
+    if (req.segId || req.implicit) {
+      const src = useSource.getState();
+      if (src.open && src.mediaId === m.id) openSource(m.id, a > 0 || b < m.duration - 0.01 ? [a, b] : null, src.label, { crop: crop ?? null, autoplay: false });
+    }
   };
   const initCrop = req.segId ? segsNow().find((g) => g.id === req.segId)?.crop : undefined;
   return <RangePicker m={m} init={{ a: req.a, b: req.b }} initCrop={initCrop} crop others={others} editing={!!req.segId} onCommit={commit} onClose={close} />;

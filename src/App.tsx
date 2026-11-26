@@ -1,6 +1,6 @@
 import { $t, LANGS, lang, saveLang, type Lang } from './i18n';
 import { Check, CircleDot, LoaderCircle } from 'lucide-react';
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { FORMATS, formatLabel, projectDuration, useStore } from './store';
 import { InspectorPanel, MediaPanel, ModulePanel, TextPanel } from './ui/LeftPanel';
@@ -22,10 +22,11 @@ import { fps } from './engine/rulerTicks';
 import { copyHits, copyKeys, cutHits, deleteSelectedHit, deleteSelectedKey, duplicateHits, hitEdge, hitsFocused, keysFocused, navHit, navHitEdge, nudgeHits, nudgeKeys, pasteHits, pasteKeys, selectAllHits, selectAllKeys, splitHit, trimHit } from './ui/EffectControls';
 import { ShapeDrawerHost } from './ui/ShapeDrawer';
 import { SHORTCUTS, TUTORIAL } from './ui/helpText';
-import { useLayout, toast, setBusy, stopPreviewFx, confirmDialog, openMenu, useConfirm, type MenuItem } from './ui/uiStore';
+import { useLayout, toast, setBusy, stopPreviewFx, confirmDialog, promptDialog, openMenu, useConfirm, type MenuItem } from './ui/uiStore';
+import { formatBytes, measureUsage, wipeAllData, type Usage } from './engine/storageUsage';
 import { DragNumber } from './ui/DragNumber';
 import { OVERLAY_DEFAULT, usePrefs, type OverlayColors } from './prefs';
-import { Globe, Settings } from 'lucide-react';
+import { Eye, Film, Folder, Globe, Keyboard, Languages, Palette, Search, Settings, X } from 'lucide-react';
 import { downloadBlob, exportMp4 } from './engine/exporter';
 import { loadDemo } from './engine/demo';
 import { beginHistoryTransaction, endHistoryTransaction, stepsFrom, undo, redo, useHistory } from './engine/history';
@@ -103,36 +104,114 @@ function ExportDialog({ close }: { close: () => void }) {
   );
 }
 
-function TutorialDialog({ close }: { close: () => void }) {
+/** 「Ctrl+Shift+G / Ctrl+G」→ 一顆一顆的按鍵 */
+function Keys({ k }: { k: string }) {
+  const alts = k.split(/\s*[\/、]\s*/).filter(Boolean);
   return (
-    <div className="dialog sheet tutorial">
-      <h3>{$t('使用教學')}</h3>
-      <div className="dialog-body tutorial-body">
-        {TUTORIAL.map((sec) => (
-          <section key={sec.title}>
-            <h4>{sec.title}</h4>
-            <ul>{sec.items.map((it) => <li key={it}>{it}</li>)}</ul>
-          </section>
-        ))}
-        <p className="muted small">{$t('所有快捷鍵請看「說明 → 快捷鍵一覽」（F1）。')}</p>
-      </div>
-      <div className="dialog-actions"><button className="btn primary" onClick={close}>{$t('關閉')}</button></div>
-    </div>
+    <span className="help-keys">
+      {alts.map((alt, i) => (
+        <Fragment key={i}>
+          {i > 0 && <span className="help-or">/</span>}
+          {alt.split(/\+(?=.)/).map((part, j) => <kbd key={j}>{part}</kbd>)}
+        </Fragment>
+      ))}
+    </span>
   );
 }
 
-function ShortcutsDialog({ close }: { close: () => void }) {
+/** 搜尋字標出來 */
+function Hl({ text, q }: { text: string; q: string }) {
+  if (!q) return <>{text}</>;
+  const lo = text.toLowerCase();
+  const out: ReactNode[] = [];
+  let i = 0;
+  for (let j = lo.indexOf(q); j >= 0; j = lo.indexOf(q, i)) {
+    if (j > i) out.push(text.slice(i, j));
+    out.push(<mark key={j}>{text.slice(j, j + q.length)}</mark>);
+    i = j + q.length;
+  }
+  out.push(text.slice(i));
+  return <>{out}</>;
+}
+
+const KEYS_SEC = -1;
+
+/** 說明視窗：左邊章節、右邊內容，上方搜尋（教學和快捷鍵一起找） */
+function HelpDialog({ close, start }: { close: () => void; start: 'tutorial' | 'shortcuts' }) {
+  const [sec, setSec] = useState(start === 'shortcuts' ? KEYS_SEC : 0);
+  const [query, setQuery] = useState('');
+  const q = query.trim().toLowerCase();
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { searchRef.current?.focus(); }, []);
+  useEffect(() => { bodyRef.current?.scrollTo({ top: 0 }); }, [sec, q]);
+
+  const hits = q
+    ? {
+        tut: TUTORIAL.map((s) => ({ title: s.title, items: s.items.filter((it) => it.toLowerCase().includes(q) || s.title.toLowerCase().includes(q)) })).filter((s) => s.items.length),
+        keys: SHORTCUTS.filter(([k, v]) => k.toLowerCase().includes(q) || v.toLowerCase().includes(q)),
+      }
+    : null;
+  const keyList = (list: [string, string][]) => (
+    <div className="help-keys-list">
+      {list.map(([k, v]) => (
+        <div key={k + v} className="help-key-row"><Keys k={k} /><span><Hl text={v} q={q} /></span></div>
+      ))}
+    </div>
+  );
+
   return (
-    <div className="dialog sheet">
-      <h3>{$t('快捷鍵')}</h3>
-      <div className="dialog-body">
-        <div className="shortcut-grid">
-          {SHORTCUTS.map(([k, v]) => (
-            <div key={k} className="sc-row"><kbd>{k}</kbd><span>{v}</span></div>
+    <div className="dialog help-win">
+      <div className="help-head">
+        <h3>{$t('說明')}</h3>
+        <label className="lib-search help-search">
+          <Search size={13} />
+          <input ref={searchRef} value={query} placeholder={$t('搜尋…')} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && query && (e.stopPropagation(), setQuery(''))} />
+          {query && <button onClick={() => setQuery('')}><X size={11} /></button>}
+        </label>
+        <button className="ec-icon" title={$t('關閉')} onClick={close}><X size={15} /></button>
+      </div>
+      <div className="help-main">
+        <nav className="help-nav">
+          {TUTORIAL.map((s, i) => (
+            <button key={s.title} className={!q && sec === i ? 'on' : ''} onClick={() => { setQuery(''); setSec(i); }}>{s.title}</button>
           ))}
+          <div className="help-nav-sep" />
+          <button className={!q && sec === KEYS_SEC ? 'on' : ''} onClick={() => { setQuery(''); setSec(KEYS_SEC); }}><Keyboard size={13} /> {$t('快捷鍵')}</button>
+        </nav>
+        <div ref={bodyRef} className="help-body">
+          {hits ? (
+            hits.tut.length || hits.keys.length ? (
+              <>
+                {hits.tut.map((s) => (
+                  <section key={s.title}>
+                    <h4>{s.title}</h4>
+                    <ul>{s.items.map((it) => <li key={it}><Hl text={it} q={q} /></li>)}</ul>
+                  </section>
+                ))}
+                {hits.keys.length > 0 && (
+                  <section>
+                    <h4>{$t('快捷鍵')}</h4>
+                    {keyList(hits.keys)}
+                  </section>
+                )}
+              </>
+            ) : (
+              <p className="help-empty muted">{$t('找不到符合的說明')}</p>
+            )
+          ) : sec === KEYS_SEC ? (
+            <section>
+              <h4>{$t('快捷鍵')}</h4>
+              {keyList(SHORTCUTS)}
+            </section>
+          ) : (
+            <section>
+              <h4>{TUTORIAL[sec].title}</h4>
+              <ul>{TUTORIAL[sec].items.map((it) => <li key={it}>{it}</li>)}</ul>
+            </section>
+          )}
         </div>
       </div>
-      <div className="dialog-actions"><button className="btn primary" onClick={close}>{$t('關閉')}</button></div>
     </div>
   );
 }
@@ -193,7 +272,7 @@ function SaveLayoutDialog({ close }: { close: () => void }) {
 const QUALITIES = [1, 0.75, 0.5, 0.33];
 
 /** 設定的一項：標題、副標題，下面是輸入；inline = 輸入放右邊（數值類） */
-function SetRow({ label, desc, inline, children }: { label: string; desc: ReactNode; inline?: boolean; children: ReactNode }) {
+function SetRow({ label, desc, inline, children }: { label: ReactNode; desc: ReactNode; inline?: boolean; children: ReactNode }) {
   return (
     <div className={`set-row ${inline ? 'inline' : ''}`}>
       <div className="set-text">
@@ -201,6 +280,44 @@ function SetRow({ label, desc, inline, children }: { label: string; desc: ReactN
         <div className="set-desc">{desc}</div>
       </div>
       <div className="set-ctl">{children}</div>
+    </div>
+  );
+}
+
+/** 設定 → 專案 → 儲存空間：各項用量，清除全部要確認兩次（第二次要打字） */
+function StorageUsage() {
+  const [u, setU] = useState<Usage | null>(null);
+  useEffect(() => { let live = true; void measureUsage().then((r) => live && setU(r)); return () => { live = false; }; }, []);
+  const wipe = async () => {
+    if (!await confirmDialog({ title: $t('清除所有資料？'), message: $t('專案、素材、自訂的模組 / 形狀 / 風格、快取和設定都會刪除，無法復原。'), ok: $t('繼續'), danger: true })) return;
+    const word = $t('全部刪除');
+    const v = await promptDialog({ title: $t('再確認一次'), message: $t('輸入「{0}」來確認', word), value: '', ok: $t('清除') });
+    if (v === null) return;
+    if (v.trim() !== word) return void toast($t('輸入的字不一致，沒有刪除'), 'error');
+    await wipeAllData();
+  };
+  // 長條的尺度 = 最大那項再多 25%（最大的也不會整條滿）；至少 1 MB，清空後幾百 KB 才不會佔一大段
+  const max = Math.max(1024 * 1024, 1.25 * Math.max(0, ...(u?.parts.map((p) => p.bytes) ?? [0])));
+  return (
+    <div className="storage">
+      {!u ? <span className="set-hint">{$t('計算中…')}</span> : (
+        <>
+          <div className="storage-total">
+            <b>{formatBytes(u.used ?? u.parts.reduce((s, p) => s + p.bytes, 0))}</b>
+            {u.quota !== null && <span className="set-hint">/ {$t('上限 {0}', formatBytes(u.quota))}</span>}
+          </div>
+          <div className="storage-list">
+            {u.parts.map((p) => (
+              <div key={p.label} className="storage-row">
+                <span>{p.label}</span>
+                <i><b style={{ width: `${(p.bytes / max) * 100}%` }} /></i>
+                <span className="set-hint">{formatBytes(p.bytes)}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      <button className="btn danger-fill small" onClick={() => void wipe()}>{$t('清除所有資料…')}</button>
     </div>
   );
 }
@@ -239,69 +356,90 @@ function SettingsDialog({ close }: { close: () => void }) {
       if (useStore.getState().format !== orig.format) useStore.getState().setFormat(orig.format);
     },
   };
-  return (
-    <div className="dialog sheet settings">
-      <h3>{$t('設定')}</h3>
-      <div className="dialog-body">
-        <div className="set-sec">{$t('專案')}</div>
-        <SetRow label={$t('輸出比例')} desc={<>{$t('匯出與預覽的畫面比例')} · {fmt.w} × {fmt.h}</>}>
-          <Seg className="wrap" value={FORMATS.find((f) => fmt.w === f.w && fmt.h === f.h)?.id ?? ''} on={(id) => { const f = FORMATS.find((x) => x.id === id); if (f) useStore.getState().setFormat(f); }}
-            opts={FORMATS.map((f) => ({ v: f.id, title: `${f.w} × ${f.h}`, label: <><span className="ratio-box" style={{ aspectRatio: `${f.w} / ${f.h}` }} />{f.label}</> }))} />
-        </SetRow>
-        <SetRow label={$t('自動儲存')} desc={$t('關閉後按 Ctrl+S 存檔')} inline>
-          <Switch v={P.autosave} on={(v) => P.set({ autosave: v })} />
-        </SetRow>
-        <div className="set-sec">{$t('預覽')}</div>
-        <SetRow label={$t('預覽畫質')} desc={$t('調低編輯會比較順，不影響匯出')}>
-          <Seg value={L.previewScale} on={(q) => L.set({ previewScale: q })} opts={QUALITIES.map((q) => ({ v: q, label: q === 1 ? $t('完整') : `${Math.round(q * 100)}%` }))} />
-        </SetRow>
-        <SetRow label={$t('預覽代理檔')} desc={$t('關鍵影格很稀的影片，預覽改用小副本，不影響匯出')} inline>
-          <Switch v={P.proxy} on={(v) => P.set({ proxy: v })} />
-        </SetRow>
-        <div className="set-sec">{$t('時間軸')}</div>
-        <SetRow label={$t('上層軌道顯示在')} desc={$t('疊在上面的軌道放在時間軸的哪一邊')}>
-          <Seg value={L.upperLayerAt} on={(v) => L.set({ upperLayerAt: v })} opts={[{ v: 'bottom' as const, label: $t('下方') }, { v: 'top' as const, label: $t('上方') }]} />
-        </SetRow>
-        <SetRow label={$t('軌道高度')} desc={$t('預設與新增的軌道')}>
-          <Seg value={L.trackSize} on={(k) => L.set({ trackSize: k })} opts={[{ v: 's' as const, label: $t('小') }, { v: 'm' as const, label: $t('中') }, { v: 'l' as const, label: $t('大') }]} />
-        </SetRow>
-        <SetRow label={$t('滾輪捲動方向')} desc={$t('在時間軸上直接滾動滾輪時')}>
-          <Seg value={L.wheelScroll === 'vertical' ? 'vertical' : 'horizontal'} on={(v) => L.set({ wheelScroll: v })} opts={[{ v: 'horizontal' as const, label: $t('水平') }, { v: 'vertical' as const, label: $t('垂直') }]} />
-        </SetRow>
-        <SetRow label={$t('圖片 / 色板 / 文字預設長度')} desc={$t('新加入時的長度')} inline>
-          <DragNumber value={P.stillDur} min={0.1} max={60} step={0.1} def={2} suffix=" s" onChange={(v) => P.set({ stillDur: Math.round(v * 100) / 100 })} />
-        </SetRow>
-        <SetRow label={$t('轉場預設長度')} desc={$t('新加入轉場時的長度')} inline>
-          <DragNumber value={P.transDur} min={0.05} max={5} step={0.05} def={0.4} suffix=" s" onChange={(v) => P.set({ transDur: Math.round(v * 100) / 100 })} />
-        </SetRow>
-        <SetRow label={$t('時間軸格線')} desc={$t('拖曳、吸附、節拍的最小單位')}>
-          <Seg value={L.timeGrid} on={(n) => L.set({ timeGrid: n })} opts={([30, 60] as const).map((n) => ({ v: n, label: `1/${n} s` }))} />
-        </SetRow>
-        <SetRow label={$t('節拍提前')} desc={$t('節拍格線比聲音早一點，看起來才會對拍')} inline>
+  type Row = { label: string; desc: string; inline?: boolean; ctl: ReactNode };
+  const secs: { title: string; icon: ReactNode; rows: Row[] }[] = [
+    { title: $t('專案'), icon: <Folder size={13} />, rows: [
+      { label: $t('輸出比例'), desc: `${$t('匯出與預覽的畫面比例')} · ${fmt.w} × ${fmt.h}`, ctl: (
+        <Seg className="wrap" value={FORMATS.find((f) => fmt.w === f.w && fmt.h === f.h)?.id ?? ''} on={(id) => { const f = FORMATS.find((x) => x.id === id); if (f) useStore.getState().setFormat(f); }}
+          opts={FORMATS.map((f) => ({ v: f.id, title: `${f.w} × ${f.h}`, label: <><span className="ratio-box" style={{ aspectRatio: `${f.w} / ${f.h}` }} />{f.label}</> }))} />
+      ) },
+      { label: $t('自動儲存'), desc: $t('關閉後按 Ctrl+S 存檔'), inline: true, ctl: <Switch v={P.autosave} on={(v) => P.set({ autosave: v })} /> },
+      { label: $t('儲存空間'), desc: $t('這個網站在瀏覽器裡用掉的空間'), ctl: <StorageUsage /> },
+    ] },
+    { title: $t('預覽'), icon: <Eye size={13} />, rows: [
+      { label: $t('預覽畫質'), desc: $t('調低編輯會比較順，不影響匯出'), ctl: <Seg value={L.previewScale} on={(q) => L.set({ previewScale: q })} opts={QUALITIES.map((q) => ({ v: q, label: q === 1 ? $t('完整') : `${Math.round(q * 100)}%` }))} /> },
+      { label: $t('預覽代理檔'), desc: $t('關鍵影格很稀的影片，預覽改用小副本，不影響匯出'), inline: true, ctl: <Switch v={P.proxy} on={(v) => P.set({ proxy: v })} /> },
+    ] },
+    { title: $t('時間軸'), icon: <Film size={13} />, rows: [
+      { label: $t('上層軌道顯示在'), desc: $t('疊在上面的軌道放在時間軸的哪一邊'), ctl: <Seg value={L.upperLayerAt} on={(v) => L.set({ upperLayerAt: v })} opts={[{ v: 'bottom' as const, label: $t('下方') }, { v: 'top' as const, label: $t('上方') }]} /> },
+      { label: $t('軌道高度'), desc: $t('預設與新增的軌道'), ctl: <Seg value={L.trackSize} on={(k) => L.set({ trackSize: k })} opts={[{ v: 's' as const, label: $t('小') }, { v: 'm' as const, label: $t('中') }, { v: 'l' as const, label: $t('大') }]} /> },
+      { label: $t('滾輪捲動方向'), desc: $t('在時間軸上直接滾動滾輪時'), ctl: <Seg value={L.wheelScroll === 'vertical' ? 'vertical' : 'horizontal'} on={(v) => L.set({ wheelScroll: v })} opts={[{ v: 'horizontal' as const, label: $t('水平') }, { v: 'vertical' as const, label: $t('垂直') }]} /> },
+      { label: $t('圖片 / 色板 / 文字預設長度'), desc: $t('新加入時的長度'), inline: true, ctl: <DragNumber value={P.stillDur} min={0.1} max={60} step={0.1} def={2} suffix=" s" onChange={(v) => P.set({ stillDur: Math.round(v * 100) / 100 })} /> },
+      { label: $t('轉場預設長度'), desc: $t('新加入轉場時的長度'), inline: true, ctl: <DragNumber value={P.transDur} min={0.05} max={5} step={0.05} def={0.4} suffix=" s" onChange={(v) => P.set({ transDur: Math.round(v * 100) / 100 })} /> },
+      { label: $t('時間軸格線'), desc: $t('拖曳、吸附、節拍的最小單位'), ctl: <Seg value={L.timeGrid} on={(n) => L.set({ timeGrid: n })} opts={([30, 60] as const).map((n) => ({ v: n, label: `1/${n} s` }))} /> },
+      { label: $t('節拍提前'), desc: $t('節拍格線比聲音早一點，看起來才會對拍'), inline: true, ctl: (
+        <>
           <span className="set-hint">≈ {Math.round((L.beatLead / 60) * 1000)} ms</span>
           <DragNumber value={L.beatLead} min={0} max={30} step={1} decimals={0} def={4} suffix=" / 60 s" onChange={(v) => L.set({ beatLead: Math.round(v) })} />
-        </SetRow>
-        <div className="set-sec">{$t('外觀')}</div>
-        <SetRow label={$t('主題')} desc={$t('介面的深淺')}>
-          <Seg value={P.theme} on={(v) => P.set({ theme: v })} opts={[{ v: 'dark' as const, label: $t('深色') }, { v: 'light' as const, label: $t('淺色') }, { v: 'system' as const, label: $t('跟隨系統') }]} />
-        </SetRow>
-        <SetRow label={$t('預覽框顏色')} desc={$t('疊在預覽畫面上的框')}>
-          <div className="ov-colors">
-            {OVERLAY_KEYS.map(([k, label]) => (
-              <label key={k} className="ov-color">
-                <input type="color" className="color" value={(P.overlay ?? OVERLAY_DEFAULT)[k]} onChange={(e) => P.set({ overlay: { ...OVERLAY_DEFAULT, ...P.overlay, [k]: e.target.value } })} />
-                {label}
-              </label>
-            ))}
-            <button className="btn small" disabled={OVERLAY_KEYS.every(([k]) => (P.overlay ?? OVERLAY_DEFAULT)[k] === OVERLAY_DEFAULT[k])} onClick={() => P.set({ overlay: OVERLAY_DEFAULT })}>{$t('重設')}</button>
-          </div>
-        </SetRow>
-        <div className="set-sec">{$t('語言')} / Language</div>
-        <SetRow label={$t('介面語言')} desc={$t('切換後會重新載入')}>
-          <Seg value={lang} on={changeLanguage} opts={LANGS.map((l) => ({ v: l.id, label: l.label }))} />
-        </SetRow>
+        </>
+      ) },
+    ] },
+    { title: $t('外觀'), icon: <Palette size={13} />, rows: [
+      { label: $t('主題'), desc: $t('介面的深淺'), ctl: <Seg value={P.theme} on={(v) => P.set({ theme: v })} opts={[{ v: 'dark' as const, label: $t('深色') }, { v: 'light' as const, label: $t('淺色') }, { v: 'system' as const, label: $t('跟隨系統') }]} /> },
+      { label: $t('預覽框顏色'), desc: $t('疊在預覽畫面上的框'), ctl: (
+        <div className="ov-colors">
+          {OVERLAY_KEYS.map(([k, label]) => (
+            <label key={k} className="ov-color">
+              <input type="color" className="color" value={(P.overlay ?? OVERLAY_DEFAULT)[k]} onChange={(e) => P.set({ overlay: { ...OVERLAY_DEFAULT, ...P.overlay, [k]: e.target.value } })} />
+              {label}
+            </label>
+          ))}
+          <button className="btn small" disabled={OVERLAY_KEYS.every(([k]) => (P.overlay ?? OVERLAY_DEFAULT)[k] === OVERLAY_DEFAULT[k])} onClick={() => P.set({ overlay: OVERLAY_DEFAULT })}>{$t('重設')}</button>
+        </div>
+      ) },
+    ] },
+    { title: `${$t('語言')} / Language`, icon: <Languages size={13} />, rows: [
+      { label: $t('介面語言'), desc: $t('切換後會重新載入'), ctl: <Seg value={lang} on={changeLanguage} opts={LANGS.map((l) => ({ v: l.id, label: l.label }))} /> },
+    ] },
+  ];
+  const [sec, setSec] = useState(0);
+  const [query, setQuery] = useState('');
+  const q = query.trim().toLowerCase();
+  const searchRef = useRef<HTMLInputElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { searchRef.current?.focus(); }, []);
+  useEffect(() => { bodyRef.current?.scrollTo({ top: 0 }); }, [sec, q]);
+  const shown = q
+    ? secs.map((s) => ({ ...s, rows: s.rows.filter((r) => `${s.title} ${r.label} ${r.desc}`.toLowerCase().includes(q)) })).filter((s) => s.rows.length)
+    : [secs[sec]];
+  return (
+    <div className="dialog help-win settings-win">
+      <div className="help-head">
+        <h3>{$t('設定')}</h3>
+        <label className="lib-search help-search">
+          <Search size={13} />
+          <input ref={searchRef} value={query} placeholder={$t('搜尋…')} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => e.key === 'Escape' && query && (e.stopPropagation(), setQuery(''))} />
+          {query && <button onClick={() => setQuery('')}><X size={11} /></button>}
+        </label>
       </div>
-      <div className="dialog-actions">
+      <div className="help-main">
+        <nav className="help-nav">
+          {secs.map((s, i) => (
+            <button key={s.title} className={!q && sec === i ? 'on' : ''} onClick={() => { setQuery(''); setSec(i); }}>{s.icon} {s.title}</button>
+          ))}
+        </nav>
+        <div ref={bodyRef} className="help-body set-body">
+          {shown.length ? shown.map((s) => (
+            <section key={s.title}>
+              <h4>{s.title}</h4>
+              {s.rows.map((r) => (
+                <SetRow key={r.label} label={<Hl text={r.label} q={q} />} desc={<Hl text={r.desc} q={q} />} inline={r.inline}>{r.ctl}</SetRow>
+              ))}
+            </section>
+          )) : <p className="help-empty muted">{$t('找不到符合的設定')}</p>}
+        </div>
+      </div>
+      <div className="dialog-actions help-foot">
         <button className="btn" onClick={() => void cancelDialog()}>{$t('取消')}</button>
         <button className="btn primary" title={$t('完成 (Ctrl+Enter)')} onClick={close}>{$t('完成')}</button>
       </div>
@@ -344,8 +482,7 @@ function Dialogs() {
   return (
     <div className="overlay" onPointerDown={(e) => e.target === e.currentTarget && void cancelDialog()}>
       {d === 'export' && <ExportDialog close={close} />}
-      {d === 'shortcuts' && <ShortcutsDialog close={close} />}
-      {d === 'tutorial' && <TutorialDialog close={close} />}
+      {(d === 'shortcuts' || d === 'tutorial') && <HelpDialog key={d} close={close} start={d} />}
       {d === 'new' && <NewDialog close={close} />}
       {d === 'saveLayout' && <SaveLayoutDialog close={close} />}
       {d === 'demo' && <DemoDialog close={close} />}
@@ -399,8 +536,8 @@ function menus(): { label: string; items: () => MenuItem[] }[] {
       items: () => [
         { label: $t('新專案…'), action: () => openDialog('new') },
         { label: $t('匯入媒體…'), shortcut: 'Ctrl+O', action: async () => importFiles(await pickFiles()) },
-        { label: $t('匯入專案包…'), action: async () => { const [file] = await pickFiles('.ybeat', false); if (!file) return; if (!await confirmDialog({ title: $t('匯入專案包？'), message: $t('目前專案會被取代，請先匯出專案包備份。'), ok: $t('匯入') })) return; try { await importProjectPack(file, (n, total) => setBusy($t('匯入專案包 {0}/{1}', n, total))); toast($t('專案包已匯入')); } catch (e) { toast($t('匯入失敗：{0}', e instanceof Error ? e.message : e), 'error'); } finally { setBusy(null); } } },
-        { label: $t('匯出專案包…'), action: async () => { try { downloadBlob(await exportProjectPack((n, total) => setBusy($t('匯出專案包 {0}/{1}', n, total))), 'YBeat_project.ybeat'); toast($t('專案包已匯出')); } catch (e) { toast($t('匯出失敗：{0}', e instanceof Error ? e.message : e), 'error'); } finally { setBusy(null); } } },
+        { label: $t('匯入專案包…'), action: async () => { const [file] = await pickFiles('.ybeat', false); if (!file) return; if (!await confirmDialog({ title: $t('匯入專案包？'), message: $t('目前專案會被取代，請先匯出專案包備份。'), ok: $t('匯入') })) return; try { await importProjectPack(file, (n, total) => setBusy($t('匯入專案包 {0}/{1}', n, total), n / Math.max(1, total))); toast($t('專案包已匯入')); } catch (e) { toast($t('匯入失敗：{0}', e instanceof Error ? e.message : e), 'error'); } finally { setBusy(null); } } },
+        { label: $t('匯出專案包…'), action: async () => { try { downloadBlob(await exportProjectPack((n, total) => setBusy($t('匯出專案包 {0}/{1}', n, total), n / Math.max(1, total))), 'YBeat_project.ybeat'); toast($t('專案包已匯出')); } catch (e) { toast($t('匯出失敗：{0}', e instanceof Error ? e.message : e), 'error'); } finally { setBusy(null); } } },
         { label: $t('載入示範專案…'), action: () => (projectDuration(S()) > 0 ? openDialog('demo') : loadDemo()) },
         { separator: true },
         { label: $t('立即存檔'), shortcut: 'Ctrl+S', action: () => saveNow().then(() => toast($t('已儲存'))) },
@@ -521,7 +658,7 @@ function onKey(e: KeyboardEvent) {
   if (modalOpen()) {
     if (mod && e.key.toLowerCase() === 'a') {
       e.preventDefault();
-      const body = document.querySelector('.overlay .tutorial-body');
+      const body = document.querySelector('.overlay .help-body:not(.set-body)');
       if (body) getSelection()?.selectAllChildren(body);
     }
     return;
@@ -576,6 +713,12 @@ function onKey(e: KeyboardEvent) {
     if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); return void removeTransitions(); }
   }
   if (mod) {
+    if (e.shiftKey && k === 'm') {
+      e.preventDefault();
+      const next = s.markers.find((m) => m.t > s.time + 1e-3);
+      if (next) { s.setTime(next.t); revealPlayhead(); }
+      return;
+    }
     // 時間軸：Ctrl+← / → 換片段、加 Shift 延伸選取；Ctrl+Home / End 頭尾；Ctrl+↑ / ↓ 換軌道
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); return navItem(e.key === 'ArrowLeft' ? -1 : 1, e.shiftKey); }
     if (e.key === 'Home' || e.key === 'End') { e.preventDefault(); return navEdge(e.key === 'Home' ? 'first' : 'last', e.shiftKey); }
@@ -619,7 +762,14 @@ function onKey(e: KeyboardEvent) {
     case '-': s.setPps(s.pps / 1.25); break;
     case '\\': window.dispatchEvent(new Event('timeline-fit')); break;
     default:
-      if (k === 's') s.split();
+      if (k === 'm') {
+        e.preventDefault();
+        if (e.shiftKey) {
+          const previous = s.markers.filter((m) => m.t < s.time - 1e-3);
+          if (previous.length) { s.setTime(previous[previous.length - 1].t); revealPlayhead(); }
+        } else s.addMarker(s.time);
+      }
+      else if (k === 's') s.split();
       else if (k === 'q') s.trim('start');
       else if (k === 'w') s.trim('end');
       else if (k === 'n') { s.setSnap(!s.snap); toast($t('磁吸：{0}', !s.snap ? $t('開') : $t('關'))); }

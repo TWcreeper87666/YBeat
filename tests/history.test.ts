@@ -4,7 +4,7 @@
 console.warn = () => {};
 import { strict as assert } from 'node:assert';
 import { useStore } from '../src/store';
-import { beginHistoryTransaction, endHistoryTransaction, historyPath, redo, resetHistory, settleHistory, stepsFrom, undo, useHistory } from '../src/engine/history';
+import { beginHistoryTransaction, endHistoryTransaction, historyPath, mergeIntoStep, redo, resetHistory, settleHistory, stepsFrom, undo, useHistory } from '../src/engine/history';
 
 const S = () => useStore.getState();
 /** 做一步（立刻結算，不等 400ms 合併） */
@@ -77,5 +77,21 @@ useStore.setState({ activeTrack: { kind: 'audio', idx }, selected: ['clip:gone']
 undo();
 assert.equal(S().activeTrack, null, '復原掉的軌道不再是選中的軌道');
 assert.deepEqual(S().selected, [], '多選裡不存在的項目清掉');
+
+// ── 最後一步併進前一步（AI 套用 + 產生 = 一次復原） ──
+resetHistory();
+const n2 = audioTracks();
+step(() => S().addTrack('audio'));
+const applyStep = historyPath().at(-1)!;
+step(() => S().addTrack('audio'));
+assert.equal(mergeIntoStep(applyStep), true, '前一步是 applyStep 才併');
+assert.equal(historyPath().at(-1), applyStep, '併完留下 applyStep');
+undo();
+assert.equal(audioTracks(), n2, '一次復原兩步的變更');
+assert.equal(historyPath().includes(applyStep), false);
+redo();
+assert.equal(audioTracks(), n2 + 2, '重做也是一起');
+step(() => S().addTrack('audio'));
+assert.equal(mergeIntoStep(12345), false, '前一步不是指定的就不併');
 
 console.log('PASS 復原紀錄');

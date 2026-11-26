@@ -6,6 +6,7 @@ import { mediaUsable, useStore, type Media } from '../store';
 import { $t } from '../i18n';
 import { scrubFrame, warmScrub } from '../engine/scrubCache';
 import { tc } from '../engine/rulerTicks';
+import type { Crop } from '../engine/transform';
 import { useDock } from './Dock';
 import { stopPreviewFx, useEditorWindow, usePreviewFx } from './uiStore';
 
@@ -14,20 +15,27 @@ import { stopPreviewFx, useEditorWindow, usePreviewFx } from './uiStore';
  * mediaId = 素材分頁點的素材、color = 色板分頁點的顏色（兩者只會有一個）
  * inspect：屬性面板顯示這個素材的資訊（從素材庫點開時；之後在時間軸選了別的就換回去）
  */
-export const useSource = create<{ mediaId: string | null; color: string | null; open: boolean; inspect: boolean; range: [number, number] | null; label: string | null }>(() => ({ mediaId: null, color: null, open: false, inspect: false, range: null, label: null }));
+/** crop = 顯示裁切框（唯讀，自動剪輯的片段）；autoplay = 打開就播；pauseN 變了 = 暫停 */
+export const useSource = create<{ mediaId: string | null; color: string | null; open: boolean; inspect: boolean; range: [number, number] | null; label: string | null; crop: Crop | null; autoplay: boolean; pauseN: number }>(() => ({ mediaId: null, color: null, open: false, inspect: false, range: null, label: null, crop: null, autoplay: true, pauseN: 0 }));
 
 /** 在「預覽」面板試看素材；range = 只循環播這一段（自動剪輯的片段）、label = 顯示的名稱 */
-export function openSource(mediaId: string, range: [number, number] | null = null, label: string | null = null) {
+export function openSource(mediaId: string, range: [number, number] | null = null, label: string | null = null, o: { crop?: Crop | null; autoplay?: boolean } = {}) {
   stopPreviewFx();
-  useSource.setState({ mediaId, color: null, open: true, inspect: !range, range, label });
+  useSource.setState({ mediaId, color: null, open: true, inspect: !range, range, label, crop: o.crop ?? null, autoplay: o.autoplay ?? true });
   useDock.getState().activatePanel('preview', true);
 }
 
 /** 在「預覽」面板試看顏色 */
 export function openColor(color: string) {
   stopPreviewFx();
-  useSource.setState({ mediaId: null, color, open: true, inspect: false, range: null, label: null });
+  useSource.setState({ mediaId: null, color, open: true, inspect: false, range: null, label: null, crop: null });
   useDock.getState().activatePanel('preview', true);
+}
+
+/** 暫停預覽：時間軸播放、素材試看都停 */
+export function pausePreviews() {
+  if (useStore.getState().playing) useStore.getState().setPlaying(false);
+  useSource.setState((s) => ({ pauseN: s.pauseN + 1 }));
 }
 
 /** 回到時間軸的預覽畫面 */
@@ -65,10 +73,11 @@ export function SourceOverlay() {
   const media = useStore((s) => s.media.find((m) => m.id === id));
   const range = useSource((s) => s.range);
   const label = useSource((s) => s.label);
+  const crop = useSource((s) => s.crop);
   if (!open) return null;
   if (color) return <ColorView color={color} />;
   if (!media || !mediaUsable(media)) return null;
-  return <SourceView key={`${media.id}:${range?.join('-') ?? ''}`} media={media} range={range} label={label} />;
+  return <SourceView key={`${media.id}:${range?.join('-') ?? ''}`} media={media} range={range} label={label} crop={crop} />;
 }
 
 /** 試看標籤：跟特效試看的一樣 */
@@ -108,7 +117,7 @@ export function sourceHotkey(e: KeyboardEvent): boolean {
   return true;
 }
 
-function SourceView({ media, range, label }: { media: Media; range: [number, number] | null; label: string | null }) {
+function SourceView({ media, range, label, crop }: { media: Media; range: [number, number] | null; label: string | null; crop: Crop | null }) {
   const keys = useRef<Keys | null>(null);
   const overlay = useRef<HTMLCanvasElement>(null);
   const ref = useRef<HTMLVideoElement & HTMLAudioElement>(null);
@@ -149,7 +158,8 @@ function SourceView({ media, range, label }: { media: Media; range: [number, num
       if (ov && media.kind === 'video') {
         const want = target.current;
         const stale = want !== null && (el.seeking || Math.abs(el.currentTime - want) > 0.08);
-        const bm = stale && scrubbing.current ? scrubFrame(media, want!) : null;
+        // 拖曳中、或放開後 seek 還沒完成：蓋著快取影格；附近還沒抽好就留著上一張（不要閃回舊畫面）
+        const bm = stale ? scrubFrame(media, want!) : null;
         if (bm) {
           if (ov.width !== bm.width || ov.height !== bm.height) {
             ov.width = bm.width;
@@ -159,7 +169,7 @@ function SourceView({ media, range, label }: { media: Media; range: [number, num
           g.setTransform(1, 0, 0, -1, 0, bm.height); // 快取影格是上下翻轉存的（給 WebGL 用）
           g.drawImage(bm, 0, 0);
           ov.style.display = 'block';
-        } else ov.style.display = 'none';
+        } else if (!stale) ov.style.display = 'none';
       }
       raf = requestAnimationFrame(tick);
     };
@@ -171,7 +181,7 @@ function SourceView({ media, range, label }: { media: Media; range: [number, num
     if (media.kind === 'video') warmScrub(media, range?.[0] ?? 0);
     // 打開就從頭（片段的開頭）循環播放
     el.currentTime = range?.[0] ?? 0;
-    el.play().catch(() => {});
+    if (useSource.getState().autoplay) el.play().catch(() => {});
     return () => {
       cancelAnimationFrame(raf);
       el.removeEventListener('seeked', onSeeked);
@@ -207,6 +217,10 @@ function SourceView({ media, range, label }: { media: Media; range: [number, num
     window.addEventListener('pointerup', up);
   };
 
+  // 別的地方要求暫停（例如在自動剪輯分頁改設定）
+  const pauseN = useSource((s) => s.pauseN);
+  useEffect(() => { if (pauseN) ref.current?.pause(); }, [pauseN]);
+
   const toggle = () => {
     const el = ref.current;
     if (!el) return;
@@ -234,6 +248,12 @@ function SourceView({ media, range, label }: { media: Media; range: [number, num
           <div className="src-video-wrap">
             <video ref={ref} src={media.url} playsInline loop preload="auto" onClick={toggle} />
             <canvas ref={overlay} className="src-scrub-frame" />
+            {crop && (
+              <>
+                <div className="crop-mask"><i style={cropRect(crop)} /></div>
+                <div className="crop-box readonly" style={cropRect(crop)} />
+              </>
+            )}
           </div>
         )}
         {media.kind === 'image' && <img src={media.url} alt={media.name} />}
@@ -257,6 +277,8 @@ function SourceView({ media, range, label }: { media: Media; range: [number, num
     </div>
   );
 }
+
+const cropRect = (c: Crop) => ({ left: `${c.x * 100}%`, top: `${c.y * 100}%`, width: `${c.w * 100}%`, height: `${c.h * 100}%` });
 
 function SourceWave({ media }: { media: Media }) {
   const ref = useRef<HTMLCanvasElement>(null);

@@ -1,5 +1,6 @@
 import { dropMatte } from './matte';
 import { dropFaces } from './face';
+import { dropMediaAnalysis } from './analysisStore';
 import { dropBoxTracks } from './boxTrack';
 import { colorBlob } from './colorBlob';
 import { $t } from '../i18n';
@@ -7,7 +8,7 @@ import { uid, useStore, type Media } from '../store';
 import { PEAKS_PER_SEC, computePeaks, getAudioBuffer } from './audio';
 import { deleteMediaBlob, saveMediaBlob } from './project';
 import { detachedMedia, detachedMediaOrder } from './detachedMedia';
-import { toast } from '../ui/uiStore';
+import { setBusy, toast } from '../ui/uiStore';
 
 function once(el: HTMLElement, ev: string) {
   return new Promise<void>((res, rej) => {
@@ -111,18 +112,29 @@ export async function addMediaBlob(blob: Blob, name: string) {
   return m;
 }
 
-export async function importFiles(files: FileList | File[]) {
+/** 一個一個匯入，底部顯示進度（第幾個 / 共幾個、檔名）；each：每個匯入成功的素材（例如放到時間軸） */
+export async function addMediaFiles(files: File[], each?: (m: Media) => void): Promise<{ ok: number; bad: string[] }> {
   let ok = 0;
   const bad: string[] = [];
-  for (const f of Array.from(files)) {
-    try {
-      if (await addMediaBlob(f, f.name)) ok++;
-      else bad.push(f.name);
-    } catch (e) {
-      console.warn($t('匯入失敗'), f.name, e);
-      bad.push(f.name);
+  try {
+    for (const [i, f] of files.entries()) {
+      if (files.length > 1) setBusy($t('匯入素材 {0}/{1}：{2}', i + 1, files.length, f.name), i / files.length);
+      try {
+        const m = await addMediaBlob(f, f.name);
+        if (m) { ok++; each?.(m); } else bad.push(f.name);
+      } catch (e) {
+        console.warn($t('匯入失敗'), f.name, e);
+        bad.push(f.name);
+      }
     }
+  } finally {
+    if (files.length > 1) setBusy(null);
   }
+  return { ok, bad };
+}
+
+export async function importFiles(files: FileList | File[]) {
+  const { ok, bad } = await addMediaFiles(Array.from(files));
   if (ok) toast($t('已匯入 {0} 個檔案', ok));
   if (bad.length) toast($t('無法匯入：{0}', bad.join($t('、'))), 'error');
 }
@@ -182,6 +194,7 @@ export function removeMedia(id: string, quiet = false) {
   deleteMediaBlob(id);
   dropMatte(id);
   dropFaces(id);
+  dropMediaAnalysis(id);
   dropBoxTracks(id);
   if (used) {
     useStore.setState({ media: s.media.map((x) => (x.id === id ? { ...x, url: '', thumb: x.kind === 'image' ? '' : x.thumb, missing: true } : x)) });

@@ -179,6 +179,7 @@ export interface AudioClip extends ItemBase {
 
 /** 輸出畫面大小（比例） */
 export interface Format { w: number; h: number }
+export interface Marker { id: string; t: number; name: string; color?: string }
 export const FORMATS: { id: string; label: string; w: number; h: number }[] = [
   { id: '9:16', label: '9:16', w: 1080, h: 1920 },
   { id: '16:9', label: '16:9', w: 1920, h: 1080 },
@@ -218,6 +219,7 @@ interface State {
   clips: Clip[];
   effects: FxItem[];
   audios: AudioClip[];
+  markers: Marker[];
   tracks: Tracks;
   modules: Module[];
   /** 主選取（左側編輯器顯示它） */
@@ -237,6 +239,10 @@ interface State {
   /** 輸出畫面大小 */
   format: Format;
   setFormat(f: Format): void;
+  addMarker(t: number, name?: string): string;
+  updateMarker(id: string, patch: Partial<Omit<Marker, 'id'>>): void;
+  removeMarker(id: string): void;
+  clearMarkers(): void;
 
   addMedia(m: Media): void;
   /** range：從素材預覽設定的入點 / 長度 */
@@ -769,6 +775,7 @@ export const useStore = create<State>()(
         clips: [],
         effects: [],
         audios: [],
+        markers: [],
         tracks: DEFAULT_TRACKS,
         modules: BUILTIN_MODULES,
         selection: null,
@@ -787,6 +794,14 @@ export const useStore = create<State>()(
         exporting: null,
         format: DEFAULT_FORMAT,
         setFormat: (f) => set({ format: { w: Math.round(f.w), h: Math.round(f.h) } }),
+        addMarker: (t, name) => {
+          const id = uid();
+          set((s) => ({ markers: [...s.markers, { id, t: Math.max(0, t), name: name ?? $t('標記 {0}', s.markers.length + 1) }].sort((a, b) => a.t - b.t) }));
+          return id;
+        },
+        updateMarker: (id, patch) => set((s) => ({ markers: s.markers.map((m) => m.id === id ? { ...m, ...patch, t: Math.max(0, patch.t ?? m.t) } : m).sort((a, b) => a.t - b.t) })),
+        removeMarker: (id) => set((s) => ({ markers: s.markers.filter((m) => m.id !== id) })),
+        clearMarkers: () => set((s) => s.markers.length ? { markers: [] } : {}),
 
         addMedia: (m) => set((s) => ({ media: [...s.media, m] })),
 

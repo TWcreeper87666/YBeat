@@ -55,6 +55,11 @@ export function laneSnapPoints(items: { start: number; duration: number }[], tim
   return points;
 }
 
+/** Marker targets shared by timeline snapping and marker dragging. */
+export function markerSnapPoints(markers: { id: string; t: number }[], excludeId?: string): number[] {
+  return markers.filter((m) => m.id !== excludeId).map((m) => m.t);
+}
+
 /**
  * 移動的吸附（一個軸）：框的中心、兩個邊（center ± half）都可以吸到任何一條線，取最近的。
  * half 是框在畫面上（含旋轉）的半寬 / 半高。

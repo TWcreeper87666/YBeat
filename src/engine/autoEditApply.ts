@@ -7,7 +7,8 @@ import { beatSource, mediaBeats, type Beat } from './beats';
 import { getAudioBuffer } from './audio';
 import { analyzeMusic, bandEnvelopes, type Bands, type MusicInfo } from './musicAnalysis';
 import { DEFAULT_OPTIONS, planEdit, type EditPlan, type PlanMedia, type PlanOptions, type Recipe, type RuleOpt } from './autoEdit';
-import { aeFootage, footage, musicClips, useAutoEdit, type AutoEditSettings, type Footage } from './autoEditSettings';
+import { loadAnalysis, saveAnalysis } from './analysisStore';
+import { aeFootage, footage, lastTake, musicClips, useAutoEdit, type AutoEditSettings, type Footage } from './autoEditSettings';
 import { $t } from '../i18n';
 import { create } from 'zustand';
 import { sampleAll, type Sampled } from './mediaSampler';
@@ -88,14 +89,16 @@ async function bandsOf(m: Media): Promise<Bands | undefined> {
 const musicCache = new Map<string, MusicInfo>();
 export async function analyzeSource(src: MusicSource): Promise<MusicInfo> {
   const key = `${src.media.id}:${src.beats[0].t}:${src.beats.length}`;
-  const hit = musicCache.get(key);
+  const hit = musicCache.get(key) ?? await loadAnalysis<MusicInfo>('music', key);
   if (hit) {
+    musicCache.set(key, hit);
     if (useAutoEdit.getState().analysis?.info !== hit) useAutoEdit.getState().set({ analysis: { audioId: src.audio.id, info: hit } });
     return hit;
   }
   const bands = await bandsOf(src.media);
   const info = analyzeMusic(src.beats, src.media.peaks ?? [], src.media.peaksPerSec || 100, bands);
   musicCache.set(key, info);
+  void saveAnalysis('music', key, info);
   useAutoEdit.getState().set({ analysis: { audioId: src.audio.id, info } });
   return info;
 }
@@ -390,11 +393,12 @@ export function planOptions(st: AutoEditSettings, s: S = useStore.getState()): P
 let last: { before: HistoryDoc; after: HistoryDoc } | null = null;
 /** 上一版之後還沒有其他修改（「再一版」會先拿掉上一版） */
 export const canReplaceLast = () => !!last && !docChanged(last.after);
+lastTake.replaceable = canReplaceLast;
 
 export type AutoEditError = 'noMusic' | 'noMedia' | 'noRange' | 'noKey' | 'empty' | 'cancelled';
 /** 進度：音樂 / 素材分析（第幾個、共幾個）/ AI 導演 */
 export type AutoEditProgress = { stage: 'music' } | { stage: 'media'; i: number; n: number; name: string; frac: number } | { stage: 'matte'; i: number; n: number; name: string }
-  | { stage: 'director'; retry?: { n: number; wait: number }; files?: number; images?: number; batch?: { done: number; total: number } }
+  | { stage: 'director'; retry?: { n: number; wait: number; format?: boolean }; files?: number; images?: number; batch?: { done: number; total: number } }
   | { stage: 'directed'; list: { name: string; roles: string[]; weight: number; note: string; use?: [number, number][]; avoid?: [number, number][] }[] }
   | { stage: 'plan' }
   | { stage: 'lead'; files: number; spans: number; skipped: number; unsure?: true };
@@ -502,7 +506,7 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
     const picks = directorShots(media, sampled);
     onProgress({ stage: 'director', files: media.length, images: [...picks.values()].reduce((s, l) => s + l.length, 0) });
     try {
-      const dir = await directMedia(music, media, sampled, st.directorNote, signal, (n, wait) => onProgress({ stage: 'director', retry: { n, wait } }),
+      const dir = await directMedia(music, media, sampled, st.directorNote, signal, (n, wait, format) => onProgress({ stage: 'director', retry: { n, wait, format } }),
         (done, total) => onProgress({ stage: 'director', batch: { done, total } }),
         (failed, total, e) => { warn = $t('AI 導演 {0}/{1} 批沒回應，那些素材改用一般分配：{2}', failed, total, aiErrorText(toAiError(e))); },
         (id, t) => notes.get(id)?.(t) ?? '');
@@ -613,6 +617,7 @@ export async function generateAutoEdit(replaceLast = false, quiet = false): Prom
       stopTick();
       if (p.stage === 'director' && p.retry) {
         const n = p.retry.n;
+        if (p.retry.format) return void set({ label: $t('AI 回傳的格式有誤，重新請求（第 {0} 次）', n), frac: null });
         stopTick = countdown(p.retry.wait, (left) => set({ label: $t('AI 忙碌，{0} 秒後重試（第 {1} 次）', left, n), frac: null }));
         return;
       }

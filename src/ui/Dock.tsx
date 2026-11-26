@@ -6,7 +6,7 @@ import { persist } from 'zustand/middleware';
 import { useStore } from '../store';
 import { Slot } from './PreviewPanel';
 import { useEditorWindow } from './EditorWindow';
-import { openMenu, useLayout, type MenuItem } from './uiStore';
+import { openMenu, useLayout, useLibFocus, type MenuItem } from './uiStore';
 import {
   C, R, T, closeGroup, dissolveGroup, dragSash, findGroup, groupsIn, joinAll, mapTabs, minSize, moveGroup, movePanel, panelsIn, removePanel, setSizes, showPanel,
   type DockNode, type DropTarget, type PanelId, type Side, type SplitNode, type TabsNode,
@@ -431,4 +431,10 @@ function Group({ node, hosts }: { node: TabsNode; hosts: Record<PanelId, HTMLEle
       {zone && <div className={`dock-drop ${zone}`} />}
     </div>
   );
+}
+
+/** 切到素材分頁並選中、捲到該素材 */
+export function revealMedia(id: string) {
+  useDock.getState().activatePanel('media');
+  useLibFocus.setState((s) => ({ id, ids: [id], n: s.n + 1 }));
 }

@@ -1,13 +1,14 @@
 import { $t } from '../i18n';
 import { afterRelease, pointerHeld } from './pointerHold';
 import { create } from 'zustand';
-import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, mergeModules, makeClip, useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
+import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, mergeModules, makeClip, useStore, type AudioClip, type Clip, type FxItem, type Marker, type Media, type Tracks } from '../store';
 import type { Module } from '../modules/builtin';
 import { historyPath, resetHistory, settleHistory } from './history';
 import { clearDetachedMedia } from './detachedMedia';
 import { colorBlob } from './colorBlob';
 import { usePrefs } from '../prefs';
 import { PackError, readPack, writePack, type PackProgress } from './ybeatPack';
+import { pruneCaches } from './storageUsage';
 
 /** 專案自動存檔：素材檔案（Blob）與時間軸存在 IndexedDB，重新整理不會遺失 */
 
@@ -58,6 +59,7 @@ interface Saved {
   clips: Clip[];
   effects: FxItem[];
   audios: AudioClip[];
+  markers?: Marker[];
   tracks: Tracks;
   format?: Format;
   modules?: Module[];
@@ -71,11 +73,11 @@ let saveTimer = 0;
 let started = false;
 
 /** 上次存檔時的專案內容（物件參照）：復原回這個狀態 = 跟存檔一樣，不用再存 */
-type SavedRefs = Pick<ReturnType<typeof useStore.getState>, 'media' | 'clips' | 'effects' | 'audios' | 'tracks' | 'format'>;
+type SavedRefs = Pick<ReturnType<typeof useStore.getState>, 'media' | 'clips' | 'effects' | 'audios' | 'markers' | 'tracks' | 'format'>;
 let savedRefs: SavedRefs | null = null;
-const refsOf = (s: SavedRefs): SavedRefs => ({ media: s.media, clips: s.clips, effects: s.effects, audios: s.audios, tracks: s.tracks, format: s.format });
+const refsOf = (s: SavedRefs): SavedRefs => ({ media: s.media, clips: s.clips, effects: s.effects, audios: s.audios, markers: s.markers, tracks: s.tracks, format: s.format });
 const sameRefs = (a: SavedRefs, b: SavedRefs) =>
-  a.media === b.media && a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.tracks === b.tracks && a.format.w === b.format.w && a.format.h === b.format.h; // 比例每次都是新物件，比數值
+  a.media === b.media && a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.markers === b.markers && a.tracks === b.tracks && a.format.w === b.format.w && a.format.h === b.format.h; // 比例每次都是新物件，比數值
 
 async function save() {
   useSaveState.setState({ state: 'saving' });
@@ -89,6 +91,7 @@ async function save() {
     clips: s.clips,
     effects: s.effects,
     audios: s.audios,
+    markers: s.markers,
     tracks: s.tracks,
     format: s.format,
     modules: s.modules,
@@ -155,6 +158,7 @@ async function loadProject() {
         for (const id of keys) if (typeof id === 'string' && !keep.has(id)) await deleteMediaBlob(id);
         const pk = await run<IDBValidKey[]>('proxy', 'readonly', (os) => os.getAllKeys());
         for (const id of pk) if (typeof id === 'string' && !keep.has(id)) await deleteProxyBlob(id);
+        await pruneCaches(keep);
       } catch (e) { console.warn($t('素材清理失敗'), e); }
       const media: Media[] = [];
       const referenced = new Set([...(data.clips ?? []), ...(data.audios ?? [])].map((c) => c.mediaId));
@@ -189,6 +193,7 @@ async function loadProject() {
         clips: (data.clips ?? []).map((c) => makeClip(c)),
         effects: data.effects ?? [],
         audios: (data.audios ?? []).map((a) => makeAudio(a)),
+        markers: data.markers ?? [],
         tracks: data.tracks ?? DEFAULT_TRACKS,
         format: data.format ?? DEFAULT_FORMAT,
         ...(data.modules ? { modules: mergeModules(data.modules) } : {}),
@@ -206,18 +211,19 @@ async function loadProject() {
 export async function newProject() {
   clearDetachedMedia();
   useStore.setState({
-    media: [], clips: [], effects: [], audios: [], tracks: DEFAULT_TRACKS, format: DEFAULT_FORMAT,
+    media: [], clips: [], effects: [], audios: [], markers: [], tracks: DEFAULT_TRACKS, format: DEFAULT_FORMAT,
     selection: null, selected: [], time: 0, playing: false, loop: null,
   });
   resetHistory();
   await run('media', 'readwrite', (os) => os.clear()).catch(() => {});
   await run('proxy', 'readwrite', (os) => os.clear()).catch(() => {});
+  await pruneCaches(new Set());
   await saveNow();
 }
 
 const packProject = (s: ReturnType<typeof useStore.getState>): Saved => ({
   media: s.media.map((m) => ({ ...m, url: '', thumb: m.kind === 'image' ? '' : m.thumb })),
-  clips: s.clips, effects: s.effects, audios: s.audios, tracks: s.tracks, format: s.format, modules: s.modules,
+  clips: s.clips, effects: s.effects, audios: s.audios, markers: s.markers, tracks: s.tracks, format: s.format, modules: s.modules,
 });
 
 /** 可攜專案包：時間軸、模組及所有可用素材放進同一個檔案（格式見 ybeatPack.ts）。 */
@@ -275,10 +281,12 @@ export async function importProjectPack(file: Blob, onProgress?: PackProgress): 
   useStore.setState({
     media, clips: project.clips.map(makeClip), effects: project.effects,
     audios: project.audios.map(makeAudio), tracks: project.tracks,
+    markers: project.markers ?? [],
     format: project.format ?? DEFAULT_FORMAT,
     ...(project.modules ? { modules: mergeModules(project.modules) } : {}),
     selection: null, selected: [], time: 0, playing: false, loop: null,
   });
   resetHistory();
+  await pruneCaches(ids);
   await saveNow();
 }

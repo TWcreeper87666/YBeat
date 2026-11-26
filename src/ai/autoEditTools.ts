@@ -10,7 +10,7 @@ import { mediaBeats } from '../engine/beats';
 import { categoryOf } from '../modules/categories';
 import { RECIPES, type FxRule, type Recipe, type RecipeId, type RuleWhen } from '../engine/autoEdit';
 import { transitionOpt } from '../engine/autoEditPools';
-import { footage, musicClips, myStyleSettings, styleSettings, useAutoEdit, wholeSeg, type AutoEditSettings } from '../engine/autoEditSettings';
+import { footage, lastTake, musicClips, myStyleSettings, styleSettings, useAutoEdit, wholeSeg, type AutoEditSettings } from '../engine/autoEditSettings';
 import { STYLE_IDS } from '../engine/autoEditStyles';
 import type { BeatEvery } from '../engine/trigger';
 import { FLAT_SHAPE, shapeMusic, type EnergyShape } from '../engine/energyShape';
@@ -152,6 +152,8 @@ export function readAutoEdit(s: S): Record<string, unknown> {
     },
     range: st.range,
     has_loop_range: !!s.loop,
+    // replace_last 只有在上一版產生後沒被改過時有用
+    last_take_replaceable: lastTake.replaceable(),
     style: st.recipe.startsWith('my:') ? st.myStyles.find((m) => `my:${m.id}` === st.recipe)?.name ?? 'custom' : st.recipe,
     my_styles: st.myStyles.map((m) => m.name),
     beats_per_shot: { low: p.beatsPerShot[0], mid: p.beatsPerShot[1], high: p.beatsPerShot[2] },
@@ -165,9 +167,9 @@ export function readAutoEdit(s: S): Record<string, unknown> {
     speed_ramps: { on: st.speedOn, variants: st.speedVariants, per_32: st.speedsPer32, intensity: st.speedIntensity },
     analyze: st.analyze, director: st.director, director_note: st.directorNote,
     ...(st.direction ? { last_direction: st.direction } : {}),
-    media: P.media.map((m) => ({ ...m, on: !st.segs.length || st.segs.some((g) => g.mediaId === m.id) })),
+    media: P.media.map((m) => ({ ...m, on: st.pick !== 'list' || st.segs.some((g) => g.mediaId === m.id) })),
     // 使用者在面板指定的片段（影片的範圍）；關掉素材 = 拿掉它的片段、打開 = 整段加入
-    ...(st.segs.length ? { segments: st.segs.map((g) => ({ media: g.mediaId, from_sec: r2(g.a), to_sec: r2(g.b), ...(g.name ? { name: g.name } : {}) })) } : {}),
+    ...(st.pick === 'list' ? { segments: st.segs.map((g) => ({ media: g.mediaId, from_sec: r2(g.a), to_sec: r2(g.b), ...(g.name ? { name: g.name } : {}) })) } : {}),
     transitions: P.transitions.map((m) => ({ ...m, strength: trStrength.get(m.id), weight: st.trWeights[m.id] ?? 1 })),
     effects: P.effects,
   };
@@ -390,18 +392,20 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
   }
   // 風格變「自訂」時把目前的數字一起帶過去（選了風格 = 風格的數字再加上覆寫）
   if (patch.recipe) patch.params = { ...params, id: patch.recipe };
-  // 素材開關 → 片段清單：關掉 = 拿掉那個素材的所有片段；打開 = 整段加入（全部打開又沒有範圍 = 清空 = 用素材庫全部）
+  // 素材開關 → 片段清單：關掉 = 拿掉那個素材的所有片段；打開 = 整段加入（全部打開又沒有範圍 = 回到「全部素材」）
   {
-    const used = new Set(st.segs.length ? st.segs.map((g) => g.mediaId) : P.media.map((m) => m.id));
+    const used = new Set(st.pick === 'list' ? st.segs.map((g) => g.mediaId) : P.media.map((m) => m.id));
     const next = pick(a.media, P.media, P.media.filter((m) => !used.has(m.id)).map((m) => m.id), fail, 'media');
     if (next) {
       if (P.media.every((x) => next.includes(x.id))) fail('media: at least one item must stay on');
-      const base = st.segs.length ? st.segs : s.media.filter((m) => used.has(m.id)).map((m) => wholeSeg(m, uid()));
+      const base = st.pick === 'list' ? st.segs : s.media.filter((m) => used.has(m.id)).map((m) => wholeSeg(m, uid()));
       const segs = [
         ...base.filter((g) => !next.includes(g.mediaId)),
         ...s.media.filter((m) => P.media.some((x) => x.id === m.id) && !next.includes(m.id) && !used.has(m.id)).map((m) => wholeSeg(m, uid())),
       ];
-      patch.segs = !next.length && segs.every((g) => { const m = s.media.find((x) => x.id === g.mediaId); return !!m && g.a === 0 && (m.kind !== 'video' || g.b >= m.duration) && !g.name; }) ? [] : segs;
+      const whole = !next.length && segs.every((g) => { const m = s.media.find((x) => x.id === g.mediaId); return !!m && g.a === 0 && (m.kind !== 'video' || g.b >= m.duration) && !g.name; });
+      patch.segs = whole ? [] : segs;
+      patch.pick = whole ? 'all' : 'list';
       changed++;
     }
   }

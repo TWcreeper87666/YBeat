@@ -3,11 +3,13 @@
  * 請它決定每個素材適合哪些段落（roles）、優先度（weight）、影片裡要用（use）/ 一定要避開（avoid）的範圍。
  * 時間計算、對齊節拍還是編排器負責；這裡只回傳每個素材的提示。結果依「素材 + 音樂 + 指示」快取在記憶體。
  */
+import { $t } from '../i18n';
 import type { Media } from '../store';
 import type { MusicInfo, SectionKind } from '../engine/musicAnalysis';
 import type { Sampled } from '../engine/mediaSampler';
 import { imagePart, streamTurn, ApiKeyError, type Part } from './gemini';
 import { useAiSettings } from './assistant';
+import { loadAnalysis, saveAnalysis } from '../engine/analysisStore';
 import { DEFAULT_MODEL } from './gemini';
 
 /** highlights = use 範圍裡的時間點（給挑片段加分）；avoid = 一定不能用的範圍 */
@@ -73,12 +75,15 @@ export function directorBatches<T extends { id: string }>(media: T[], count: (m:
  * onBatch：分批的進度（完成幾批 / 共幾批；只有一批就不通知）。
  * 有幾批失敗：其他批的結果照用（失敗那批的素材沒有安排），onFail 通知；全部失敗才丟錯。有失敗的結果不快取（下次重問）。
  */
+/** AI 回傳的格式壞掉時重問幾次 */
+const FORMAT_RETRY = 2;
+
 export async function directMedia(music: MusicInfo, media: Media[], sampled: Map<string, Sampled>, note: string, signal?: AbortSignal,
-  onRetry?: (attempt: number, waitSec: number) => void, onBatch?: (done: number, total: number) => void,
+  onRetry?: (attempt: number, waitSec: number, format?: boolean) => void, onBatch?: (done: number, total: number) => void,
   onFail?: (failed: number, total: number, err: unknown) => void, frameNote?: (mediaId: string, t: number) => string): Promise<Map<string, Direction>> {
   const key = directionKey(music, media, note);
-  const hit = cache.get(key);
-  if (hit) return hit;
+  const hit = cache.get(key) ?? await loadAnalysis<Map<string, Direction>>('director', key);
+  if (hit) return cache.set(key, hit), hit;
   const ai = useAiSettings.getState();
   if (!ai.key) throw new ApiKeyError('no key');
   const picks = directorShots(media, sampled);
@@ -98,8 +103,16 @@ export async function directMedia(music: MusicInfo, media: Media[], sampled: Map
       }
     }
     // 分批同時送容易碰到限流：自動等久一點再試
-    const r = await streamTurn({ key: ai.key, model: ai.model || DEFAULT_MODEL, system: SYSTEM, turns: [{ role: 'user', text: '', parts }], signal, onRetry: (a, w) => onRetry?.(a, w), maxRateWait: 90 });
-    return parseDirection(r.text, list, new Map(list.map((m) => [m.id, gapOf(picks.get(m.id) ?? [], m.duration)])));
+    // 回傳的 JSON 壞掉（漏逗號、被截斷）：再問一次，最多 FORMAT_RETRY 次
+    for (let tries = 0; ; tries++) {
+      const r = await streamTurn({ key: ai.key, model: ai.model || DEFAULT_MODEL, system: SYSTEM, turns: [{ role: 'user', text: '', parts }], signal, onRetry: (a, w) => onRetry?.(a, w), maxRateWait: 90 });
+      try {
+        return parseDirection(r.text, list, new Map(list.map((m) => [m.id, gapOf(picks.get(m.id) ?? [], m.duration)])));
+      } catch {
+        if (signal?.aborted || tries >= FORMAT_RETRY) throw new Error($t('AI 回傳的格式有誤'));
+        onRetry?.(tries + 1, 0, true);
+      }
+    }
   };
   const out = new Map<string, Direction>();
   const errors: unknown[] = [];
@@ -120,7 +133,7 @@ export async function directMedia(music: MusicInfo, media: Media[], sampled: Map
   await Promise.all(Array.from({ length: Math.min(PARALLEL, batches.length) }, worker));
   if (errors.length === batches.length) throw errors[0];
   if (errors.length) onFail?.(errors.length, batches.length, errors[0]);
-  else cache.set(key, out);
+  else cache.set(key, out), void saveAnalysis('director', key, out);
   return out;
 }
 

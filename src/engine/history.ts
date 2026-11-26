@@ -1,13 +1,13 @@
 import { create } from 'zustand';
 import { afterRelease, pointerHeld } from './pointerHold';
-import { parseKey, useStore, type AudioClip, type Clip, type FxItem, type Media, type Tracks } from '../store';
+import { parseKey, useStore, type AudioClip, type Clip, type FxItem, type Marker, type Media, type Tracks } from '../store';
 
 /** 輸出尺寸也算專案內容：改比例可以復原 */
 type Format = { w: number; h: number };
 
 /** 復原 / 重做：自動記錄時間軸變更；拖曳中的變更等放開才算一步，其他連續操作（400ms 內）合併成一步 */
 /** aux：專案以外、也要一起復原的狀態（例如自動剪輯面板的設定），見 trackHistory */
-interface Doc { clips: Clip[]; effects: FxItem[]; audios: AudioClip[]; media: Media[]; tracks: Tracks; format: Format; aux: Record<string, Record<string, unknown>> }
+interface Doc { clips: Clip[]; effects: FxItem[]; audios: AudioClip[]; markers: Marker[]; media: Media[]; tracks: Tracks; format: Format; aux: Record<string, Record<string, unknown>> }
 type Proj = Omit<Doc, 'aux'>;
 
 /** pick 回傳要記錄的欄位（每個欄位用參照比較），put 還原 */
@@ -50,7 +50,7 @@ export function stepsFrom(saved: number[]): number {
 }
 const sync = () => useHistory.setState({ canUndo: !transaction && (past.length > 0 || !!burstStart), canRedo: !transaction && future.length > 0 });
 
-const docOf = (s: Proj, aux: Doc['aux'] = auxNow()): Doc => ({ clips: s.clips, effects: s.effects, audios: s.audios, media: s.media, tracks: s.tracks, format: s.format, aux });
+const docOf = (s: Proj, aux: Doc['aux'] = auxNow()): Doc => ({ clips: s.clips, effects: s.effects, audios: s.audios, markers: s.markers, media: s.media, tracks: s.tracks, format: s.format, aux });
 
 function flush() {
   clearTimeout(timer);
@@ -162,7 +162,7 @@ export const snapshotDoc = (): Doc => docOf(useStore.getState());
 /** 跟記下來的狀態比，專案有沒有變更（只看專案；面板設定之類的不算） */
 export const docChanged = (d: Doc) => !sameProj(docOf(useStore.getState()), d);
 function sameProj(a: Proj, b: Proj) {
-  return a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.media === b.media && a.tracks === b.tracks && a.format === b.format;
+  return a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.markers === b.markers && a.media === b.media && a.tracks === b.tracks && a.format === b.format;
 }
 const sameDoc = (a: Doc, b: Doc) => sameProj(a, b) && sameAux(a.aux, b.aux);
 
@@ -205,6 +205,18 @@ export function redo() {
   if (id !== undefined) path.push(id);
   touch();
   sync();
+}
+
+/** 最後一步併進前一步（前一步要是 step）：例如 AI 改設定 + 接著產生的剪輯 = 一次復原；成功回傳 true */
+export function mergeIntoStep(step: number): boolean {
+  if (transaction) return false;
+  flush();
+  if (path.length < 3 || path[path.length - 2] !== step || past.length < 2) return false;
+  past.pop();
+  path.pop();
+  touch();
+  sync();
+  return true;
 }
 
 export function resetHistory() {

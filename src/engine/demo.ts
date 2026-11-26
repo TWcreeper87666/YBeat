@@ -82,6 +82,7 @@ export async function loadDemo() {
     clips,
     effects,
     audios: [],
+    markers: [],
     selection: null,
     selected: [],
     time: 0,

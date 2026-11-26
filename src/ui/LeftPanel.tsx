@@ -97,12 +97,13 @@ export function MediaPanel() {
   // 別的面板要求選中某個素材（例如自動剪輯的片段清單）：清掉搜尋 / 分類，選中並捲到它
   const focus = useLibFocus();
   useEffect(() => {
-    if (!focus.id || !library.some((m) => m.id === focus.id)) return;
+    const ids = (focus.ids ?? (focus.id ? [focus.id] : [])).filter((id) => library.some((m) => m.id === id));
+    if (!ids.length) return;
     setQ('');
     if (useLayout.getState().mediaFilter !== 'all') useLayout.getState().set({ mediaFilter: 'all' });
-    setSelectedIds([focus.id]);
-    setAnchorId(focus.id);
-    requestAnimationFrame(() => panelRef.current?.querySelector(`[data-media-id="${focus.id}"]`)?.scrollIntoView({ block: 'nearest' }));
+    setSelectedIds(ids);
+    setAnchorId(ids[0]);
+    requestAnimationFrame(() => panelRef.current?.querySelector(`[data-media-id="${ids[0]}"]`)?.scrollIntoView({ block: 'nearest' }));
   }, [focus.n]); // eslint-disable-line react-hooks/exhaustive-deps
   const selected = new Set(selectedIds);
   const picked = selectedIds.map((id) => list.find((m) => m.id === id)).filter((m): m is Media => !!m);

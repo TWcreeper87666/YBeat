@@ -14,6 +14,7 @@ import { codeBlocks, detectKind, validateModule } from './validate';
 import { TOOL_DECLS, mentionedModules, runTool, toolRefs } from './tools';
 import { PROJECT_TOOL_DECLS, applyProposals, isEditTool, isProjectTool, projectSnapshot, runProjectTool, type Proposal } from './projectTools';
 import { useStore } from '../store';
+import { historyPath, mergeIntoStep, undo } from '../engine/history';
 
 /** 自動修正最多幾次（免費額度有限，不要一直重試） */
 export const MAX_FIXES = 2;
@@ -236,8 +237,10 @@ export interface ChatMsg {
   seen?: string[];
   /** 自動剪輯的步驟（套用後產生時即時更新；running = 還在跑） */
   steps?: { lines: string[]; running: boolean; label?: string };
-  /** 已套用：實際套用 / 跳過幾項 */
-  applied?: { done: number; skipped: number };
+  /** 使用者訊息送出時的復原紀錄位置（「從這裡重來並復原修改」退回這裡） */
+  path?: number[];
+  /** 已套用：實際套用 / 跳過幾項；step = 產生的復原步驟（復原掉就算沒套用） */
+  applied?: { done: number; skipped: number; step?: number };
   error?: AiError;
 }
 
@@ -245,8 +248,10 @@ interface ChatState {
   msgs: ChatMsg[];
   busy: boolean;
   abort: AbortController | null;
+  /** 要放回輸入框的文字（n 變了才放；從這裡重來時用） */
+  draft: { text: string; n: number } | null;
 }
-export const useAiChat = create<ChatState>(() => ({ msgs: [], busy: false, abort: null }));
+export const useAiChat = create<ChatState>(() => ({ msgs: [], busy: false, abort: null, draft: null }));
 
 const uid = () => Math.random().toString(36).slice(2, 10);
 const LANG_OF: Record<ModuleKind, string> = { effect: 'glsl', transition: 'glsl', remap: 'js' };
@@ -272,7 +277,7 @@ export function sendChat(text: string, attach?: Attach, withFrame = false) {
     ? `${text}\n\nCurrent ${attach.kind} module "${attach.name}":\n\`\`\`${LANG_OF[attach.kind]}\n${attach.code}\n\`\`\``
     : text;
   const frame = withFrame ? previewShot() : null;
-  const user: ChatMsg = { id: uid(), role: 'user', text, attach, turns: [{ role: 'user', text: apiText }], ...(frame ? { image: frame.url } : {}) };
+  const user: ChatMsg = { id: uid(), role: 'user', text, attach, turns: [{ role: 'user', text: apiText }], path: historyPath(), ...(frame ? { image: frame.url } : {}) };
   // 專案快照、提到的模組只跟著這一次的問題送（紀錄裡不留，免得越疊越多）
   const named = namedModules(text, attach?.code);
   const snapText = `${apiText}${refBlock(text, attach?.code)}\n\n<project_snapshot>\n${projectSnapshot()}\n</project_snapshot>`;
@@ -327,10 +332,13 @@ function runReply(keep: Turn | null, api: Turn, history: Turn[], hint?: ModuleKi
   })();
 }
 
+/** 這則回覆的修改目前還在（套用過、而且那一步沒被復原） */
+export const isApplied = (m: ChatMsg) => !!m.applied && (m.applied.step === undefined || historyPath().includes(m.applied.step));
+
 /** 套用某則回覆提議的修改（一步復原） */
 export function applyChatProposals(msgId: string): { done: number; skipped: number } | null {
   const m = useAiChat.getState().msgs.find((x) => x.id === msgId);
-  if (!m?.proposals?.length || m.applied) return null;
+  if (!m?.proposals?.length || isApplied(m)) return null;
   const gen = m.proposals.some((p) => p.op.op === 'auto_edit' && p.op.generate);
   let off = () => {};
   if (gen) {
@@ -342,9 +350,17 @@ export function applyChatProposals(msgId: string): { done: number; skipped: numb
       });
     });
   }
+  const before = historyPath();
+  let after = before;
   const r = applyProposals(m.proposals, {
     onAutoEdit: (res) => {
       off();
+      // 產生的剪輯（緊接在套用後、中間沒有別的編輯）跟套用的修改併成一步復原
+      const now = historyPath();
+      if (now.length === after.length + 1 && now.slice(0, -1).join() === after.join()) {
+        const applied = useAiChat.getState().msgs.find((x) => x.id === msgId)?.applied;
+        if (applied && (applied.step === undefined || !mergeIntoStep(applied.step))) patch(msgId, { applied: { ...applied, step: now[now.length - 1] } });
+      }
       void import('../engine/autoEditApply').then(({ useAutoEditRun }) => {
         const lines = useAutoEditRun.getState().log;
         patch(msgId, { steps: { lines, running: false } });
@@ -353,7 +369,8 @@ export function applyChatProposals(msgId: string): { done: number; skipped: numb
       });
     },
   });
-  patch(msgId, { applied: r });
+  after = historyPath();
+  patch(msgId, { applied: { ...r, ...(after.length > before.length || after.join() !== before.join() ? { step: after[after.length - 1] } : {}) } });
   return r;
 }
 
@@ -375,6 +392,28 @@ function reviewAutoEdit(res: { ok: boolean; text: string }, lines: string[]) {
 export function stopChat() {
   useAiChat.getState().abort?.abort();
 }
+/** 從這則訊息之後專案還有幾步修改（只往後加、沒有分岔才算得出來；null = 退不回去） */
+export function stepsSince(m: ChatMsg): number | null {
+  if (!m.path) return null;
+  const now = historyPath();
+  if (now.length < m.path.length || m.path.some((id, i) => now[i] !== id)) return null;
+  return now.length - m.path.length;
+}
+
+/** 從這則使用者訊息重來：拿掉它和之後的對話，文字放回輸入框；undoToo = 專案也復原到送出這則之前 */
+export function rewindChat(msgId: string, undoToo = false) {
+  const S = useAiChat.getState();
+  const i = S.msgs.findIndex((m) => m.id === msgId);
+  const m = S.msgs[i];
+  if (!m || m.role !== 'user') return;
+  stopChat();
+  if (undoToo) {
+    const n = stepsSince(m);
+    for (let k = 0; k < (n ?? 0); k++) undo();
+  }
+  useAiChat.setState((s) => ({ msgs: s.msgs.slice(0, i), draft: { text: m.text, n: (s.draft?.n ?? 0) + 1 } }));
+}
+
 export function clearChat() {
   stopChat();
   useAiChat.setState({ msgs: [] });

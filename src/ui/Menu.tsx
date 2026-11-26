@@ -235,9 +235,15 @@ export function ConfirmHost() {
 export function Toasts() {
   const toasts = useToast((s) => s.toasts);
   const busy = useToast((s) => s.busy);
+  const frac = useToast((s) => s.busyFrac);
   return (
     <div className="toasts">
-      {busy && <div className="toast">{busy}</div>}
+      {busy && (
+        <div className={`toast busy ${frac !== null ? 'has-bar' : ''}`}>
+          <span>{busy}</span>
+          {frac !== null && <i className="toast-bar"><b style={{ width: `${Math.round(Math.min(1, Math.max(0, frac)) * 100)}%` }} /></i>}
+        </div>
+      )}
       {toasts.map((t) => (
         <div key={t.id} className={`toast ${t.kind}`}>{t.text}</div>
       ))}

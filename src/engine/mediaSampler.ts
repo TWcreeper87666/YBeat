@@ -1,7 +1,7 @@
 /**
  * 自動剪輯的素材分析（瀏覽器端）：影片每 step 秒取一格（直接解碼檔案、盡量只解關鍵影格；不支援的格式才用 <video> seek）、畫成 160px 寬，算亮度 / 清晰度 / 跟上一格的差異
  * （統計在 mediaAnalysis.ts），順便留幾張 384px 的 JPEG 給 AI 導演看。圖片只取一張畫面。
- * 結果只放在記憶體（同一個素材算一次）。
+ * 結果存在記憶體，也存進瀏覽器（analysisStore），重新整理後不用重算。
  */
 import type { Media } from '../store';
 import { analyzeSamples, bestFace, frameStats, grayOf, peopleScore, type FaceBox, type FrameSample, type MediaInfo } from './mediaAnalysis';
@@ -10,6 +10,7 @@ import type { FacesAt } from './faceLead';
 import type { Face } from './faceTrack';
 import type { Shot } from '../ai/frames';
 import { decodeAt } from './matteDecode';
+import { loadAnalysis, saveAnalysis } from './analysisStore';
 
 const W = 160;
 const SHOT_SIDE = 384;
@@ -325,13 +326,56 @@ async function sampleSeek(m: Src, onFrame: (k: number, n: number) => void): Prom
 /** 正在分析的素材 → 想知道進度的人（背景預先分析時，按「產生」也要看得到進度） */
 const listeners = new Map<string, Set<(k: number, n: number) => void>>();
 
+// ───────────── 存進瀏覽器：縮圖只存 base64、臉部特徵存成 Float32Array（小一半） ─────────────
+
+type Face32 = FaceBox & { emb?: Float32Array };
+type Saved = Omit<Sampled, 'shots' | 'faceList' | 'info'> & {
+  shots: { t: number; data: string }[];
+  faceList?: Face32[] | null;
+  info: (Omit<MediaInfo, 'facesAt'> & { facesAt?: (Face32[] | null)[] }) | null;
+};
+const packFaces = (l: FacesAt): Face32[] | null => l && l.map((f) => (f.emb ? { ...f, emb: Float32Array.from(f.emb) } : (f as Face32)));
+const unpackFaces = (l: Face32[] | null | undefined): FacesAt => (l ? l.map((f) => (f.emb ? { ...f, emb: Array.from(f.emb) } : (f as FaceBox))) : null);
+
+function pack(r: Sampled): [Saved, number] {
+  const info = r.info && { ...r.info, facesAt: r.info.facesAt?.map(packFaces) };
+  const { faceList, ...rest } = r;
+  const saved: Saved = { ...rest, info, shots: r.shots.map((x) => ({ t: x.t, data: x.shot.data })), ...(faceList !== undefined ? { faceList: packFaces(faceList) } : {}) };
+  let bytes = r.shots.reduce((s, x) => s + x.shot.data.length, 0);
+  const embs = (l: FacesAt) => (l ?? []).reduce((s, f) => s + (f.emb?.length ?? 0) * 4, 0);
+  bytes += (r.info?.facesAt ?? []).reduce((s, l) => s + embs(l), 0) + embs(r.faceList ?? null);
+  bytes += ((r.info?.motion.length ?? 0) + (r.info?.quality.length ?? 0)) * 16 + 1024;
+  return [saved, bytes];
+}
+function unpack(s: Saved): Sampled {
+  const info = s.info && { ...s.info, facesAt: s.info.facesAt?.map(unpackFaces) };
+  const { faceList, ...rest } = s;
+  return {
+    ...rest,
+    info: info as MediaInfo | null,
+    shots: s.shots.map((x) => ({ t: x.t, shot: { mime: 'image/jpeg' as const, data: x.data, url: `data:image/jpeg;base64,${x.data}` } })),
+    ...(faceList !== undefined ? { faceList: unpackFaces(faceList) } : {}),
+  };
+}
+/** 同一個檔案、同一段才算同一筆（指定片段的 id 是虛擬的，用原素材 id + 範圍） */
+const savedKey = (m: Src) => {
+  const src = (m as Src & { srcId?: string }).srcId ?? m.id;
+  return m.kind === 'video' ? `${src}|${(m.from ?? 0).toFixed(2)}|${m.duration.toFixed(2)}` : `${src}|0|0`;
+};
+
 /** 分析一個素材（算過 / 正在算就用同一份）；失敗 = 沒有分析資料（照舊隨機挑） */
 export function sampleMedia(m: Src, onFrame: (k: number, n: number) => void = () => {}): Promise<Sampled> {
   let p = cache.get(m.id);
   if (!p) {
     const set = new Set<(k: number, n: number) => void>();
     listeners.set(m.id, set);
-    p = (m.kind === 'video' ? sampleVideo(m, (k, n) => set.forEach((f) => f(k, n))) : sampleImage(m))
+    const key = savedKey(m);
+    p = loadAnalysis<Saved>('media', key)
+      .then((hit) => hit ? unpack(hit) : (m.kind === 'video' ? sampleVideo(m, (k, n) => set.forEach((f) => f(k, n))) : sampleImage(m)).then((r) => {
+        // 失敗 / 沒有資料的不存（下次再試）
+        if (r.info || r.shots.length) { const [saved, bytes] = pack(r); void saveAnalysis('media', key, saved, bytes); }
+        return r;
+      }))
       .catch((): Sampled => ({ info: null, shots: [] }))
       .then((r) => (sampledNow.set(m.id, r), listeners.delete(m.id), r));
     cache.set(m.id, p);
