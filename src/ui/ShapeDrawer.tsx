@@ -1,10 +1,11 @@
 import { $t } from '../i18n';
+import { dragPan } from './middlePan';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { create } from 'zustand';
 import { Eye, Redo2, Trash2, Undo2 } from 'lucide-react';
-import { fitPen, handleIn, handleOut, insertPoint, movePts, nearestOnPath, penBounds, penToPath, penToShape, ptsInRect, type PenPt } from '../engine/penPath';
+import { fitPen, handleIn, handleOut, insertPoint, movePts, nearestOnPath, penBounds, penToPath, penToShape, pathToPen, ptsInRect, type PenPt } from '../engine/penPath';
 import { DEFAULT_MASK } from '../engine/mask';
-import { useMaskLib } from '../engine/maskShapes';
+import { shapeInfo, useMaskLib } from '../engine/maskShapes';
 import { getRenderer, makeCtx } from '../engine/renderer';
 import { useStore } from '../store';
 import { drawTarget, timeInside, type DrawTarget } from './MaskEditor';
@@ -52,6 +53,10 @@ export function ShapeDrawerHost() {
 }
 
 type Snap = { pts: PenPt[]; closed: boolean };
+
+/** 形狀的鋼筆錨點：有鋼筆的原始錨點就用，不然從 SVG 路徑轉（內建形狀、主體輪廓描成的路徑；PNG 匯入的沒有路徑 = 空的） */
+const shapePen = (s: { pen?: PenPt[]; path?: string } | undefined): PenPt[] | undefined =>
+  s?.pen?.length ? s.pen : s?.path ? pathToPen(s.path) : undefined;
 
 function listen(onMove: (ev: PointerEvent) => void, onUp?: (ev: PointerEvent) => void) {
   const up = (ev: PointerEvent) => {
@@ -127,13 +132,13 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
   const [snap, setSnap] = useState<Snap>(() => {
     // 有對象：接著編輯它目前的路徑（遮罩自己的，或形狀庫裡鋼筆畫的），放回遮罩框在畫面上的位置
     const m = target?.mask;
-    const own = m?.shape === 'path' ? m.pen : m ? lib.customs.find((c) => c.id === m.shape)?.pen : undefined;
+    const own = m && m.shape !== 'none' ? shapePen(m.shape === 'path' ? { pen: m.pen, path: m.path } : lib.customs.find((c) => c.id === m.shape) ?? shapeInfo(m.shape)) : undefined;
     if (m && own?.length) {
       const cx = (0.5 + m.x) * W, cy = (0.5 + m.y) * H, hw = (m.w * W) / 2, hh = (m.h * H) / 2;
       return { pts: fitPen(own, { x0: cx - hw, y0: cy - hh, x1: cx + hw, y1: cy + hh }, m.rotation), closed: true };
     }
     // 編輯形狀庫的形狀：放在畫面中央
-    const pen = editing?.pen;
+    const pen = editing && shapePen(editing);
     if (!pen?.length) return { pts: [], closed: false };
     let h = H * 0.5, w = h * (editing!.aspect || 1);
     if (w > W * 0.8) [w, h] = [W * 0.8, (W * 0.8) / (editing!.aspect || 1)];
@@ -168,6 +173,7 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
   useEffect(() => {
     const el = stageRef.current;
     if (!el) return;
+    // 2D 畫面：滾輪直接縮放（刻意跟時間軸類的「Ctrl + 滾輪縮放」不同，見 wheelView）
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const v = viewRefState.current;
@@ -182,14 +188,8 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
   }, []);
   const onStageDownCapture = (e: React.PointerEvent) => {
     if (e.button !== 1 && !(e.button === 0 && space.current)) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const v0 = viewRefState.current, x0 = e.clientX, y0 = e.clientY;
-    document.body.classList.add('panning');
-    listen(
-      (ev) => setView({ ...v0, px: v0.px + ev.clientX - x0, py: v0.py + ev.clientY - y0 }),
-      () => document.body.classList.remove('panning'),
-    );
+    const v0 = viewRefState.current;
+    dragPan(e, (dx, dy) => setView({ ...v0, px: v0.px + dx, py: v0.py + dy }));
   };
   useEffect(() => {
     const up = (e: KeyboardEvent) => e.code === 'Space' && (space.current = false);

@@ -4,6 +4,8 @@ import { createPortal } from 'react-dom';
 import { useLayout } from './uiStore';
 import { DragNumber } from './DragNumber';
 import { Check } from './Toggle';
+import { hasSafeArea } from '../engine/snap';
+import { useStore } from '../store';
 
 /**
  * 輔助網格：預覽與鋼筆工具共用同一組設定（開關、列 / 欄、中心十字、短影音安全區）。
@@ -24,7 +26,7 @@ export function GridOverlay({ W, H }: { W: number; H: number }) {
         </>
       )}
       {/* 短影音安全區：右側按鈕、下方標題 */}
-      {L.gridSafe && <rect className="safe" x={W * 0.04} y={H * 0.08} width={W * 0.8} height={H * 0.7} />}
+      {L.gridSafe && hasSafeArea(W, H) && <rect className="safe" x={W * 0.04} y={H * 0.08} width={W * 0.8} height={H * 0.7} />}
     </svg>
   );
 }
@@ -55,6 +57,7 @@ export function GridButton() {
 /** 網格設定（右鍵網格按鈕） */
 function GridPopover({ at, close }: { at: { x: number; y: number }; close: () => void }) {
   const L = useLayout();
+  const fmt = useStore((s) => s.format);
   const ref = useRef<HTMLDivElement>(null);
   const [pos, setPos] = useState(at);
   useLayoutEffect(() => {
@@ -86,7 +89,7 @@ function GridPopover({ at, close }: { at: { x: number; y: number }; close: () =>
       </div>
       <div className="pop-sep" />
       <Check v={L.gridCenter} on={(v) => L.set({ gridCenter: v })}>{$t('中心十字')}</Check>
-      <Check v={L.gridSafe} on={(v) => L.set({ gridSafe: v })}>{$t('短影音安全區')}</Check>
+      {hasSafeArea(fmt.w, fmt.h) && <Check v={L.gridSafe} on={(v) => L.set({ gridSafe: v })}>{$t('短影音安全區')}</Check>}
     </div>
   );
 }

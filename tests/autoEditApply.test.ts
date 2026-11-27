@@ -6,7 +6,7 @@ import { makeClip, useStore, type Media } from '../src/store';
 import { beginHistoryTransaction, endHistoryTransaction, redo, resetHistory, settleHistory, undo } from '../src/engine/history';
 import { aeFootage, useAutoEdit } from '../src/engine/autoEditSettings';
 import { applyProposals } from '../src/ai/projectTools';
-import { facePush, planItems, type MusicSource } from '../src/engine/autoEditApply';
+import { canReplaceLast, chorusBeats, facePush, planItems, songChorus, takeSig, type MusicSource } from '../src/engine/autoEditApply';
 import { mediaToFrame } from '../src/engine/follow';
 import { fxLevel } from '../src/engine/tracks';
 import type { EditPlan } from '../src/engine/autoEdit';
@@ -111,13 +111,20 @@ ok(!revealClip.transitionIn && revealClip.keys.scaleX![0].v === 1 && revealClip.
   ok(!!rev && rev.mediaId === 'v' && rev.in === 3 && rev.remap?.moduleId !== 'remap-curve', '揭露拍：同一支影片從那一格接著播（正常速度）');
 }
 
-// 暗角：中間亮的範圍跟著音樂音量（越大聲越小），只聽音樂那一軌
+// 特效層指定的參數訊號：隨機的換一個種子；跟音量的只聽音樂那一軌；沒指定的（暗角）不跟著動
 {
   reset();
-  const plan: EditPlan = { seed: 1, recipe: 'rhythm', shots: [{ b0: 0, b1: 8, mediaId: 'v', in: 0 }], overlays: [{ b0: 0, b1: 8, moduleId: 'fx-vignette', lane: 0 }], pops: [] };
-  const vig = planItems(plan, src, S()).effects.find((e) => e.moduleId === 'fx-vignette');
-  const d = vig?.audio?.size;
-  ok(!!d && d.source === 'level' && d.min > d.max && (src.audio ? JSON.stringify(d.from) === JSON.stringify({ audio: [src.audio.track] }) : !d.from), '暗角跟著音樂音量收放');
+  const plan: EditPlan = { seed: 1, recipe: 'rhythm', shots: [{ b0: 0, b1: 8, mediaId: 'v', in: 0 }], overlays: [
+    { b0: 0, b1: 8, moduleId: 'fx-flash', lane: 0, trigger: { kind: 'beat', every: 1, seed: 1 }, drive: { intensity: { source: 'random', min: 0, max: 0.9, rate: 2 } } },
+    { b0: 0, b1: 8, moduleId: 'fx-zoompulse', lane: 1, drive: { amount: { source: 'level', min: 0, max: 0.2 } } },
+    { b0: 0, b1: 8, moduleId: 'fx-vignette', lane: 2 },
+  ], pops: [] };
+  const fx = planItems(plan, src, S()).effects;
+  const fl = fx.find((e) => e.moduleId === 'fx-flash')?.audio?.intensity;
+  ok(!!fl && fl.source === 'random' && fl.max === 0.9 && typeof fl.seed === 'number', '閃白強度隨機');
+  const lv = fx.find((e) => e.moduleId === 'fx-zoompulse')?.audio?.amount;
+  ok(!!lv && lv.source === 'level' && (src.audio ? JSON.stringify(lv.from) === JSON.stringify({ audio: [src.audio.track] }) : !lv.from), '跟音量的只聽音樂');
+  ok(!fx.find((e) => e.moduleId === 'fx-vignette')?.audio, '暗角不跟著動');
 }
 
 // 跟拍變速：計畫 → 變速曲線片段
@@ -226,6 +233,52 @@ ok(S().clips.length === 0 && useAutoEdit.getState().kenBurns, '巢狀交易一�
   const s1 = clip.keys!.scaleX![1].v;
   const [l, t] = mediaToFrame(clip, m, 2, aspect, 0, 0);
   ok(l <= 1e-6 && t <= 1e-6 && s1 > 1, '臉在角落：不露黑邊');
+}
+
+// 使用者標的副歌（歌的秒數）→ 最近的拍號；範圍外的不算
+{
+  const beats = Array.from({ length: 40 }, (_, i) => ({ t: 10 + i * 0.5 }));
+  const b = chorusBeats([14.1, 24.9, 5], beats);
+  ok(b.join() === '8,30', `副歌點 → 最近的拍（${b.join()}），歌的範圍外的不算`);
+  ok(!chorusBeats(undefined, beats).length && !chorusBeats([], beats).length, '沒標 = 空');
+}
+
+// 副歌點：手動的照用；沒標 = 自動找的主體跳出位置（drop + 能量往上的段落）
+{
+  const beats = Array.from({ length: 64 }, (_, i) => ({ t: i * 0.5 }));
+  const music = { drops: [32], sections: [{ b0: 0, b1: 16, kind: 'intro', energy: 0.2 }, { b0: 16, b1: 32, kind: 'body', energy: 0.5 }, { b0: 32, b1: 64, kind: 'drop', energy: 0.9 }] } as any;
+  const auto = songChorus({ mediaId: 'a', a: 0, b: 32 }, beats, music);
+  ok(auto.auto && auto.t.join() === '16', `自動：drop（越來越大聲的前兆不算）（${auto.t.join()}）`);
+  const man = songChorus({ mediaId: 'a', a: 0, b: 32, chorus: [3, 99] }, beats, music);
+  ok(!man.auto && man.t.join() === '3', '手動：範圍外的不算');
+}
+
+// 再一版：時間軸上標著這一版編號的東西沒被改過才能用
+{
+  reset();
+  const c1 = { ...makeClip({ mediaId: 'i', start: 0, duration: 1 }), take: 't1' };
+  useStore.setState({ clips: [c1] });
+  useAutoEdit.getState().set({ lastTake: { id: 't1', sig: takeSig(S(), 't1') } });
+  ok(canReplaceLast(), '上一版還在、沒改過 → 可以再一版');
+  useStore.setState({ clips: [{ ...c1, start: 0.5 }] });
+  ok(!canReplaceLast(), '手動移動過 → 不能');
+  useStore.setState({ clips: [c1, makeClip({ mediaId: 'i', start: 3, duration: 1 })] });
+  ok(canReplaceLast(), '時間軸別的地方有改 → 照樣可以');
+  useStore.setState({ clips: [] });
+  ok(!canReplaceLast(), '上一版被刪掉 → 不能');
+  useAutoEdit.getState().set({ lastTake: null });
+}
+
+// 新的一批放在時間軸最後面：用那段時間空著的軌道，不會一直加新軌；音樂放空著的音訊軌
+{
+  reset(1);
+  const end = Math.max(...S().clips.map((c) => c.start + c.duration));
+  const late = [makeClip({ mediaId: 'i', start: end, duration: 1, track: 0 }), makeClip({ mediaId: 'i', start: end, duration: 1, track: 1 })];
+  const n0 = S().tracks.video.length;
+  applyProposals([{ summary: '', op: { op: 'add_items', clips: late, effects: [], audios: [{ id: 'au', mediaId: 'i', track: 0, start: end, duration: 1, in: 0, volume: 1, fadeIn: 0, fadeOut: 0, rate: 1 }] } }]);
+  const tr = (id: string) => S().clips.find((c) => c.id === id)?.track;
+  ok(tr(late[0].id) === 0 && tr(late[1].id) === 1 && S().tracks.video.length === Math.max(n0, 2), `接在後面：基本層用第一條軌（${tr(late[0].id)}, ${tr(late[1].id)}）`);
+  ok(S().audios.some((a) => a.id === 'au'), '音樂也放上去');
 }
 
 if (fails) {

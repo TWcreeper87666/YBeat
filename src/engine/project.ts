@@ -9,7 +9,7 @@ import { colorBlob } from './colorBlob';
 import { usePrefs } from '../prefs';
 import { PackError, readPack, writePack, type PackProgress } from './ybeatPack';
 import { pruneCaches } from './storageUsage';
-import { useAutoEdit, type AeSeg } from './autoEditSettings';
+import { useAutoEdit, type AeLead, type AeSeg, type AeSong, type AutoEditSettings } from './autoEditSettings';
 import { clearProxyBlobs, deleteProxyBlob, proxyBlobIds } from './proxyStore';
 
 /** 專案自動存檔：素材檔案（Blob）與時間軸存在 IndexedDB，重新整理不會遺失 */
@@ -71,12 +71,15 @@ interface Saved {
   autoEdit?: AutoEditPart;
 }
 
-type AutoEditPart = { pick: 'all' | 'list'; segs: AeSeg[] };
-const autoEditPart = (): AutoEditPart => { const a = useAutoEdit.getState(); return { pick: a.pick, segs: a.segs }; };
+type AutoEditPart = { pick: 'all' | 'list'; segs: AeSeg[]; lead?: AeLead | null; song?: AeSong | null; lastTake?: AutoEditSettings['lastTake'] };
+const autoEditPart = (): AutoEditPart => { const a = useAutoEdit.getState(); return { pick: a.pick, segs: a.segs, lead: a.lead, song: a.song, lastTake: a.lastTake }; };
 /** 載入 / 開新專案：素材清單換成這個專案的（不存在的素材拿掉） */
 function setAutoEditPart(p: AutoEditPart | undefined, media: { id: string }[]) {
   const ids = new Set(media.map((m) => m.id));
-  useAutoEdit.setState({ pick: p?.pick ?? 'all', segs: (p?.segs ?? []).filter((g) => ids.has(g.mediaId)) });
+  useAutoEdit.setState({
+    pick: p?.pick ?? 'all', segs: (p?.segs ?? []).filter((g) => ids.has(g.mediaId)), lead: p?.lead ?? null,
+    song: p?.song && ids.has(p.song.mediaId) ? p.song : null, lastTake: p?.lastTake ?? null,
+  });
 }
 
 /** 存檔狀態（顯示在標題列） */
@@ -88,12 +91,12 @@ let started = false;
 
 /** 上次存檔時的專案內容（物件參照）：復原回這個狀態 = 跟存檔一樣，不用再存 */
 type StoreRefs = Pick<ReturnType<typeof useStore.getState>, 'media' | 'clips' | 'effects' | 'audios' | 'markers' | 'tracks' | 'format'>;
-type SavedRefs = StoreRefs & { aeSegs: AeSeg[]; aePick: string };
+type SavedRefs = StoreRefs & { aeSegs: AeSeg[]; aePick: string; aeSong: AeSong | null; aeTake: unknown };
 let savedRefs: SavedRefs | null = null;
-const refsOf = (s: StoreRefs): SavedRefs => ({ media: s.media, clips: s.clips, effects: s.effects, audios: s.audios, markers: s.markers, tracks: s.tracks, format: s.format, aeSegs: useAutoEdit.getState().segs, aePick: useAutoEdit.getState().pick });
+const refsOf = (s: StoreRefs): SavedRefs => ({ media: s.media, clips: s.clips, effects: s.effects, audios: s.audios, markers: s.markers, tracks: s.tracks, format: s.format, aeSegs: useAutoEdit.getState().segs, aePick: useAutoEdit.getState().pick, aeSong: useAutoEdit.getState().song, aeTake: useAutoEdit.getState().lastTake });
 const sameStore = (a: StoreRefs, b: StoreRefs) =>
   a.media === b.media && a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.markers === b.markers && a.tracks === b.tracks && a.format.w === b.format.w && a.format.h === b.format.h; // 比例每次都是新物件，比數值
-const sameRefs = (a: SavedRefs, b: SavedRefs) => sameStore(a, b) && a.aeSegs === b.aeSegs && a.aePick === b.aePick;
+const sameRefs = (a: SavedRefs, b: SavedRefs) => sameStore(a, b) && a.aeSegs === b.aeSegs && a.aePick === b.aePick && a.aeSong === b.aeSong && a.aeTake === b.aeTake;
 
 async function save() {
   useSaveState.setState({ state: 'saving' });
@@ -150,8 +153,8 @@ function startAutosave() {
     else saveTimer = window.setTimeout(save, 600);
   };
   useStore.subscribe((s, p) => { if (!sameStore(s, p)) changed(); });
-  // 自動剪輯的素材清單也存在專案裡
-  useAutoEdit.subscribe((s, p) => { if (s.segs !== p.segs || s.pick !== p.pick) changed(); });
+  // 自動剪輯的素材清單、歌、上一版也存在專案裡
+  useAutoEdit.subscribe((s, p) => { if (s.segs !== p.segs || s.pick !== p.pick || s.song !== p.song || s.lastTake !== p.lastTake) changed(); });
   // 重新打開自動儲存：有沒存的變更就馬上存
   usePrefs.subscribe((s, p) => {
     if (s.autosave && !p.autosave && useSaveState.getState().state === 'dirty') saveSoon();

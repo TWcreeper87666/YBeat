@@ -4,8 +4,8 @@ import { persist } from 'zustand/middleware';
 import { RECIPES, type FxRule, type PlanOptions, type Recipe, type RecipeId } from './autoEdit';
 import { STYLES } from './autoEditStyles';
 import type { MusicInfo, SectionKind } from './musicAnalysis';
-import { attachedAudioIds, uid, type AudioClip, type Media, type useStore } from '../store';
-import { beatSource, mediaBeats } from './beats';
+import { uid, type AudioClip, type Media, type useStore } from '../store';
+import { mediaBeats } from './beats';
 import { FLAT_SHAPE, type EnergyShape } from './energyShape';
 import { trackHistory } from './history';
 import type { PopVariant } from './subjectPop';
@@ -17,8 +17,10 @@ type S = ReturnType<typeof useStore.getState>;
 
 /** 面板的設定（見 PERSISTED：哪些存在 localStorage）；清單存「不用的」，新加的素材 / 模組預設就會用到 */
 export interface AutoEditSettings {
-  audioId: string | null;
-  range: 'all' | 'loop';
+  /** 要剪的歌（素材庫的音訊 / 影片 + 範圍）；null = 素材庫裡最長的那首整段 */
+  song: AeSong | null;
+  /** 上一版：編號 + 內容摘要（「再一版」用；時間軸上的片段、特效、音樂標著同一個 take） */
+  lastTake: { id: string; sig: string } | null;
   /** 內建風格 / 自訂（改過）/ 自己存的風格（my:<id>） */
   recipe: StyleKey;
   params: Recipe;
@@ -36,6 +38,8 @@ export interface AutoEditSettings {
   pick: 'all' | 'list';
   /** 片段清單（從素材分頁拖進來） */
   segs: AeSeg[];
+  /** 使用者指定的主角（null = 自動找）；跟專案一起存 */
+  lead: AeLead | null;
   /** 使用者調整的能量曲線（控制點的位置 = 整段音樂的比例） */
   shape: EnergyShape;
   /** 主體跳出：去背的圖片跟著節拍進場，揭露拍切到完整圖 */
@@ -65,13 +69,20 @@ export interface AutoEditSettings {
   /** 自己存的風格（重設不清掉） */
   myStyles: MyStyle[];
   /** 最近一次的音樂分析（面板的段落條、AI 讀設定用；重設不清掉） */
-  analysis: { audioId: string; info: MusicInfo } | null;
+  /** key = songKey */
+  analysis: { key: string; info: MusicInfo } | null;
   /** 最近一次 AI 導演的結果（面板顯示用；重設不清掉） */
   direction: Record<string, { roles: SectionKind[]; weight: number; highlights: number[]; use?: [number, number][]; avoid?: [number, number][]; note: string; pop?: number }> | null;
 }
 export type StyleKey = RecipeId | 'custom' | `my:${string}`;
 /** 自己存的風格：鏡頭節奏、特效層、轉場權重、密度、強度 */
 export interface MyStyle { id: string; name: string; params: Recipe; rules: FxRule[]; trWeights: Record<string, number>; density: number; intensity: number }
+
+/** 要剪的歌：素材的 a..b 秒；chorus = 使用者標的副歌（歌的秒數，空 / 沒有 = 自動找） */
+export interface AeSong { mediaId: string; a: number; b: number; chorus?: number[] }
+
+/** 指定的主角：臉的特徵（SFace 128 維）+ 臉部縮圖（data URL） */
+export interface AeLead { emb: number[]; thumb: string; /** 只有別人的片段也用（追蹤、推近照樣只對主角） */ mixed?: true }
 
 /** 指定片段：影片的 a..b 秒（圖片 a = b = 0 = 整張） */
 export interface AeSeg { id: string; mediaId: string; a: number; b: number; /** 使用者取的名稱（沒有 = 素材名稱） */ name?: string; /** 裁切框（沒有 = 整個畫面） */ crop?: Crop }
@@ -145,7 +156,7 @@ export function deleteMyStyle(id: string) {
 }
 
 const DEFAULTS = (): Omit<AutoEditSettings, 'analysis' | 'direction' | 'myStyles'> => ({
-  audioId: null, range: 'all', pick: 'all', segs: [], recipe: 'rhythm', params: { ...RECIPES.rhythm }, ...styleFields('rhythm'), density: 1, intensity: 0.5,
+  song: null, lastTake: null, pick: 'all', segs: [], lead: null, recipe: 'rhythm', params: { ...RECIPES.rhythm }, ...styleFields('rhythm'), density: 1, intensity: 0.5,
   kenBurns: true, order: 'library', analyze: true, director: false, directorNote: '', shape: FLAT_SHAPE(),
   popOn: true, popVariants: ['step'], popsPer32: 1, popText: '',
   speedOn: true, speedVariants: ['beatPulse'], speedsPer32: 2, speedIntensity: 0.5, speedEvery: false, speedBoost: 1,
@@ -186,13 +197,30 @@ trackHistory(
 /** 上一版還能不能被「再一版」換掉（autoEditApply 設定；給 AI 工具看，避免 import 循環） */
 export const lastTake = { replaceable: () => false };
 
-/** 可以當配樂的音訊片段：有節拍、不是影片連結的原音；長的排前面 */
-export function musicClips(s: S): AudioClip[] {
-  const att = attachedAudioIds(s);
-  return s.audios
-    .filter((a) => beatSource(a, att) && (mediaBeats(s.media.find((m) => m.id === a.mediaId))?.beats.length ?? 0) >= 8)
-    .sort((a, b) => b.duration - a.duration);
+/** 可以當歌的素材：有節拍的音訊 / 影片；音訊排前面，再來長的排前面 */
+export function songMedia(s: S): Media[] {
+  return s.media
+    .filter((m) => !m.missing && (m.kind === 'audio' || m.kind === 'video') && (mediaBeats(m)?.beats.length ?? 0) >= 8)
+    .sort((a, b) => Number(b.kind === 'audio') - Number(a.kind === 'audio') || b.duration - a.duration);
 }
+
+/** 這次要剪的歌：指定的（素材還在）或素材庫裡第一首的整段；範圍夾在素材長度內 */
+export function aeSong(s: S, st: Pick<AutoEditSettings, 'song'>): AeSong | null {
+  const list = songMedia(s);
+  const m = st.song && list.find((x) => x.id === st.song!.mediaId);
+  if (m) {
+    const a = Math.max(0, Math.min(st.song!.a, m.duration)), b = Math.max(a, Math.min(st.song!.b, m.duration));
+    return { ...st.song!, a, b };
+  }
+  return list[0] ? { mediaId: list[0].id, a: 0, b: list[0].duration } : null;
+}
+
+/** 面板顯示的分析是哪一首歌、哪一段（跟 songClip 放上去的片段算法一樣） */
+export const songKey = (song: Pick<AeSong, 'mediaId' | 'a' | 'b'>) => `${song.mediaId}:${song.a}:${song.b - song.a}`;
+/** 歌放上時間軸的音訊片段（start = 時間軸秒數） */
+export const songClip = (song: AeSong, start: number, id: string, take?: string): AudioClip => ({
+  id, mediaId: song.mediaId, track: 0, start, duration: song.b - song.a, in: song.a, volume: 1, fadeIn: 0, fadeOut: 0, rate: 1, ...(take ? { take } : {}),
+});
 
 /** 可以拿來剪的素材（影片 / 圖片，素材庫順序） */
 export const footage = (s: S): Media[] => s.media.filter((m) => !m.missing && (m.kind === 'video' || m.kind === 'image'));

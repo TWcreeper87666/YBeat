@@ -1,4 +1,4 @@
-import { confidentLead, cosine, findLead, leadInfo, leadShare, similarity, SFACE_DST, type FacesAt } from '../src/engine/faceLead';
+import { confidentLead, cosine, findLead, followableLead, isLead, leadInfo, leadShare, pickedLead, refineLead, similarity, SFACE_DST, type FacesAt } from '../src/engine/faceLead';
 import type { MediaInfo } from '../src/engine/mediaAnalysis';
 
 let fails = 0;
@@ -42,6 +42,21 @@ ok(cosine(vec(1), vec(1, 0.1)) > 0.9 && Math.abs(cosine(vec(1), vec(2))) < 0.3, 
   ok(confidentLead(lead, 0.6), '主角夠明顯');
   ok(!confidentLead(lead, 0.2), '有臉的畫面裡很少有主角 → 不確定');
   ok(!confidentLead(findLead([A(0), A(0.1), B(0), B(0.1)]), 1), '兩個人一樣多 → 不確定');
+  // 只比別人多一點：不夠明顯，但可以拿來決定追誰
+  const slight = findLead([A(0), A(0.1), A(0.2), B(0), B(0.1)]);
+  ok(!confidentLead(slight, 1) && followableLead(slight), '比別人多一點 → 不確定，但可以追');
+  ok(!followableLead(findLead([A(0), A(0.1), A(0.2), B(0), B(0.1), B(0.2)])), '兩個人一樣多 → 不追');
+  ok(!followableLead(findLead([A(0), A(0.1)])), '臉太少 → 不追');
+  // 指定的主角：拿那張臉的特徵比對
+  const picked = pickedLead(vec(2));
+  ok(confidentLead(picked, 0.5) && isLead(B(0), picked) && !isLead(A(0), picked), '指定的主角只認那個人');
+  // 指定的那一格比較糊：用其他素材裡很像的臉擴充，會更接近這個人本來的樣子，也不會收到別人
+  const blurry = vec(2, 0.6);
+  const pool = [B(0.2), B(0.25), B(0.3), B(0.2), A(0), A(0.1), C(0)];
+  const refined = refineLead(blurry, pool);
+  ok(cosine(refined, vec(2)) > cosine(blurry, vec(2)) && cosine(refined, vec(1)) < 0.3 && cosine(refined, vec(3)) < 0.3,
+    `擴充指定主角：更像本人（${cosine(blurry, vec(2)).toFixed(2)} → ${cosine(refined, vec(2)).toFixed(2)}），不收別人`);
+  ok(cosine(refineLead(vec(2), [A(0), C(0)]), vec(2)) > 0.999, '沒有像的臉：用原本那張');
   // 群眾畫面：一格很多張別人的臉，用格數算主角還是佔多數
   const crowd: FacesAt[] = [
     [{ x: 0.5, y: 0.5, w: 0.1, h: 0.2, ...A(0) }, ...Array.from({ length: 6 }, (_, k) => ({ x: 0.1 * k, y: 0.8, w: 0.03, h: 0.05, emb: vec(10 + k) }))],

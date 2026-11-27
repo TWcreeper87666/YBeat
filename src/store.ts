@@ -54,13 +54,19 @@ export interface ItemBase {
   link?: string;
   /** 群組：同一個 id 的項目一起選取、一起移動 */
   group?: string;
+  /** 自動剪輯的第幾版（「再一版」換掉標著這個編號的東西）；複製、分割出來的不帶 */
+  take?: string;
 }
 
-/** 特效參數跟著音訊變化 */
+/** 特效參數跟著音訊（或隨機）變化 */
 export interface AudioDrive {
-  source: 'level' | 'beat';
+  source: 'level' | 'beat' | 'random';
   min: number;
   max: number;
+  /** 隨機：每秒換幾次值（沒有 = 8） */
+  rate?: number;
+  /** 隨機：種子（同一個種子每次播放都一樣） */
+  seed?: number;
   /** 只聽這些軌道的聲音（軌道索引；video = 影片片段本身的聲音）；沒有 = 全部 */
   from?: AudioFrom;
 }
@@ -138,7 +144,7 @@ export interface FxItem extends ItemBase {
   id: string;
   moduleId: string;
   params: ParamValues;
-  /** 參數跟著音量 / 節拍變化 */
+  /** 參數跟著音量 / 節拍 / 隨機變化 */
   audio?: Record<string, AudioDrive>;
   /** point 參數跟著片段追蹤的目標（沒有 = 照模組的 @follow 預設；null = 關掉） */
   follow?: FollowMap;
@@ -675,7 +681,7 @@ export const useStore = create<State>()(
         return [...out];
       };
 
-      /** 一批項目換上新的連結 / 群組 id（貼上、分割後的新片段不能跟原本的共用） */
+      /** 一批項目換上新的連結 / 群組 id、拿掉自動剪輯的版本編號（貼上、分割後的新片段不能跟原本的共用） */
       const freshIds = <T extends AnyItem>(items: T[]): T[] => {
         const map = new Map<string, string>();
         const re = (v: string | undefined) => {
@@ -683,7 +689,11 @@ export const useStore = create<State>()(
           if (!map.has(v)) map.set(v, uid());
           return map.get(v);
         };
-        return items.map((it) => (it.link || it.group ? { ...it, link: re(it.link), group: re(it.group) } : it));
+        return items.map((it) => {
+          if (!it.link && !it.group && !it.take) return it;
+          const { take: _t, ...rest } = it;
+          return { ...rest, link: re(it.link), group: re(it.group) } as T;
+        });
       };
 
       /** 單一可見片段（含連結原音）到下一個片段之間，是否有可縮入的空隙。 */

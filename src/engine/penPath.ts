@@ -141,3 +141,90 @@ export function fitPen(pts: PenPt[], box: { x0: number; y0: number; x1: number; 
     };
   });
 }
+
+/** SVG 弧線（A 指令）→ 幾段三次貝茲曲線（每段 ≤ 90°）：[c1x, c1y, c2x, c2y, x, y] */
+function arcToCubics(x1: number, y1: number, rx: number, ry: number, phiDeg: number, large: boolean, sweep: boolean, x2: number, y2: number): number[][] {
+  if (!rx || !ry || (x1 === x2 && y1 === y2)) return [[x1, y1, x2, y2, x2, y2]];
+  rx = Math.abs(rx); ry = Math.abs(ry);
+  const phi = (phiDeg * Math.PI) / 180, cp = Math.cos(phi), sp = Math.sin(phi);
+  // 端點 → 中心（SVG 規格 F.6.5）
+  const dx = (x1 - x2) / 2, dy = (y1 - y2) / 2;
+  const x1p = cp * dx + sp * dy, y1p = -sp * dx + cp * dy;
+  const lam = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+  if (lam > 1) { rx *= Math.sqrt(lam); ry *= Math.sqrt(lam); }
+  const num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
+  const den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
+  const co = (large === sweep ? -1 : 1) * Math.sqrt(Math.max(0, num / den));
+  const cxp = (co * rx * y1p) / ry, cyp = (-co * ry * x1p) / rx;
+  const cx = cp * cxp - sp * cyp + (x1 + x2) / 2, cy = sp * cxp + cp * cyp + (y1 + y2) / 2;
+  const ang = (ux: number, uy: number, vx: number, vy: number) => Math.atan2(ux * vy - uy * vx, ux * vx + uy * vy);
+  const t1 = ang(1, 0, (x1p - cxp) / rx, (y1p - cyp) / ry);
+  let dt = ang((x1p - cxp) / rx, (y1p - cyp) / ry, (-x1p - cxp) / rx, (-y1p - cyp) / ry);
+  if (!sweep && dt > 0) dt -= 2 * Math.PI;
+  else if (sweep && dt < 0) dt += 2 * Math.PI;
+  const n = Math.max(1, Math.ceil(Math.abs(dt) / (Math.PI / 2) - 1e-9));
+  const seg = dt / n, k = (4 / 3) * Math.tan(seg / 4);
+  const pt = (t: number): [number, number] => [cx + rx * Math.cos(t) * cp - ry * Math.sin(t) * sp, cy + rx * Math.cos(t) * sp + ry * Math.sin(t) * cp];
+  const dv = (t: number): [number, number] => [-rx * Math.sin(t) * cp - ry * Math.cos(t) * sp, -rx * Math.sin(t) * sp + ry * Math.cos(t) * cp];
+  const out: number[][] = [];
+  for (let i = 0; i < n; i++) {
+    const a = t1 + i * seg, b = a + seg;
+    const [ax, ay] = pt(a), [bx, by] = pt(b), [dax, day] = dv(a), [dbx, dby] = dv(b);
+    out.push([ax + k * dax, ay + k * day, bx - k * dbx, by - k * dby, bx, by]);
+  }
+  return out;
+}
+
+/**
+ * SVG 路徑 → 鋼筆錨點（只取第一個子路徑；M / L / H / V / C / A / Z，大小寫都可以）。
+ * 給「在畫面上繪製」從現有的形狀開始改用：內建形狀、形狀庫的鋼筆形狀、主體輪廓描成的路徑
+ */
+export function pathToPen(d: string): PenPt[] {
+  const tok = d.match(/[a-zA-Z]|-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/g) ?? [];
+  const pts: PenPt[] = [];
+  let i = 0, cmd = '', x = 0, y = 0, started = false;
+  const num = () => Number(tok[i++]);
+  const isNum = () => i < tok.length && !/^[a-zA-Z]$/.test(tok[i]);
+  const lineTo = (nx: number, ny: number) => { pts.push({ x: nx, y: ny }); x = nx; y = ny; };
+  const curveTo = (c1x: number, c1y: number, c2x: number, c2y: number, nx: number, ny: number) => {
+    const last = pts[pts.length - 1];
+    if (last) last.o = [c1x - last.x, c1y - last.y];
+    pts.push({ x: nx, y: ny, i: [c2x - nx, c2y - ny] });
+    x = nx; y = ny;
+  };
+  while (i < tok.length) {
+    if (!isNum()) cmd = tok[i++];
+    const rel = cmd === cmd.toLowerCase();
+    const C = cmd.toUpperCase();
+    if (C === 'Z') break;
+    if (C === 'M') {
+      if (started) break;
+      started = true;
+      const nx = num() + (rel ? x : 0), ny = num() + (rel ? y : 0);
+      lineTo(nx, ny);
+      cmd = rel ? 'l' : 'L'; // M 後面接著的座標 = L
+      continue;
+    }
+    if (!started || !isNum()) { i++; continue; }
+    if (C === 'L') lineTo(num() + (rel ? x : 0), num() + (rel ? y : 0));
+    else if (C === 'H') lineTo(num() + (rel ? x : 0), y);
+    else if (C === 'V') lineTo(x, num() + (rel ? y : 0));
+    else if (C === 'C') {
+      const v = [num(), num(), num(), num(), num(), num()];
+      if (rel) for (let k = 0; k < 6; k++) v[k] += k % 2 ? y : x;
+      curveTo(v[0], v[1], v[2], v[3], v[4], v[5]);
+    } else if (C === 'A') {
+      const rx = num(), ry = num(), rot = num(), la = num(), sw = num();
+      const nx = num() + (rel ? x : 0), ny = num() + (rel ? y : 0);
+      for (const c of arcToCubics(x, y, rx, ry, rot, !!la, !!sw, nx, ny)) curveTo(c[0], c[1], c[2], c[3], c[4], c[5]);
+    } else i++;
+  }
+  // 最後一點跟第一點重疊（封閉）：合併成一點
+  if (pts.length > 1) {
+    const a = pts[0], b = pts[pts.length - 1];
+    if (Math.hypot(a.x - b.x, a.y - b.y) < 1e-6) { if (b.i) a.i = b.i; pts.pop(); }
+  }
+  // 直線進來的點：進把手是 0（不然會被當成對稱的平滑點）
+  for (const p of pts) if (p.o && !p.i) p.i = [0, 0];
+  return pts;
+}

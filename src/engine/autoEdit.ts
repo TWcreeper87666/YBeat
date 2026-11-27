@@ -4,6 +4,7 @@ import type { SectionKind } from './musicAnalysis';
 import type { PlanPop, PopVariant } from './subjectPop';
 import { boostSpeed, speedCurve, speedFocus, type PlanSpeed, type SpeedVariant } from './speedRamp';
 import type { BeatEvery } from './trigger';
+import type { AudioDrive } from '../store';
 
 export interface Recipe {
   id: string;
@@ -48,6 +49,8 @@ export interface FxRule {
   chance: number;
   /** when = accent / drop：方塊長幾拍（沒有 = 1；衝擊型特效套用時會再縮成模組的長度） */
   beats?: number;
+  /** 參數自己的訊號（例如隨機強度的閃白）；有的話這層當氛圍，跟什麼都能疊 */
+  drive?: Record<string, AudioDrive>;
 }
 /** 給編排器的特效層：套用端已經算好組別、是不是衝擊型、參數（強度）、機率（乘過密度） */
 export interface RuleOpt extends Omit<FxRule, 'on'> {
@@ -66,7 +69,10 @@ export interface PlanOptions {
   kenBurns: boolean;
   /** library = 清單順序（每 3 個一組小洗牌）；shuffle = 每輪全部洗牌、依適合度挑；bag = 每輪洗牌後照順序用完（同一支影片的片段盡量分開） */
   order: 'library' | 'shuffle' | 'bag';
-  pops?: { variants: PopVariant[]; per32: number; text?: string };
+  /** at = 使用者標的副歌開頭（拍號）：有的話只在這些地方跳出，不看次數上限 */
+  pops?: { variants: PopVariant[]; per32: number; text?: string; at?: number[];
+    /** 前幾版用過的種類（新的在後）：先輪到還沒出現過的，勾的每一種都會輪到 */
+    recent?: PopVariant[] };
   /** every = 每個影片鏡頭都套用（不看次數、間隔）；boost = 整體加速（素材用掉的倍數，1 = 不加速） */
   speed?: { variants: SpeedVariant[]; per32: number; intensity: number; every?: boolean; boost?: number };
   /** 特效層（依清單順序；同優先度時前面的贏） */
@@ -105,14 +111,19 @@ export interface PlanMedia {
   ban?: Span[];
   /** 影片的某一格（當成圖片）：只拿來做主體跳出，揭露那一拍接著播那支影片；不進一般的輪播。 */
   popOnly?: true;
+  /** popOnly 那一格出自哪支影片。 */
+  srcId?: string;
   /** 主角的臉出現的取樣點（素材時間；圖片 t = 0）。 */
   leadPts?: { t: number; x: number; y: number; w: number; h: number }[];
+  /** 有主角（指定的或自動找到的）：沒取樣到主角的鏡頭不追別人的臉 */
+  leadKnown?: true;
   /** 整個素材平均有多少人（0..1；圖片 = 那一張）。 */
   people?: number;
   /** 圖片裡最大的臉。 */
   face?: FaceBox | null;
   /** 圖片主體構圖。 */
-  pop?: { ok: boolean; centered: boolean; cx: number; cy: number; path?: string };
+  /** ok = 主體整個在畫面裡；loose = 只碰到下緣（只能做剪影窗 / 主體挖洞） */
+  pop?: { ok: boolean; loose?: boolean; centered: boolean; cx: number; cy: number; path?: string };
   /** AI 導演評估的主體跳出適合度，範圍 0 至 1。 */
   popSuit?: number;
 }
@@ -133,12 +144,16 @@ export interface PlanOverlay {
   b0: number; b1: number; moduleId: string; params?: Record<string, number | boolean>; everyBeat?: boolean;
   /** 特效層產生的：觸發方式 */
   trigger?: PlanTrigger;
+  /** 特效層產生的：參數的訊號（FxRule.drive） */
+  drive?: Record<string, AudioDrive>;
   /** 特效層產生的：第幾層（options.rules 的索引；套用時每層一條特效軌）；沒有 = 舊的點綴 */
   lane?: number;
 }
 /** speedSkip：變速沒套上的影片鏡頭，各原因幾個（產生結果裡顯示，方便調整） */
 export type SpeedSkip = 'spacing' | 'kind' | 'short' | 'cut' | 'motion' | 'ban';
-export interface EditPlan { seed: number; recipe: string; shots: PlanShot[]; overlays: PlanOverlay[]; pops: PlanPop[]; speedSkip?: Partial<Record<SpeedSkip, number>> }
+export interface EditPlan { seed: number; recipe: string; shots: PlanShot[]; overlays: PlanOverlay[]; pops: PlanPop[]; speedSkip?: Partial<Record<SpeedSkip, number>>;
+  /** 主體跳出的位置（drop + 能量上升）有幾個、能用的主體有幾個（沒有跳出時告訴使用者為什麼） */
+  popStats?: { slots: number; subjects: number } }
 export interface PlanInput {
   beats: { t: number; down: boolean }[];
   music: MusicInfo;
@@ -203,20 +218,19 @@ export function planEdit(input: PlanInput): EditPlan {
     const enabled = [...new Set(popOptions.variants)].filter((v): v is PopVariant =>
       ['step', 'mono', 'fly', 'shake', 'crossShot', 'textBehind', 'trail', 'grid', 'spin', 'dim', 'halo', 'blur',
         'silhouetteWindow', 'subjectHole'].includes(v));
-    const drops = [...new Set(music.drops)].filter((b) => b > start && b < end);
-    const rises = music.sections.slice(1).filter((s, i) =>
-      s.energy > music.sections[i].energy + 0.1).map((s) => s.b0)
-      .filter((b) => b > start && b < end && !drops.includes(b));
+    const marked = [...new Set(popOptions.at ?? [])].filter((b) => b > start && b < end).sort((a, b) => a - b);
+    const { drops, rises } = marked.length ? { drops: marked, rises: [] } : popSlots(music, start, end);
     const budget = new Map<number, number>();
     const counts = new Map<number, number>();
     let lastVariant: PopVariant | undefined;
+    plan.popStats = { slots: drops.length + rises.length, subjects: media.filter((m) => m.kind === 'image' && (m.pop?.ok || m.pop?.loose)).length };
     for (const b1 of [...drops, ...rises]) {
       const bucket = Math.floor((b1 - start) / 32);
       if (!budget.has(bucket)) budget.set(bucket, Math.floor(popOptions.per32) + (popRng() < popOptions.per32 % 1 ? 1 : 0));
-      if ((counts.get(bucket) ?? 0) >= budget.get(bucket)!) continue;
+      if (!marked.length && (counts.get(bucket) ?? 0) >= budget.get(bucket)!) continue;
       if (plan.pops.some((p) => Math.abs(p.b1 - b1) < 16)) continue;
       const sectionKind = music.sections.find((s) => s.b0 <= b1 && b1 < s.b1)?.kind;
-      const candidates = media.filter((m) => m.kind === 'image' && m.pop?.ok &&
+      const candidates = media.filter((m) => m.kind === 'image' && (m.pop?.ok || m.pop?.loose) &&
         (m.weight !== 0 || !media.some((item) => item.weight !== 0)));
       const subjects = candidates.some((m) => m.popSuit !== 0)
         ? candidates.filter((m) => m.popSuit !== 0) : candidates;
@@ -228,10 +242,12 @@ export function planEdit(input: PlanInput): EditPlan {
         plan.pops.filter((p) => p.mediaId === m.id).length * 2 })).sort((a, b) => b.rank - a.rank);
       let picked: PlanPop | undefined;
       for (const { m } of ranked) {
-        const revealImages = media.filter((other) => other.kind === 'image' && !other.popOnly && other.id !== m.id &&
+        // 揭露用的另一個畫面：圖片，或影片（停在片段起點那一格）；不能跟主體是同一支影片
+        const revealImages = media.filter((other) => !other.popOnly && other.id !== m.id && other.id !== m.srcId &&
           !plan.pops.some((p) => (p.mediaId === other.id || p.revealMediaId === other.id) &&
             b1 - 4 < p.b1 && p.b0 < b1));
-        const revealImage = revealImages.find((other) => other.pop?.ok === false) ?? revealImages[0];
+        const revealImage = revealImages.find((other) => other.kind === 'image' && other.pop?.ok === false) ??
+          revealImages.find((other) => other.kind === 'image') ?? revealImages[0];
         const variants = enabled.filter((v) => (!['step', 'shake', 'trail', 'grid', 'spin', 'halo'].includes(v) || m.pop!.centered) &&
           (v !== 'crossShot' || !!revealImage && media.some((base) =>
             base.id !== m.id && base.id !== revealImage.id &&
@@ -240,12 +256,18 @@ export function planEdit(input: PlanInput): EditPlan {
           (v !== 'textBehind' || !!popOptions.text?.trim()) &&
           b1 - (v === 'fly' ? 2 : 4) >= start);
         if (!variants.length) continue;
-        const alternate = variants.filter((v) => v !== lastVariant);
-        const pool = alternate.length ? alternate : variants;
+        // 勾的種類平均輪流：這一版、前幾版都還沒用過的先（最久沒用的優先），不連續兩次一樣
+        const used = [...(popOptions.recent ?? []), ...plan.pops.map((p) => p.variant)];
+        const age = (v: PopVariant) => { const i = used.lastIndexOf(v); return i < 0 ? -1 : i; };
+        const fresh = variants.filter((v) => v !== lastVariant);
+        const cand = fresh.length ? fresh : variants;
+        const oldest = Math.min(...cand.map(age));
+        const pool = cand.filter((v) => age(v) === oldest);
         const variant = pool[Math.floor(popRng() * pool.length)];
         picked = { b0: b1 - (variant === 'fly' ? 2 : 4), b1, variant, mediaId: m.id, cx: m.pop!.cx, cy: m.pop!.cy,
           ...(['crossShot', 'silhouetteWindow', 'subjectHole'].includes(variant) ? { revealMediaId: revealImage!.id } : {}),
-          ...(['silhouetteWindow', 'subjectHole'].includes(variant) ? { path: m.pop!.path } : {}),
+          // 主體輪廓：遮罩類的形狀；其他種類用它濾掉人以外的東西（只用在原位縮放的層）
+          ...(m.pop!.path ? { path: m.pop!.path } : {}),
           ...(variant === 'textBehind' ? { text: popOptions.text!.trim() } : {}),
           ...(variant === 'fly' ? { side: popRng() < 0.5 ? -1 as const : 1 as const } : {}) };
         break;
@@ -693,7 +715,7 @@ export function planEdit(input: PlanInput): EditPlan {
       b1 = Math.floor(b1);
       if (b1 - b0 < 1) return;
       proposals.push({ rule, lane, overlay: { b0, b1, moduleId: rule.moduleId,
-        ...(rule.params ? { params: rule.params } : {}), ...(trigger ? { trigger } : {}), lane } });
+        ...(rule.params ? { params: rule.params } : {}), ...(rule.drive ? { drive: rule.drive } : {}), ...(trigger ? { trigger } : {}), lane } });
     };
     // 變速：衝進剪接點這幾種的落點（下一個鏡頭的第一拍）當重音；變速期間不疊縮放類
     const LANDING = new Set<SpeedVariant>(['hitRamp', 'whooshRamp', 'tapeStop', 'rewindToCut']);
@@ -778,13 +800,16 @@ export function planEdit(input: PlanInput): EditPlan {
     const f = m.kind === 'image' ? m.face ?? null
       : m.info ? faceIn(m.info, shot.in + (shot.speed?.sourceMin ?? 0), shot.in + (shot.speed?.sourceMax ?? duration(shot.b0, shot.b1))) : null;
     if (!f || f.h < FACE_MIN_H) continue;
-    shot.face = f;
     // 主角在這個鏡頭裡的取樣點（離中間最近的）
     const t0 = m.kind === 'image' ? 0 : shot.in + (shot.speed?.sourceMin ?? 0);
     const t1 = m.kind === 'image' ? 0 : shot.in + (shot.speed?.sourceMax ?? duration(shot.b0, shot.b1));
     const mid = (t0 + t1) / 2;
     // 取樣大約每秒一格：短鏡頭可能夾在兩格中間，前後放寬 1 秒
     const pt = m.leadPts?.filter((p) => p.t >= t0 - 1 && p.t <= t1 + 1).sort((a, b) => Math.abs(a.t - mid) - Math.abs(b.t - mid))[0];
+    // 有主角、但這個鏡頭附近沒取樣到他：不追（最大的臉可能是別人）
+    if (!pt && m.leadKnown) continue;
+    // 推近也對準主角，不是畫面裡最大的臉
+    shot.face = pt ? { x: pt.x, y: pt.y, w: pt.w, h: pt.h } : f;
     if (pt) shot.anchor = pt;
     else if (m.kind === 'video' && m.info?.faces) {
       const { step, faces } = m.info;
@@ -799,6 +824,27 @@ export function planEdit(input: PlanInput): EditPlan {
     }
   }
   return plan;
+}
+
+/** 往後找最大聲的段落時，最多往後看幾拍（pre-chorus 大多 8～16 小節以內） */
+const RISE_REACH = 64;
+
+/**
+ * 自動找的主體跳出位置（拍號）：drop + 能量往上的段落開頭。
+ * 後面的段落還在變大聲（pre-chorus → 副歌）就一路往後走到最大聲的那段，前兆（越來越大聲的鋪陳）不當成副歌
+ */
+export function popSlots(music: Pick<MusicInfo, 'drops' | 'sections'>, start: number, end: number): { drops: number[]; rises: number[] } {
+  const drops = [...new Set(music.drops)].filter((b) => b > start && b < end);
+  const secs = music.sections;
+  const peakOf = (i: number) => {
+    while (i + 1 < secs.length && secs[i + 1].energy > secs[i].energy + 0.02 && secs[i + 1].b0 - secs[i].b0 <= RISE_REACH) i++;
+    return i;
+  };
+  const rises = [...new Set(secs.map((s, i) => (i > 0 && s.energy > secs[i - 1].energy + 0.1 ? peakOf(i) : -1))
+    .filter((i) => i > 0 && secs[i].kind !== 'build'))]
+    .map((i) => secs[i].b0)
+    .filter((b) => b > start && b < end && !drops.includes(b));
+  return { drops, rises };
 }
 
 /** 臉至少要這麼大（素材高度的比例）才算有人 */

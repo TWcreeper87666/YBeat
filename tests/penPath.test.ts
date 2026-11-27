@@ -1,4 +1,4 @@
-import { fitPen, insertPoint, movePts, nearestOnPath, penBounds, penToPath, penToShape, ptsInRect, segPoint, type PenPt } from '../src/engine/penPath';
+import { fitPen, pathToPen, insertPoint, movePts, nearestOnPath, penBounds, penToPath, penToShape, ptsInRect, segPoint, type PenPt } from '../src/engine/penPath';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -54,6 +54,22 @@ const rb = penBounds(rot);
 ok(near(rb.x1 - rb.x0, 10) && near(rb.y1 - rb.y0, 20) && near((rb.x0 + rb.x1) / 2, 10) && near((rb.y0 + rb.y1) / 2, 5), '旋轉 90° 繞框中心');
 const rh = fitPen([{ x: 0, y: 0, o: [10, 0] }, { x: 10, y: 0 }, { x: 10, y: 10 }], { x0: 0, y0: 0, x1: 10, y1: 10 }, 90);
 ok(near(rh[0].o![0], 0, 1e-9) && rh[0].o![1] > 0, '把手也跟著旋轉（往右 → 往下）');
+
+// SVG 路徑 → 鋼筆錨點（「在畫面上繪製」從選的形狀開始）
+{
+  const rect = pathToPen('M0 0H200V200H0Z');
+  ok(rect.length === 4 && rect.every((p) => !p.o) && rect[2].x === 200 && rect[2].y === 200, '矩形 → 4 個角點');
+  const el = pathToPen('M100 0A100 100 0 1 1 100 200A100 100 0 1 1 100 0Z');
+  const eb = penBounds(el);
+  ok(el.length === 4 && el.every((p) => p.o && p.i), `橢圓 → 4 個平滑點（${el.length}）`);
+  ok(near(eb.x0, 0, 0.5) && near(eb.x1, 200, 0.5) && near(eb.y0, 0, 0.5) && near(eb.y1, 200, 0.5), '橢圓的範圍 = 0..200');
+  const ring = pathToPen('M0 0L10 0L10 10ZM2 2L4 2L4 4Z');
+  ok(ring.length === 3, '只取第一個子路徑');
+  const mix = pathToPen('M0 0L100 0C150 0 200 50 200 100L0 100Z');
+  ok(!!mix[1].o && !!mix[1].i && mix[1].i[0] === 0 && mix[1].i[1] === 0, '直線接曲線的點：進把手是 0（還是角）');
+  const rel = pathToPen('m10 10l10 0l0 10z');
+  ok(rel[1].x === 20 && rel[2].y === 20, '相對座標');
+}
 
 console.log(fails ? `\n${fails} 項失敗` : '\n全部通過');
 if (fails) process.exit(1);

@@ -12,8 +12,13 @@ export interface StyleDef {
   speed?: { per32: number; intensity: number };
 }
 
-const r = (id: string, moduleId: string, when: RuleWhen, levels: (0 | 1 | 2)[], chance: number, x: { every?: BeatEvery; beats?: number } = {}): FxRule =>
+const r = (id: string, moduleId: string, when: RuleWhen, levels: (0 | 1 | 2)[], chance: number, x: Pick<FxRule, 'every' | 'beats' | 'drive'> = {}): FxRule =>
   ({ id, moduleId, on: true, when, levels, chance, ...x });
+
+/** 暗角：整段鋪著（不跟音量） */
+const VIGNETTE = r('vignette', 'fx-vignette', 'section', [0, 1, 2], 1);
+/** 每拍閃白、強度隨機（忽明忽暗） */
+const FLICKER = r('flicker', 'fx-flash', 'beat', [1, 2], 1, { every: 1, drive: { intensity: { source: 'random', min: 0, max: 0.9, rate: 2 } } });
 
 /** 強烈的轉場（穩的時候少用） */
 const STRONG = ['tr-whip', 'tr-glitch', 'tr-rgbsplit', 'tr-shake', 'tr-crashzoom', 'tr-flash', 'tr-spin', 'tr-shockwave'];
@@ -21,7 +26,7 @@ const STRONG = ['tr-whip', 'tr-glitch', 'tr-rgbsplit', 'tr-shake', 'tr-crashzoom
 export const STYLES: Record<RecipeId, StyleDef> = {
   calm: {
     rules: [
-      r('vignette', 'fx-vignette', 'section', [0, 1, 2], 1),
+      VIGNETTE,
       r('letterbox', 'fx-letterbox', 'section', [0], 1),
       r('grain', 'fx-grain', 'section', [0, 1, 2], 1),
       r('leak', 'fx-lightleak', 'accent', [0, 1], 0.3, { beats: 2 }),
@@ -30,7 +35,8 @@ export const STYLES: Record<RecipeId, StyleDef> = {
   },
   rhythm: {
     rules: [
-      r('vignette', 'fx-vignette', 'section', [0, 1, 2], 1),
+      VIGNETTE,
+      FLICKER,
       r('pulse', 'fx-zoompulse', 'beat', [2], 1, { every: 2 }),
       r('rgb', 'fx-rgb', 'accent', [1, 2], 0.4),
       r('drop', 'fx-flash', 'drop', [0, 1, 2], 1),
@@ -40,7 +46,8 @@ export const STYLES: Record<RecipeId, StyleDef> = {
   },
   hype: {
     rules: [
-      r('vignette', 'fx-vignette', 'section', [0, 1, 2], 1),
+      VIGNETTE,
+      FLICKER,
       r('shake', 'fx-shake', 'beat', [2], 1, { every: 1 }),
       r('pulse', 'fx-zoompulse', 'beat', [1], 1, { every: 2 }),
       r('flash', 'fx-flash', 'cut', [1, 2], 0.6),
@@ -51,7 +58,8 @@ export const STYLES: Record<RecipeId, StyleDef> = {
   },
   velocity: {
     rules: [
-      r('vignette', 'fx-vignette', 'section', [0, 1, 2], 1),
+      VIGNETTE,
+      FLICKER,
       r('pulse', 'fx-zoompulse', 'beat', [2], 1, { every: 1 }),
       r('shake', 'fx-shake', 'beat', [1, 2], 0.6, { every: 2 }),
       r('chroma', 'fx-chromazoom', 'accent', [1], 0.7),
@@ -64,7 +72,8 @@ export const STYLES: Record<RecipeId, StyleDef> = {
   },
   glitch: {
     rules: [
-      r('vignette', 'fx-vignette', 'section', [0, 1, 2], 1),
+      VIGNETTE,
+      FLICKER,
       r('glitch', 'fx-glitch', 'cut', [2], 0.5),
       r('rgb', 'fx-rgb', 'beat', [1], 0.5, { every: 1 }),
       r('twitch', 'fx-twitch', 'accent', [1, 2], 0.7),
@@ -76,7 +85,8 @@ export const STYLES: Record<RecipeId, StyleDef> = {
   },
   flash: {
     rules: [
-      r('vignette', 'fx-vignette', 'section', [0, 1, 2], 1),
+      VIGNETTE,
+      FLICKER,
       r('flash', 'fx-flash', 'cut', [1, 2], 0.8),
       r('strobe', 'fx-strobe', 'drop', [0, 1, 2], 1, { beats: 4 }),
       r('blur', 'fx-blurpulse', 'beat', [2], 0.5, { every: 1 }),

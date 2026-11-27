@@ -19,6 +19,8 @@ import { beatHits, HIT_MIN, normalizeHits, overwriteHits, type BeatEvery, type F
 import { beatSnapPoints } from './beatGrid';
 import { AudioLines, ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Timer } from 'lucide-react';
 import { marqueeClamp } from './marqueeClamp';
+import { ViewScrollbar, wheelViewAction } from './wheelView';
+import { dragPan } from './middlePan';
 
 // ───────────────────────── 資料介面 ─────────────────────────
 
@@ -638,7 +640,7 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
     return Math.min(dur, Math.max(0, view.a + ((clientX - r.left) / r.width) * span));
   };
 
-  // 時間軸區：Ctrl + 滾輪縮放（以游標為中心）、Shift + 滾輪 / 水平滾動平移
+  // 時間軸區：Ctrl + 滾輪縮放（以游標為中心），滾輪依時間軸設定平移
   useEffect(() => {
     const el = tableRef.current;
     if (!el) return;
@@ -648,26 +650,34 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
       const { view: v, dur: d, setView: sv } = viewRef.current;
       const r = rulerRef.current.getBoundingClientRect();
       const sp = v.b - v.a;
-      if (e.ctrlKey || e.metaKey) {
+      const action = wheelViewAction(e, useLayout.getState().wheelScroll, true);
+      if (action.kind === 'zoom') {
         e.preventDefault();
         const anchor = v.a + Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)) * sp;
-        sv(zoomView(v, anchor, Math.exp(e.deltaY * 0.0025), d));
+        sv(zoomView(v, anchor, Math.exp(action.delta * 0.0025), d));
         return;
       }
-      // 跟時間軸一樣：設定「水平」= 直接滾左右捲、Shift / Alt 上下捲；「垂直」相反；觸控板左右滑一律水平
-      const swap = e.shiftKey || e.altKey;
-      const horizontalFirst = useLayout.getState().wheelScroll !== 'vertical';
-      const swipeX = Math.abs(e.deltaX) > Math.abs(e.deltaY) && !swap;
-      const wantX = swipeX || (horizontalFirst ? !swap : swap);
-      const dd = swap ? e.deltaY || e.deltaX : swipeX ? e.deltaX : e.deltaY;
-      if (!dd) return;
+      if (!action.delta) return;
       e.preventDefault();
-      if (wantX) {
-        if (sp < d - 1e-6) sv({ a: v.a + (dd / r.width) * sp, b: v.b + (dd / r.width) * sp });
-      } else scrollParent(el)?.scrollBy({ top: dd });
+      if (action.kind === 'scrollX') {
+        if (sp < d - 1e-6) sv({ a: v.a + (action.delta / r.width) * sp, b: v.b + (action.delta / r.width) * sp });
+      } else scrollParent(el)?.scrollBy({ top: action.delta });
     };
     el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
+    // 中鍵拖曳：左右平移顯示範圍（有放大時）、上下捲動面板
+    const onPan = (e: PointerEvent) => {
+      const t = e.target as HTMLElement;
+      if (e.button !== 1 || !t.closest?.('.ec-right') || !rulerRef.current) return;
+      const { view: v, dur: d, setView: sv } = viewRef.current;
+      const w = rulerRef.current.getBoundingClientRect().width, sp = v.b - v.a;
+      const sc = scrollParent(el), st = sc?.scrollTop ?? 0;
+      dragPan(e, (dx, dy) => {
+        if (sp < d - 1e-6) { const a = Math.max(0, Math.min(d - sp, v.a - (dx / w) * sp)); sv({ a, b: a + sp }); }
+        if (sc) sc.scrollTop = st - dy;
+      });
+    };
+    el.addEventListener('pointerdown', onPan, true);
+    return () => { el.removeEventListener('wheel', onWheel); el.removeEventListener('pointerdown', onPan, true); };
   }, []);
 
   // 播放中播放頭跑出可見範圍：整頁往後翻
@@ -890,27 +900,6 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
   /** 範圍外的關鍵影格不畫（留一點邊，邊上的菱形還看得到一半） */
   const visible = (t: number) => t >= view.a - span * 0.02 && t <= view.b + span * 0.02;
 
-  /** 尺規下方的縮放條：拖中間平移、拖兩端縮放、點空白處跳過去、雙擊還原 */
-  const dragZoom = (e: React.PointerEvent, mode: 'move' | 'l' | 'r' | 'bar') => {
-    if (e.button !== 0) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const bar = (e.currentTarget as HTMLElement).closest('.ec-zoombar')!.getBoundingClientRect();
-    let v0 = view;
-    if (mode === 'bar') {
-      const c = ((e.clientX - bar.left) / bar.width) * dur;
-      v0 = clampView({ a: c - span / 2, b: c + span / 2 }, dur);
-      setView(v0);
-    }
-    const x0 = e.clientX;
-    listen((ev) => {
-      const d = ((ev.clientX - x0) / bar.width) * dur;
-      if (mode === 'l') setView({ a: Math.max(0, Math.min(v0.b - 0.05, v0.a + d)), b: v0.b });
-      else if (mode === 'r') setView({ a: v0.a, b: Math.min(dur, Math.max(v0.a + 0.05, v0.b + d)) });
-      else setView({ a: v0.a + d, b: v0.b + d });
-    });
-  };
-
   return (
     <div className="ec" ref={tableRef} style={{ '--ec-left': `${Math.max(LEFT_MIN, leftPx)}px` } as React.CSSProperties}>
       {/* 表頭：名稱 + 片段內時間尺規（只有這裡可以拖播放頭） */}
@@ -937,17 +926,6 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
           style={{ backgroundImage: `repeating-linear-gradient(90deg, color-mix(in srgb, var(--text) 7%, transparent) 0 1px, transparent 1px ${minorPx}px)`, backgroundPosition: `${minorOff}px 0` }}
         >
           {ticks.map((t) => <div key={t} className="tick" style={{ left: pct(t) }}>{rulerLabel(t, major)}</div>)}
-          <div
-            className={`ec-zoombar ${zoomed ? 'zoomed' : ''}`}
-            onPointerDown={(e) => dragZoom(e, 'bar')}
-            onDoubleClick={(e) => { e.stopPropagation(); setView({ a: 0, b: dur }); }}
-            title={$t('拖曳兩端縮放、Ctrl + 滾輪縮放、雙擊還原')}
-          >
-            <div className="ec-zoomthumb" style={{ left: `${(view.a / dur) * 100}%`, width: `${(span / dur) * 100}%` }} onPointerDown={(e) => dragZoom(e, 'move')}>
-              <i className="l" onPointerDown={(e) => dragZoom(e, 'l')} />
-              <i className="r" onPointerDown={(e) => dragZoom(e, 'r')} />
-            </div>
-          </div>
         </div>
       </div>
 
@@ -1063,6 +1041,12 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
             height: Math.abs(marquee.y1 - marquee.y0),
           }}
         />
+      )}
+      {/* 放大時：底部的水平捲軸（跟時間軸一樣，只捲動；縮放用 Ctrl + 滾輪） */}
+      {zoomed && (
+        <div className="ec-viewrow">
+          <ViewScrollbar a={view.a} b={view.b} dur={dur} onChange={([a, b]) => setView({ a, b })} />
+        </div>
       )}
     </div>
   );

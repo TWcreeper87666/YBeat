@@ -9,13 +9,18 @@ const KEY_EVERY = 0.5;
 
 type In =
   | { type: 'build'; id: string; url: string; w: number; h: number; bitrate: number }
-  | { type: 'cancel'; id: string };
+  | { type: 'cancel'; id: string }
+  /** 時間軸播放中：先停著，讓預覽搶得到 CPU */
+  | { type: 'pause'; on: boolean };
 export type ProxyOut =
   | { type: 'progress'; id: string; f: number }
   | { type: 'done'; id: string; blob: Blob }
   | { type: 'fail'; id: string; err: string };
 
 let cancelled: string | null = null;
+let paused = false;
+let resume: (() => void)[] = [];
+const wake = () => { const l = resume; resume = []; for (const r of l) r(); };
 const post = (m: ProxyOut) => (self as unknown as Worker).postMessage(m);
 
 async function pickConfig(w: number, h: number, fps: number, bitrate: number): Promise<VideoEncoderConfig | null> {
@@ -59,7 +64,7 @@ async function build(id: string, url: string, w: number, h: number, bitrate: num
     const opts = {
       url,
       alive,
-      wait: () => Promise.resolve(),
+      wait: async () => { while (paused && alive()) await new Promise<void>((r) => resume.push(r)); },
       onProgress: (f: number) => post({ type: 'progress', id, f }),
       onFrame: async (pts: number, frame: VideoFrame) => {
         // 0 秒以前的格子（剪輯過的檔案開頭的預捲）不會顯示，也不能放進 MP4；
@@ -106,8 +111,14 @@ async function build(id: string, url: string, w: number, h: number, bitrate: num
 
 self.onmessage = async (e: MessageEvent<In>) => {
   const m = e.data;
+  if (m.type === 'pause') {
+    paused = m.on;
+    if (!paused) wake();
+    return;
+  }
   if (m.type === 'cancel') {
     cancelled = m.id;
+    wake();
     return;
   }
   cancelled = null;

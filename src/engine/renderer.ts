@@ -1,5 +1,5 @@
 import { $t } from '../i18n';
-import { audioSignal, fromKey, type AudioSignal } from './audioReact';
+import { audioSignal, fromKey, randomSignal, type AudioSignal } from './audioReact';
 import { holdScrub, scrubFrameAt } from './scrubCache';
 import { previewUrl } from './proxy';
 import { ensureReverseFrames, reverseFrameAt } from './reverseCache';
@@ -583,6 +583,7 @@ export class Renderer {
     const valueOf = (d: ParamDef) => {
       const dr = drive?.[d.name];
       if (dr && isNumeric(d)) {
+        if (dr.source === 'random') return dr.min + (dr.max - dr.min) * randomSignal(dr.seed ?? 0, local, dr.rate);
         const sg = this.signalOf(dr.from);
         return dr.min + (dr.max - dr.min) * (dr.source === 'beat' ? sg.beat : sg.level);
       }
@@ -1061,7 +1062,8 @@ export class Renderer {
         gl.uniform1i(this.loc(p, 'u_fit'), fit);
         gl.uniform2f(this.loc(p, 'u_native'), native?.[0] ?? 1, native?.[1] ?? 1);
         gl.uniform1f(this.loc(p, 'u_flip'), clip.flipX ? 1 : 0);
-        if (matte) this.bindTex(p, 'u_matte', matte, 1);
+        // 沒有遮罩也要綁：sampler 會留著上一次的單元，那裡可能是這次要畫進去的畫面（回饋迴圈 → 整格畫不出來、變黑）
+        this.bindTex(p, 'u_matte', matte ?? tex, 1);
         gl.uniform1f(this.loc(p, 'u_useMatte'), matte ? 1 : 0);
       },
       blend,
@@ -1106,6 +1108,11 @@ export class Renderer {
         const gl = this.gl;
         gl.bindFramebuffer(gl.FRAMEBUFFER, this.targets[1].fb);
         gl.viewport(0, 0, 1, 1);
+        // 貼圖單元可能還綁著這個畫面：先清掉，免得回饋迴圈
+        for (let i = 0; i < 4; i++) {
+          gl.activeTexture(gl.TEXTURE0 + i);
+          gl.bindTexture(gl.TEXTURE_2D, null);
+        }
         gl.useProgram(g.prog);
         gl.bindVertexArray(this.vao);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -1191,7 +1198,8 @@ export class Renderer {
       const key = maskFieldKey(m);
       const tex = key === 'rect' || key === 'ellipse' ? null : this.shapeTex(key);
       gl.uniform1i(this.loc(p, 'u_shape'), m.shape === 'ellipse' ? 2 : tex ? 3 : 1);
-      if (tex) this.bindTex(p, 'u_shapeTex', tex, 2);
+      // 沒有形狀貼圖也綁一張不相干的（理由同 drawTex 的 u_matte）
+      this.bindTex(p, 'u_shapeTex', tex ?? src.tex, 2);
       gl.uniform4f(this.loc(p, 'u_box'), m.x, m.y, Math.max(0, m.w), Math.max(0, m.h));
       gl.uniform1f(this.loc(p, 'u_feather'), Math.max(0, m.feather));
       gl.uniform1f(this.loc(p, 'u_rot'), (m.rotation * Math.PI) / 180);

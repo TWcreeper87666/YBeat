@@ -123,9 +123,27 @@ export const useDock = create<DockState>()(
   ),
 );
 
-// 選取時間軸上的東西 → 「屬性」分頁切到前面（如果它跟別的分頁疊在一起）
+// 選取時間軸上的東西 → 「屬性」分頁切到前面（如果它跟別的分頁疊在一起）。
+// 是自動切過去的：記住那一組原本的分頁，選取清掉（刪除、點空白處）時切回去，例如在自動剪輯分頁刪掉片段後回到自動剪輯；
+// 中間自己換過分頁就不切回
+let autoFrom: { group: string; panel: PanelId } | null = null;
+const activeOf = (t: { tabs: PanelId[]; active: PanelId }) => (t.tabs.includes(t.active) ? t.active : t.tabs[0]);
 useStore.subscribe((s, p) => {
-  if (s.selection && s.selection !== p.selection) useDock.getState().activatePanel('inspector', true);
+  if (s.selection && s.selection !== p.selection) {
+    const g = findGroup(useDock.getState().layout, (t) => t.tabs.includes('inspector'));
+    if (g && activeOf(g) !== 'inspector') autoFrom = { group: g.id, panel: activeOf(g) };
+    useDock.getState().activatePanel('inspector', true);
+  } else if (!s.selection && p.selection && autoFrom) {
+    const from = autoFrom;
+    autoFrom = null;
+    const g = findGroup(useDock.getState().layout, (t) => t.id === from.group);
+    if (g && activeOf(g) === 'inspector' && g.tabs.includes(from.panel)) useDock.getState().setActive(g.id, from.panel);
+  }
+});
+useDock.subscribe((d) => {
+  if (!autoFrom) return;
+  const g = findGroup(d.layout, (t) => t.id === autoFrom!.group);
+  if (!g || activeOf(g) !== 'inspector') autoFrom = null;
 });
 
 /** 「版面」選單 */
@@ -391,7 +409,7 @@ function Group({ node, hosts }: { node: TabsNode; hosts: Record<PanelId, HTMLEle
     <div className="dock-group" data-dock-group={node.id}>
       <div
         ref={barRef}
-        className={`dock-tabs ${drag && !drag.panel && drag.from === node.id ? 'dragging' : ''}`}
+        className={`dock-tabs osb-thin ${drag && !drag.panel && drag.from === node.id ? 'dragging' : ''}`}
         onDoubleClick={(e) => e.target === e.currentTarget && useDock.getState().toggleMax(node.id)}
         onContextMenu={groupMenu}
         onPointerDown={(e) => e.target === e.currentTarget && e.button === 0 && startTabDrag(e, null, node.id, rootRef?.current ?? null, node.tabs.map((x) => TITLE[x]).join(' · '))}

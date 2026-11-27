@@ -22,6 +22,12 @@
 - 測試指令只跑一次，不要用 grep 過濾掉結尾的總結再重跑。
 - 不要自己開瀏覽器測試（慢又耗 token）；最後列出使用者該點哪些地方確認。
 
+## 滾輪 / 縮放 / 捲軸
+
+- 時間軸類元件（主時間軸、關鍵影格時間軸、範圍條）：滾輪捲動、Ctrl + 滾輪縮放、中鍵拖曳平移，用 `src/ui/wheelView.tsx`（`wheelViewAction`、`ViewScrollbar`）和 `src/ui/middlePan.ts`，不要自己寫一套。
+- 捲軸一律是覆蓋式的（`src/ui/overlayScrollbar.ts`，原生捲軸全部藏起來），不要加原生捲軸的樣式或 `scrollbar-gutter`。
+- 預覽畫面、繪圖區這種 2D 畫面例外：滾輪直接縮放是刻意的，不要改成時間軸的規則。
+
 ## 開關 / 選擇元件
 
 - 用 `src/ui/Toggle.tsx`，不要自己寫 `<input type="checkbox">` 或 `.seg` 按鈕：`Switch`（開 / 關）、`Check`（彈出視窗 / 小視窗的一串選項：左文字、右開關）、`Seg`（幾個選一個）、`SegToggles`（同外觀、各自開關）、`ToggleChip`（輸入框上方的附加開關）。

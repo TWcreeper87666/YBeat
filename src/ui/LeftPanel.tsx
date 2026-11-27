@@ -1364,15 +1364,24 @@ function effectSections(
         const st = d?.type === 'int' ? 1 : d ? (d.max - d.min) / 200 || 0.01 : 0.01;
         const drive: Channel['drive'] = d && isNumeric(d) ? {
           on: !!dr,
-          toggle: () => setDrive(name, fresh() ? null : { source: 'level', min: Number(d.def), max: d.max }),
+          toggle: () => setDrive(name, fresh() ? null : { source: 'level', ...driveRange(mod?.id, d) }),
           rows: dr ? [
             {
               label: $t('訊號'),
-              node: <select className="select drive-pick" value={dr.source} onChange={(e) => { const x = fresh(); if (x) setDrive(name, { ...x, source: e.target.value as AudioDrive['source'] }); }}>
+              node: <select className="select drive-pick" value={dr.source} onChange={(e) => {
+                const x = fresh();
+                const source = e.target.value as AudioDrive['source'];
+                if (x) setDrive(name, { ...x, source, ...(source === 'random' && x.seed === undefined ? { seed: Math.floor(Math.random() * 2 ** 31) } : {}) });
+              }}>
                 <option value="level">{$t('跟著音量')}</option>
                 <option value="beat">{$t('跟著節拍')}</option>
+                <option value="random">{$t('隨機')}</option>
               </select>,
             },
+            ...(dr.source === 'random' ? [{
+              label: $t('頻率'),
+              node: <DragNumber variant="text" value={dr.rate ?? 8} min={0.5} max={60} step={0.5} decimals={1} suffix="/s" onChange={(v) => { const x = fresh(); if (x) setDrive(name, { ...x, rate: v }); }} />,
+            }] : []),
             {
               label: $t('範圍'),
               node: <div className="drive-row">
@@ -1381,11 +1390,11 @@ function effectSections(
                 <DragNumber variant="text" value={dr.max} step={st} onChange={(v) => { const x = fresh(); if (x) setDrive(name, { ...x, max: v }); }} />
               </div>,
             },
-            {
+            ...(dr.source === 'random' ? [] : [{
               label: $t('來源'),
               node: <SourcePick from={dr.from} title={`${$t(d.label)} · ${$t('來源')}`}
                 body={() => <DriveSourceBody from={fresh()?.from} set={(from) => { const x = fresh(); if (x) setDrive(name, from ? { ...x, from } : (({ from: _, ...rest }) => rest)(x)); }} />} />,
-            },
+            }]),
           ] : [],
         } : undefined;
         return { ...c, menu: [...fm, ...(menuFor(name) ?? [])], drive };
@@ -1414,6 +1423,14 @@ function effectSections(
   }
   return sections;
 }
+
+/** 打開音訊反應時的預設範圍：預設值 → 最大值；變化太大的參數在這裡縮小幅度 */
+const DRIVE_RANGE: Record<string, Record<string, { min: number; max: number }>> = {
+  // 暗角：越大聲，中間亮的範圍稍微收一點
+  'fx-vignette': { size: { min: 0.55, max: 0.42 } },
+};
+const driveRange = (moduleId: string | undefined, d: ParamDef) =>
+  (moduleId && DRIVE_RANGE[moduleId]?.[d.name]) || { min: Number(d.def), max: d.max };
 
 /** 音訊反應的來源：顯示目前聽哪些軌道，按了打開小視窗挑（跟遮罩形狀、變速一樣） */
 function SourcePick({ from, title, body }: { from: AudioFrom | undefined; title: string; body: () => React.ReactNode }) {

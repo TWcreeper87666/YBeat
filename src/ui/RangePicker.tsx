@@ -1,5 +1,5 @@
 /**
- * 選範圍的視窗（共用）：自動剪輯加入影片片段、錄製分頁後挑要留的段落。
+ * 選範圍的視窗（共用）：自動剪輯加入影片片段、選歌的範圍（音訊：範圍條畫波形）、錄製分頁後挑要留的段落。
  */
 import React, { useEffect, useRef, useState } from 'react';
 import { Pause, Play } from 'lucide-react';
@@ -10,6 +10,9 @@ import { tc } from '../engine/rulerTicks';
 import { holdScrubFor, scrubFrame, warmScrub } from '../engine/scrubCache';
 import { isTextField } from './focus';
 import { FULL_CROP, isFullCrop, type Crop } from '../engine/transform';
+import { useLayout } from './uiStore';
+import { ViewScrollbar, wheelViewAction } from './wheelView';
+import { dragPan } from './middlePan';
 
 export { isFullCrop, type Crop };
 
@@ -58,6 +61,7 @@ export interface RangePickerProps {
 
 /** 選範圍的視窗：播放 / 拖把手調入點出點（I / O）/ 復原重做；自動剪輯加素材、錄製分頁共用 */
 export function RangePicker({ m, init, others = [], editing, outsideClose = true, crop: cropOn, initCrop, onCommit, onClose }: RangePickerProps) {
+  const audio = m.kind === 'audio';
   const [crop, setCrop] = useState<Crop>(initCrop ?? FULL);
   const out = useStore((s) => s.format);
   const [ratio, setRatioState] = useState<Ratio>(initCrop && !isFullCrop(initCrop) ? 'free' : lastRatio);
@@ -128,7 +132,7 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
         const want = target.current;
         const stale = want !== null && (v.seeking || Math.abs(v.currentTime - want) > 0.08);
         // 拖曳中、或放開後 seek 還沒完成：蓋著快取影格；附近還沒抽好就留著上一張（不要閃回舊畫面）
-        const bm = stale ? scrubFrame(m, want!) : null;
+        const bm = stale && !audio ? scrubFrame(m, want!) : null;
         if (bm) {
           if (ov.width !== bm.width || ov.height !== bm.height) { ov.width = bm.width; ov.height = bm.height; }
           const g = ov.getContext('2d')!;
@@ -144,7 +148,7 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
     const on = () => { setPlaying(!v.paused); holdScrubFor(v, !v.paused); };
     v.addEventListener('play', on);
     v.addEventListener('pause', on);
-    warmScrub(m, req.a);
+    if (!audio) warmScrub(m, req.a);
     seek(req.a);
     return () => {
       cancelAnimationFrame(raf);
@@ -210,7 +214,7 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
     return () => window.removeEventListener('keydown', k, true);
   });
 
-  // 範圍條的顯示範圍（滾輪縮放、Shift + 滾輪 / 水平捲動平移；長影片才調得到細的範圍）
+  // 範圍條的顯示範圍（Ctrl + 滾輪縮放，滾輪依時間軸設定平移）
   const [view, setView] = useState<[number, number]>([0, dur]);
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -219,17 +223,19 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
     const el = bar.current;
     if (!el) return;
     const onWheel = (e: WheelEvent) => {
+      const action = wheelViewAction(e, useLayout.getState().wheelScroll);
+      if (action.kind !== 'zoom' && !action.delta) return;
       e.preventDefault();
       const [v0, v1] = viewRef.current;
       const sp = v1 - v0;
       const r = el.getBoundingClientRect();
-      if (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
-        const d = ((e.shiftKey ? e.deltaY : e.deltaX) / r.width) * sp;
+      if (action.kind !== 'zoom') {
+        const d = (action.delta / r.width) * sp;
         const n0 = Math.max(0, Math.min(dur - sp, v0 + d));
         return setView([n0, n0 + sp]);
       }
       const at = v0 + Math.max(0, Math.min(1, (e.clientX - r.left) / r.width)) * sp;
-      const ns = Math.max(Math.min(1, dur), Math.min(dur, sp * Math.pow(1.0015, e.deltaY)));
+      const ns = Math.max(Math.min(1, dur), Math.min(dur, sp * Math.pow(1.0015, action.delta)));
       const n0 = Math.max(0, Math.min(dur - ns, at - ((at - v0) / sp) * ns));
       setView([n0, n0 + ns]);
     };
@@ -259,6 +265,11 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
   };
   const [headHover, setHeadHover] = useState(false);
   const down = (e: React.PointerEvent, what: 'a' | 'b' | 't') => {
+    if (e.button === 1) {
+      const [v0, v1] = viewRef.current, w = bar.current!.getBoundingClientRect().width;
+      const sp = v1 - v0;
+      return dragPan(e, (dx) => { const n0 = Math.max(0, Math.min(dur - sp, v0 - (dx / w) * sp)); setView([n0, n0 + sp]); });
+    }
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
@@ -306,19 +317,22 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
 
   return (
     <div className="overlay" style={{ zIndex: 300 }} onPointerDown={(e) => outsideClose && e.target === e.currentTarget && close()}>
-      <div className="dialog wide ae-range">
+      <div className={`dialog wide ae-range ${audio ? 'audio' : ''}`}>
         <h3 title={m.name}>{m.name}</h3>
-        <div className={`ae-range-video ${cropOn ? 'cropping' : ''}`}>
+        <div className={`ae-range-video ${cropOn ? 'cropping' : ''} ${audio ? 'audio' : ''}`}>
           <video ref={video} src={m.url} playsInline preload="auto" onClick={toggle} />
           <canvas ref={overlay} />
           {cropOn && <CropBox crop={crop} set={setCrop} k={k} onStart={() => remember()} onClick={toggle} />}
         </div>
         <div className="ae-range-bar" ref={bar} onPointerDown={(e) => down(e, 't')} onPointerMove={(e) => setHeadHover(nearHead(e.clientX))} onPointerLeave={() => setHeadHover(false)}>
+          {audio && <Wave m={m} view={view} />}
           {others.map((g, i) => <i key={i} className="other" style={{ left: pc(g.a), width: pw(g.b - g.a) }} />)}
+
           <i className="sel" style={{ left: pc(a), width: pw(b - a) }} />
           <i className={`head ${headHover ? 'hover' : ''}`} style={{ left: pc(t) }} />
           <b style={{ left: pc(a) }} onPointerDown={(e) => down(e, 'a')} />
           <b style={{ left: pc(b) }} onPointerDown={(e) => down(e, 'b')} />
+          <ViewScrollbar a={view[0]} b={view[1]} dur={dur} onChange={setView} />
         </div>
         <div className="ae-line">
           <button className="ec-icon" title={playing ? $t('暫停') : $t('播放')} onClick={toggle}>{playing ? <Pause size={14} /> : <Play size={14} />}</button>
@@ -339,6 +353,31 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
       </div>
     </div>
   );
+}
+
+/** 音訊的波形（範圍條的背景；跟著縮放） */
+function Wave({ m, view }: { m: Media; view: [number, number] }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const c = ref.current, peaks = m.peaks;
+    if (!c || !peaks?.length) return;
+    const w = c.clientWidth * devicePixelRatio, h = c.clientHeight * devicePixelRatio;
+    c.width = w; c.height = h;
+    const g = c.getContext('2d')!;
+    g.clearRect(0, 0, w, h);
+    g.fillStyle = getComputedStyle(c).color;
+    const pps = m.peaksPerSec || 100;
+    let max = 1e-6;
+    for (const v of peaks) max = Math.max(max, v);
+    for (let x = 0; x < w; x++) {
+      const i0 = Math.floor((view[0] + (x / w) * (view[1] - view[0])) * pps), i1 = Math.max(i0 + 1, Math.floor((view[0] + ((x + 1) / w) * (view[1] - view[0])) * pps));
+      let v = 0;
+      for (let i = i0; i < i1 && i < peaks.length; i++) v = Math.max(v, peaks[i]);
+      const bh = (v / max) * h * 0.9;
+      g.fillRect(x, (h - bh) / 2, 1, Math.max(1, bh));
+    }
+  }, [m, view]);
+  return <canvas ref={ref} className="wave" />;
 }
 
 // ───────────── 裁切框 ─────────────

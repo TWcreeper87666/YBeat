@@ -2,14 +2,15 @@
  * 自動剪輯的素材清單：從素材分頁把影片 / 圖片拖到自動剪輯分頁 → 選範圍加入（按住 Alt = 整段）。
  * 同一支影片可以加很多段，片段可以改名。「全部素材」時清單列出素材庫每個素材；改了任何一列就變成自選清單（可以清空）。
  */
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { create } from 'zustand';
 import { Crop as CropIcon, Images, Pencil, X } from 'lucide-react';
 import { $t } from '../i18n';
-import { mediaUsable, uid, useStore, type Media } from '../store';
+import { mediaUsable, uid, useStore, type Clip, type Media } from '../store';
+import { sourceRange } from '../engine/jobNeed';
 import { tc } from '../engine/rulerTicks';
-import { footage, useAutoEdit, wholeSeg, type AeSeg } from '../engine/autoEditSettings';
+import { aeSong, footage, useAutoEdit, wholeSeg, type AeSeg } from '../engine/autoEditSettings';
 import { revealMedia, useDock } from './Dock';
 import { RangePicker, isFullCrop, type Crop } from './RangePicker';
 import { openSource, pausePreviews, useSource } from './SourcePanel';
@@ -64,6 +65,68 @@ function openRange(m: Media, seg?: AeSeg, queue: string[] = [], implicit = false
 
 const fmt = (t: number) => tc(t);
 
+// ───────────── 從時間軸片段找回清單 ─────────────
+
+/** 時間軸片段用到的素材範圍（圖片 = null） */
+function clipSpan(c: Clip, m: Media): { from: number; to: number } | null {
+  if (m.kind !== 'video') return null;
+  const s = useStore.getState();
+  return sourceRange(c, m, new Map(s.modules.map((x) => [x.id, x])));
+}
+const overlap = (g: AeSeg, r: { from: number; to: number }) => Math.min(g.b, r.to) - Math.max(g.a, r.from);
+
+/** 片段用到的素材在自動剪輯清單裡的那一列（全部素材 = 素材 id；自選清單 = 重疊最多的那段）；不在清單裡 = null */
+export function aeRowOf(c: Clip): { mediaId: string; segId?: string } | null {
+  const s = useStore.getState();
+  const m = footage(s).find((x) => x.id === c.mediaId);
+  if (!m) return null;
+  if (!listMode()) return { mediaId: m.id };
+  const r = clipSpan(c, m);
+  let best: AeSeg | null = null, most = 0;
+  for (const g of segsNow()) {
+    if (g.mediaId !== m.id) continue;
+    const o = r ? overlap(g, r) : 1;
+    if (o > most) { most = o; best = g; }
+  }
+  return best ? { mediaId: m.id, segId: best.id } : null;
+}
+
+/** 把這些片段用到的範圍從清單扣掉（同一段的其他部分留著；太短的剩餘丟掉）；回傳扣了幾個片段 */
+export function removeClipsFromAutoEdit(clips: Clip[]): number {
+  const s = useStore.getState();
+  let list = explicit();
+  let n = 0;
+  for (const c of clips) {
+    const m = footage(s).find((x) => x.id === c.mediaId);
+    if (!m) continue;
+    const r = clipSpan(c, m);
+    const next: AeSeg[] = [];
+    let hit = false;
+    for (const g of list) {
+      if (g.mediaId !== m.id || (r && overlap(g, r) <= 0)) { next.push(g); continue; }
+      hit = true;
+      if (!r) continue; // 圖片：整個拿掉
+      if (r.from - g.a >= 0.2) next.push({ ...g, b: r.from });
+      if (g.b - r.to >= 0.2) next.push({ ...g, id: r.from - g.a >= 0.2 ? uid() : g.id, a: r.to });
+    }
+    if (hit) { list = next; n++; }
+  }
+  if (n) setSegs(list);
+  return n;
+}
+
+/** 要清單捲到、選中的那一列；n 變了才動作 */
+export const useAeFocus = create<{ mediaId: string; segId?: string; n: number }>(() => ({ mediaId: '', n: 0 }));
+/** 已經處理過的 n（切到分頁時清單才掛上，掛上時再處理） */
+let focusDone = 0;
+
+export function revealInAutoEdit(c: Clip) {
+  const row = aeRowOf(c);
+  if (!row) return;
+  useDock.getState().activatePanel('auto');
+  useAeFocus.setState((x) => ({ ...row, n: x.n + 1 }));
+}
+
 // ───────────── 清單 ─────────────
 
 export function SegList() {
@@ -87,9 +150,28 @@ export function SegList() {
   /** 選取一列 = 在預覽面板看（片段只循環播那一段，有裁切就顯示框）；autoplay = false：只選取、不播（例如按鉛筆編輯） */
   const preview = (g: AeSeg, m: Media, video: boolean, autoplay = true) =>
     openSource(m.id, video && (g.a > 0 || g.b < m.duration - 0.01) ? [g.a, g.b] : null, g.name ?? null, { crop: g.crop && !isFullCrop(g.crop) ? g.crop : null, autoplay });
+  // 從時間軸跳過來：捲到那一列、亮一下、在預覽面板看
+  const focus = useAeFocus((x) => x.n);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!focus || focus === focusDone) return;
+    focusDone = focus;
+    const f = useAeFocus.getState();
+    const row = rows.find((r) => (r.implicit ? r.m.id === f.mediaId : r.seg.id === f.segId));
+    if (!row) return;
+    preview(row.seg, row.m, row.m.kind === 'video', false);
+    const el = box.current?.querySelector<HTMLElement>(`[data-seg="${CSS.escape(row.seg.id)}"]`);
+    if (!el) return;
+    el.scrollIntoView({ block: 'nearest' });
+    el.classList.remove('flash');
+    void el.offsetWidth;
+    el.classList.add('flash');
+    setTimeout(() => el.classList.remove('flash'), 1300);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus]);
   if (!rows.length) return <div className="ae-empty">{list ? $t('把素材拖到這裡') : $t('沒有可用的素材')}</div>;
   return (
-    <div className="ae-segs">
+    <div className="ae-segs" ref={box}>
       {rows.map((row) => {
         const { seg: g, m } = row;
         const video = m.kind === 'video';
@@ -97,7 +179,7 @@ export function SegList() {
         const d = direction?.[row.implicit ? m.id : video ? `${m.id}@${g.id}` : m.id];
         const on = src === `${m.id}:${ranged ? `${g.a}-${g.b}` : ''}`;
         return (
-          <div key={g.id} className={`ae-seg ${on ? 'on' : ''} ${d?.weight === 0 ? 'dim' : ''}`} onClick={() => preview(g, m, video)}>
+          <div key={g.id} data-seg={g.id} className={`ae-seg ${on ? 'on' : ''} ${d?.weight === 0 ? 'dim' : ''}`} onClick={() => preview(g, m, video)}>
             {m.thumb && <img src={m.thumb} alt="" />}
             {renaming === g.id ? (
               <input
@@ -136,10 +218,41 @@ export function SegList() {
 
 // ───────────── 選範圍 ─────────────
 
+/** 選歌的範圍的視窗：mediaId = 換成這首歌（沒有 = 改目前這首） */
+const useSongRange = create<{ mediaId: string | null }>(() => ({ mediaId: null }));
+export const openSongRange = (mediaId?: string) => {
+  const m = mediaId ?? aeSong(useStore.getState(), useAutoEdit.getState())?.mediaId;
+  if (m) { pausePreviews(); useSongRange.setState({ mediaId: m }); }
+};
+
+/** 歌拖進自動剪輯分頁：按住 Alt = 整首；不然選範圍 */
+export function dropSong(mediaId: string, whole: boolean) {
+  const m = useStore.getState().media.find((x) => x.id === mediaId);
+  if (!m) return;
+  useDock.getState().activatePanel('auto');
+  if (whole) useAutoEdit.getState().set({ song: { mediaId, a: 0, b: m.duration } });
+  else openSongRange(mediaId);
+}
+
+function SongRangeDialog() {
+  const mediaId = useSongRange((x) => x.mediaId);
+  const m = useStore((x) => (mediaId ? x.media.find((y) => y.id === mediaId) : undefined));
+  if (!mediaId || !m) return null;
+  const cur = aeSong(useStore.getState(), useAutoEdit.getState());
+  // 換歌：從整首開始、副歌重新標；同一首：手動標的副歌留著（範圍外的不算）
+  const song = cur?.mediaId === m.id ? cur : { mediaId: m.id, a: 0, b: m.duration };
+  const close = () => useSongRange.setState({ mediaId: null });
+  const commit = (a: number, b: number) => {
+    const chorus = (song.chorus ?? []).filter((t) => t >= a - 0.5 && t <= b + 0.5);
+    useAutoEdit.getState().set({ song: { mediaId: m.id, a, b, ...(chorus.length ? { chorus } : {}) } });
+  };
+  return createPortal(<RangePicker key={m.id} m={m} init={{ a: song.a, b: song.b }} editing onCommit={commit} onClose={close} />, document.body);
+}
+
 export function AeRangeDialog() {
   const req = useRange((x) => x.req);
   const m = useStore((x) => (req ? x.media.find((y) => y.id === req.mediaId) : undefined));
-  if (!req || !m || m.kind !== 'video') return null;
+  if (!req || !m || m.kind !== 'video') return <SongRangeDialog />;
   // 放到 body：自動剪輯分頁有 container-type（會變成 fixed 元素的定位框）和 overflow: hidden，放在裡面會被框住、裁掉
   return createPortal(<RangeDialog key={`${req.mediaId}:${req.segId ?? ''}`} req={req} m={m} />, document.body);
 }

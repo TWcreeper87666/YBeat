@@ -38,6 +38,15 @@ interface Src { media: Media; src: number; gain: number; rate: number; local: nu
 
 export interface AudioSignal { level: number; beat: number }
 
+/** 隨機訊號（0..1）：每 1/rate 秒換一個值、中間不變；t = 特效內的時間，同樣的 seed 每次都一樣 */
+export function randomSignal(seed: number, t: number, rate = 8): number {
+  const step = Math.floor(Math.max(0, t) * Math.max(0.01, rate));
+  let h = (Math.imul(step ^ 0x9e3779b9, 0x85ebca6b) ^ Math.imul(seed | 0, 0xc2b2ae35)) >>> 0;
+  h = Math.imul(h ^ (h >>> 16), 0x7feb352d) >>> 0;
+  h = Math.imul(h ^ (h >>> 15), 0x846ca68b) >>> 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
 /** from 有沒有選任何軌道（都沒選 = 全部） */
 export const hasFrom = (f: AudioFrom | undefined): f is AudioFrom => !!f && !!(f.audio?.length || f.video?.length);
 

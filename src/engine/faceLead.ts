@@ -86,6 +86,35 @@ export function leadShare(frames: FacesAt[], lead: Lead): number {
 /** 主角夠明顯（出現夠多次、至少是第二名的兩倍、有臉的畫面三成五以上有他）才拿來避開別人 / 對準 */
 export const confidentLead = (l: Lead | null, frameShare: number): l is Lead => !!l && l.count >= 3 && l.count >= 2 * l.second && frameShare >= 0.35;
 
+/** 主角不夠明顯、但出現得比其他人多：只拿來決定追誰（不避開別人） */
+export const followableLead = (l: Lead | null): l is Lead => !!l && l.count >= 3 && l.count > l.second;
+
+/** 使用者指定的主角（一張臉的特徵）當成最明顯的主角 */
+export const pickedLead = (emb: number[]): Lead => ({ centroid: emb, count: Infinity, share: 1, second: 0 });
+
+/** 擴充指定主角時，收進來的臉要多像（比 SAME_PERSON 嚴，免得收到別人） */
+export const REFINE_SAME = 0.42;
+/** 指定的那張臉在平均裡佔幾張的份量（不讓收進來的臉把平均拉走） */
+const PICKED_WEIGHT = 3;
+
+/**
+ * 指定主角只有一張臉：在所有素材裡找很像的臉一起平均（跑兩輪），換角度、光線也比對得到。
+ * 一張都找不到就用原本那張。
+ */
+export function refineLead(emb: number[], faces: { emb: number[] }[], thr = REFINE_SAME): number[] {
+  const unit = (v: ArrayLike<number>) => { const n = Math.hypot(...Array.from(v)) || 1; return Array.from(v, (x) => x / n); };
+  const picked = unit(emb);
+  let c = picked;
+  for (let round = 0; round < 2; round++) {
+    const hits = faces.filter((x) => cosine(x.emb, c) >= thr);
+    if (!hits.length) break;
+    const sum = picked.map((v) => v * PICKED_WEIGHT);
+    for (const h of hits) unit(h.emb).forEach((v, i) => (sum[i] += v));
+    c = unit(sum);
+  }
+  return c;
+}
+
 /** 每個取樣點：主角在（lead）/ 只有別人（others）/ 沒人或認不出來（none）/ 沒取樣（null） */
 export type LeadState = 'lead' | 'others' | 'none';
 export function leadStates(facesAt: FacesAt[], lead: Lead): (LeadState | null)[] {

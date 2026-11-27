@@ -76,7 +76,7 @@ ok(useAutoEdit.getState().trWeights['tr-whip'] === 0, '轉場權重');
 // 錯誤
 ok('error' in run('set_auto_edit', { transitions: { only: ['tr-nope'] } }), '不存在的 id → 錯誤');
 ok('error' in run('set_auto_edit', { media: { disable: ['all'] } }), '素材不能全關');
-ok('error' in run('set_auto_edit', { range: 'loop' }), '沒有循環範圍 → 錯誤');
+ok('error' in run('set_auto_edit', { music: 'v' }), '沒有節拍的素材不能當歌 → 錯誤');
 ok('error' in run('set_auto_edit', {}), '什麼都沒改 → 錯誤');
 const w = run('set_auto_edit', { transition_rate: 3 });
 ok(w.ok && w.warnings?.length, '超出範圍會夾住並警告');

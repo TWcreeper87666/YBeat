@@ -2,7 +2,7 @@ import { DEFAULT_OPTIONS, planEdit, planStats, RECIPES, type PlanMedia, type Pla
 import type { MusicInfo } from '../src/engine/musicAnalysis';
 import type { MediaInfo } from '../src/engine/mediaAnalysis';
 import { SPEED_VARIANTS } from '../src/engine/speedRamp';
-import type { PopVariant } from '../src/engine/subjectPop';
+import { POP_VARIANTS, type PopVariant } from '../src/engine/subjectPop';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -129,7 +129,11 @@ ok(popped.pops.every((p, i) => i === 0 || p.b1 - popped.pops[i - 1].b1 >= 16), '
 {
   const three: PlanMedia[] = [...popMedia.filter((m) => m.id !== 'subject'),
     ...['s1', 's2', 's3'].map((id) => ({ id, kind: 'image' as const, duration: 0, pop: { ok: true, centered: true, cx: 0, cy: 0 } }))];
-  const multi = planEdit({ ...input, media: three, options: popOptions });
+  // 兩次副歌（32、96），中間隔一段主歌
+  const twoChorus: MusicInfo = { ...music, drops: [], sections: [
+    { b0: 0, b1: 32, energy: 0.2, kind: 'intro' }, { b0: 32, b1: 64, energy: 0.9, kind: 'body' },
+    { b0: 64, b1: 96, energy: 0.3, kind: 'body' }, { b0: 96, b1: 128, energy: 0.9, kind: 'body' }] };
+  const multi = planEdit({ ...input, music: twoChorus, media: three, options: popOptions });
   ok(multi.pops.length >= 2 && new Set(multi.pops.map((p) => p.mediaId)).size === multi.pops.length, `每次主體跳出換一張圖：${multi.pops.map((p) => p.mediaId)}`);
 }
 const noPops = planEdit({ ...input, options: options({ pops: { variants: [], per32: 4 } }) });
@@ -192,10 +196,44 @@ for (const variant of ['silhouetteWindow', 'subjectHole'] as const) {
   ok(variantPlan([variant]).pops.length === 0 &&
     variantPlan([variant], [{ ...tracedImages[0], pop: { ...tracedImages[0].pop!, path: '  ' } },
       tracedImages[1], tracedImages[2]]).pops.length === 0 &&
-    variantPlan([variant], [tracedImages[0], tracedImages[2]]).pops.length === 0,
-  `${variant} 需要非空路徑和第二張圖片`);
+    variantPlan([variant], [{ ...tracedImages[0], popOnly: true, srcId: 'base' }, tracedImages[2]]).pops.length === 0,
+  `${variant} 需要非空路徑和另一個素材（不能是同一支影片）`);
+  const videoOnly = variantPlan([variant], [{ ...tracedImages[0], id: 'base@1.00', popOnly: true, srcId: 'base' },
+    tracedImages[2], { id: 'other', kind: 'video', duration: 60 }]);
+  ok(videoOnly.pops.length > 0 && videoOnly.pops.every((p) => p.variant === variant && p.revealMediaId === 'other'),
+    `${variant} 全是影片：另一支影片當揭露畫面`);
   ok(JSON.stringify(traced) === JSON.stringify(variantPlan([variant], tracedImages)),
     `${variant} 規劃結果固定`);
+}
+{
+  const seeds = [1, 2, 3, 4, 5, 6, 7, 8];
+  // 勾的種類平均輪流：連續產生好幾版，每一種都會輪到（前幾版用過的往後排）
+  const noDrop = { ...music, drops: [] };
+  const all = [...POP_VARIANTS];
+  let recent: PopVariant[] = [];
+  for (let k = 0; k < 20; k++) {
+    const p = planEdit({ ...input, music: noDrop, seed: k, media: tracedImages, options: options({ pops: { variants: all, per32: 4, text: 'HI', recent } }) });
+    recent = [...recent, ...p.pops.map((x) => x.variant)];
+  }
+  ok(all.every((v) => recent.includes(v)), `勾的種類都會輪到（沒輪到：${all.filter((v) => !recent.includes(v)).join() || '無'}）`);
+  const fresh = planEdit({ ...input, media: tracedImages, options: options({ pops: { variants: ['step', 'mono', 'fly'], per32: 4, recent: ['step', 'mono'] } }) });
+  ok(fresh.pops[0]?.variant === 'fly', '前幾版沒用過的種類先用');
+  // 主歌 → pre-chorus（變大聲）→ 副歌（更大聲）：只在副歌開頭跳出，不在前兆
+  const verseChorus: MusicInfo = { ...music, drops: [], sections: [
+    { b0: 0, b1: 48, energy: 0.3, kind: 'body' }, { b0: 48, b1: 64, energy: 0.55, kind: 'body' }, { b0: 64, b1: 128, energy: 0.85, kind: 'body' }] };
+  ok(seeds.every((seed) => {
+    const p = planEdit({ ...input, music: verseChorus, seed, media: tracedImages, options: options({ pops: { variants: ['step'], per32: 4 } }) });
+    return p.pops.length === 1 && p.pops[0].b1 === 64;
+  }), '越來越大聲的前兆不當成副歌：只在最大聲那段開頭跳出');
+  // 使用者標了副歌（48、100）：只在標記的地方跳出，不看自動偵測、不受每 32 拍的次數限制
+  const at = planEdit({ ...input, music: verseChorus, media: tracedImages, options: options({ pops: { variants: ['step'], per32: 0.1, at: [48, 100] } }) });
+  ok(at.pops.map((p) => p.b1).join() === '48,100', `照副歌標記跳出（${at.pops.map((p) => p.b1).join()}）`);
+  // 主體被畫面切到（loose）：一樣可以做每一種
+  const loose = tracedImages.map((m) => m.id === 'A' ? { ...m, pop: { ...m.pop!, ok: false, loose: true } } : m);
+  const looseFly = planEdit({ ...input, media: loose, options: options({ pops: { variants: ['fly'], per32: 4 } }) });
+  ok(looseFly.pops.length > 0 && looseFly.pops.every((p) => p.variant === 'fly'), '主體被畫面切到：飛入也可以');
+  const looseStep = planEdit({ ...input, media: loose, options: options({ pops: { variants: ['step'], per32: 4 } }) });
+  ok(looseStep.pops.length > 0 && looseStep.pops.every((p) => p.variant === 'step' && p.path === loose[0].pop!.path), '只碰到下緣、只開逐拍放大：可以，帶主體輪廓');
 }
 
 const speedRecipe: Recipe = { ...RECIPES.rhythm, beatsPerShot: [4, 4, 4], jitter: 0, minShotSec: 0.1, maxShotSec: 20 };

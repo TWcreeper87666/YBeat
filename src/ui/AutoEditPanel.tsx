@@ -1,7 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { ChevronDown, ChevronRight, Pencil, RotateCcw, Save, Trash2, Wand2, X } from 'lucide-react';
+import { create } from 'zustand';
+import { ChevronDown, ChevronRight, Flag, Pause, Pencil, Play, RotateCcw, Save, Trash2, Wand2, X } from 'lucide-react';
+import { isTextField } from './focus';
 import { $t, displayName } from '../i18n';
-import { uid, useStore } from '../store';
+import { uid, useStore, type Media } from '../store';
 import { usePrefs } from '../prefs';
 import { mediaBeats } from '../engine/beats';
 import { categoryOf, CATEGORIES } from '../modules/categories';
@@ -12,13 +14,15 @@ import { deleteMyStyle, myStyleSettings, renameMyStyle, saveMyStyle, styleSettin
 import type { MusicInfo } from '../engine/musicAnalysis';
 import { FLAT_SHAPE, LOW_MAX, MID_MAX, isFlat, offsetAt, shapeMusic, type EnergyShape } from '../engine/energyShape';
 import { presample } from '../engine/mediaSampler';
-import { aeFootage, analyzeSource, canReplaceLast, cancelAutoEdit, footage, generateAutoEdit, musicClips, musicSource, useAutoEdit, useAutoEditRun, type AutoEditSettings } from '../engine/autoEditApply';
+import { aeFootage, aeSong, analyzeSource, canReplaceLast, cancelAutoEdit, editChorus, footage, generateAutoEdit, songChorus, songMedia, songSource, useAutoEdit, useAutoEditRun, type AutoEditSettings } from '../engine/autoEditApply';
+import { songKey } from '../engine/autoEditSettings';
+import { tc } from '../engine/rulerTicks';
 import { useHistory } from '../engine/history';
 import { Check, Seg, SegToggles, Switch } from './Toggle';
 import { POP_VARIANTS, type PopVariant } from '../engine/subjectPop';
 import { SPEED_VARIANTS, type SpeedVariant } from '../engine/speedRamp';
 import { DragNumber } from './DragNumber';
-import { AeRangeDialog, SegList, roleName } from './AeSegments';
+import { AeRangeDialog, SegList, openSongRange, roleName, useAeFocus } from './AeSegments';
 import { pausePreviews } from './SourcePanel';
 import { SpeedCurveCard } from './SpeedCurveCard';
 import { useDrag } from './uiStore';
@@ -176,10 +180,225 @@ const speedName = (v: SpeedVariant) => ({
 const KIND_COLOR: Record<string, string> = { intro: 'var(--sec-intro)', build: 'var(--sec-build)', drop: 'var(--sec-drop)', outro: 'var(--sec-intro)', body: 'var(--sec-body)' };
 
 /** 能量曲線編輯器：淡色 = 分析出來的能量、亮線 = 調整後；背景三帶 = 低 / 中 / 高；控制點上下拖 = 更嗨 / 更穩 */
-function EnergyCurve({ info, shape, onChange }: { info: MusicInfo; shape: EnergyShape; onChange: (s: EnergyShape) => void }) {
+/** 副歌點（能量曲線上方那一條）：t = 歌的秒數、beats = 這段歌的拍（素材秒數）、url = 試聽用 */
+interface ChorusLane { auto: boolean; t: number[]; beats: { t: number; down?: boolean }[]; m: Media }
+
+/**
+ * 歌的試聽（能量曲線上的播放頭）：pos = 播放位置（歌的秒數）。
+ * 左鍵拖曲線 = 移動播放頭；滑鼠在自動剪輯分頁裡時 Space = 播放 / 暫停、Esc = 停止、C = 在播放頭加 / 拿掉副歌點
+ */
+const useSongPlay = create<{ pos: number | null; playing: boolean }>(() => ({ pos: null, playing: false }));
+let songEl: HTMLAudioElement | null = null;
+let songRaf = 0;
+/** 播到這裡停（選用範圍的結尾） */
+let songEnd = Infinity;
+function songPause() {
+  cancelAnimationFrame(songRaf);
+  songEl?.pause();
+  if (useSongPlay.getState().playing) useSongPlay.setState({ playing: false });
+}
+function songPlay(url: string, from: number) {
+  pausePreviews();
+  if (useStore.getState().playing) useStore.setState({ playing: false });
+  songEl ??= new Audio();
+  if (songEl.src !== url) songEl.src = url;
+  songEl.currentTime = from;
+  void songEl.play().catch(() => {});
+  useSongPlay.setState({ pos: from, playing: true });
+  cancelAnimationFrame(songRaf);
+  const tick = () => {
+    if (!songEl || songEl.paused) return songPause();
+    if (songEl.currentTime >= songEnd) { useSongPlay.setState({ pos: songEnd }); return songPause(); }
+    useSongPlay.setState({ pos: songEl.currentTime });
+    songRaf = requestAnimationFrame(tick);
+  };
+  songRaf = requestAnimationFrame(tick);
+}
+// 時間軸開始播：歌的試聽停下來
+useStore.subscribe((s, p) => { if (s.playing && !p.playing) songPause(); });
+
+/** 滑鼠在自動剪輯分頁裡（Space / Esc / C 給試聽用） */
+let aeHover = false;
+
+/** 拍號（可以是小數）↔ 歌的秒數；曲線的橫軸是拍號，拍跟拍之間照時間內插 */
+function beatScale(beats: { t: number }[], n: number) {
+  const last = beats.length - 1, step = last > 0 ? (beats[last].t - beats[0].t) / last : 0.5;
+  const timeAt = (b: number) => {
+    const i = Math.max(0, Math.min(last, Math.floor(b)));
+    const t0 = beats[i].t, t1 = i < last ? beats[i + 1].t : t0 + step;
+    return t0 + (b - i) * (t1 - t0);
+  };
+  const beatAtT = (t: number) => {
+    let i = 0;
+    while (i < last && beats[i + 1].t <= t) i++;
+    const t1 = i < last ? beats[i + 1].t : beats[i].t + step;
+    return i + Math.max(0, Math.min(1, (t - beats[i].t) / Math.max(1e-6, t1 - beats[i].t)));
+  };
+  return { timeAt, beatAtT, end: timeAt(n), x: (t: number) => beatAtT(t) / n, t: (x: number) => timeAt(x * n) };
+}
+
+/** 拍號 → 最近的重拍（沒有重拍資訊 = 原本的拍）；any = 每一拍都可以 */
+function snapDown(beats: { down?: boolean }[], raw: number, any = false) {
+  if (any || !beats.some((b) => b.down)) return raw;
+  let best = -1;
+  for (let i = 0; i < beats.length; i++) if (beats[i].down && (best < 0 || Math.abs(i - raw) < Math.abs(best - raw))) best = i;
+  return best < 0 ? raw : best;
+}
+
+/** 在播放頭的位置（吸附重拍）加副歌點；那裡已經有就拿掉 */
+function toggleChorusAt(beats: { t: number; down?: boolean }[], pos: number) {
+  let raw = 0;
+  for (let i = 1; i < beats.length; i++) if (Math.abs(beats[i].t - pos) < Math.abs(beats[raw].t - pos)) raw = i;
+  const t = beats[snapDown(beats, raw)].t;
+  editChorus((l) => (l.some((v) => Math.abs(v - t) < 1e-3) ? l.filter((v) => Math.abs(v - t) >= 1e-3) : [...l, t]));
+}
+
+/** 拍號 ↔ 曲線上的位置（跟 drop 線一樣畫在拍的開頭） */
+const beatOf = (beats: { t: number }[], t: number) => {
+  let best = 0;
+  for (let i = 1; i < beats.length; i++) if (Math.abs(beats[i].t - t) < Math.abs(beats[best].t - t)) best = i;
+  return best;
+};
+
+/** 副歌點：曲線最上面那一條。左鍵拖旗子 = 移動（吸附重拍，Shift = 每一拍）、右鍵 = 加 / 拿掉；空白處左鍵 = 移動播放頭（交給曲線） */
+function ChorusFlags({ lane, n, box }: { lane: ChorusLane; n: number; box: React.RefObject<HTMLDivElement | null> }) {
+  const [ghost, setGhost] = useState<number | null>(null);
+  const { beats } = lane;
+  const beatAt = (clientX: number, any = false) => {
+    const r = box.current!.getBoundingClientRect();
+    return snapDown(beats, Math.max(0, Math.min(beats.length - 1, Math.round(((clientX - r.left) / r.width) * n))), any);
+  };
+  const xOf = (t: number) => `${(beatOf(beats, t) / n) * 100}%`;
+  const dragFlag = (e: React.PointerEvent, t: number) => {
+    if (e.button !== 0 && e.button !== 2) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const x0 = e.clientX;
+    let cur = t, moved = false;
+    const move = (ev: PointerEvent) => {
+      if (!moved && Math.abs(ev.clientX - x0) < 3) return;
+      moved = true;
+      const nt = Math.round(beats[beatAt(ev.clientX, ev.shiftKey)].t * 1000) / 1000;
+      if (nt === cur) return;
+      const was = cur;
+      cur = nt;
+      editChorus((l) => l.map((v) => (Math.abs(v - was) <= 1e-3 ? nt : v)));
+    };
+    const up = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+  return (
+    <div className="ae-chorus-lane" title={$t('副歌')}
+      onPointerDown={(e) => {
+        // 右鍵按下空白處：加一支旗子，按著拖可以直接帶著走
+        if (e.button !== 2 || e.target !== e.currentTarget) return;
+        const nt = Math.round(beats[beatAt(e.clientX, e.shiftKey)].t * 1000) / 1000;
+        editChorus((l) => [...l, nt]);
+        dragFlag(e, nt);
+      }}
+      onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
+      onPointerMove={(e) => setGhost((e.target as HTMLElement).classList.contains('ae-chorus-lane') ? beatAt(e.clientX, e.shiftKey) : null)} onPointerLeave={() => setGhost(null)}>
+      {ghost !== null && <i className="flag ghost" style={{ left: `${(ghost / n) * 100}%` }} />}
+      {lane.t.map((t) => (
+        <i key={t} className={`flag ${lane.auto ? 'auto' : ''}`} style={{ left: xOf(t) }} title={`${tc(t)} · ${$t('副歌')}`}
+          onPointerDown={(e) => {
+            // 右鍵點旗子 = 刪掉
+            if (e.button === 2) { e.preventDefault(); e.stopPropagation(); editChorus((l) => l.filter((v) => Math.abs(v - t) > 1e-3)); return; }
+            dragFlag(e, t);
+          }}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }} />
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 能量曲線的背景：歌的波形 + 節拍格線（跟時間軸的音訊片段一樣：每拍短刻度、重拍長刻度）。
+ * 橫軸跟曲線一樣是拍號，波形和旗子才對得上
+ */
+function CurveWave({ m, beats, n }: { m: Media; beats: { t: number; down?: boolean }[]; n: number }) {
+  const ref = React.useRef<HTMLCanvasElement>(null);
+  const [w, setW] = useState(0);
+  useEffect(() => {
+    const c = ref.current;
+    if (!c) return;
+    const ro = new ResizeObserver(() => setW(c.clientWidth));
+    ro.observe(c);
+    return () => ro.disconnect();
+  }, []);
+  const theme = usePrefs((x) => x.theme);
+  useEffect(() => {
+    const c = ref.current, peaks = m.peaks;
+    if (!c || !w) return;
+    const dpr = devicePixelRatio || 1, W = Math.round(w * dpr), H = Math.round(c.clientHeight * dpr);
+    c.width = W; c.height = H;
+    const g = c.getContext('2d')!;
+    g.clearRect(0, 0, W, H);
+    // 顏色從 CSS 讀（color = 波形 / 拍、border-color = 重拍；跟著主題），透明度在這裡給
+    const cs = getComputedStyle(c);
+    const { timeAt } = beatScale(beats, n);
+    if (peaks?.length) {
+      const pps = m.peaksPerSec || 100;
+      let max = 1e-6;
+      const i0 = Math.max(0, Math.floor(beats[0].t * pps)), i1 = Math.min(peaks.length, Math.ceil(timeAt(n) * pps));
+      for (let i = i0; i < i1; i++) max = Math.max(max, peaks[i]);
+      g.fillStyle = cs.color;
+      g.globalAlpha = 0.22;
+      for (let x = 0; x < W; x++) {
+        const a = Math.floor(timeAt((x / W) * n) * pps), b = Math.max(a + 1, Math.floor(timeAt(((x + 1) / W) * n) * pps));
+        let v = 0;
+        for (let i = a; i < b && i < peaks.length; i++) v = Math.max(v, peaks[i]);
+        const bh = (v / max) * H * 0.8;
+        g.fillRect(x, (H - bh) / 2, 1, Math.max(1, bh));
+      }
+    }
+    // 節拍格線：太密就只畫重拍
+    const dense = W / n < 6 * dpr;
+    for (let i = 0; i < beats.length; i++) {
+      const down = !!beats[i].down;
+      if (dense && !down) continue;
+      const x = Math.round((i / n) * W);
+      g.fillStyle = down ? cs.borderTopColor : cs.color;
+      g.globalAlpha = down ? 0.9 : 0.4;
+      const h = (down ? 10 : 5) * dpr;
+      g.fillRect(x, H - h, dpr, h);
+    }
+    g.globalAlpha = 1;
+  }, [m, beats, n, w, theme]);
+  return <canvas ref={ref} className="ae-curve-wave" />;
+}
+
+function EnergyCurve({ info, shape, onChange, chorus }: { info: MusicInfo; shape: EnergyShape; onChange: (s: EnergyShape) => void; chorus?: ChorusLane | null }) {
   const ref = React.useRef<HTMLDivElement>(null);
   const n = info.energy.length;
   const shaped = useMemo(() => shapeMusic(info, shape).energy, [info, shape]);
+  const scale = useMemo(() => (chorus && chorus.beats.length > 1 ? beatScale(chorus.beats, n) : null), [chorus?.beats, n]); // eslint-disable-line react-hooks/exhaustive-deps
+  const pos = useSongPlay((x) => x.pos);
+  const playing = useSongPlay((x) => x.playing);
+  songEnd = scale?.end ?? Infinity;
+  // 換歌 / 換範圍：播放頭回到開頭
+  useEffect(() => { songPause(); useSongPlay.setState({ pos: null }); }, [scale]);
+  useEffect(() => songPause, []);
+  // 滑鼠在自動剪輯分頁裡：Space = 播放 / 暫停、Esc = 停止、C = 在播放頭加 / 拿掉副歌點（擋掉時間軸的快捷鍵）
+  useEffect(() => {
+    if (!chorus || !scale) return;
+    const key = (e: KeyboardEvent) => {
+      if (!aeHover || isTextField(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+      const st = useSongPlay.getState();
+      const at = st.pos ?? chorus.beats[0].t;
+      if (e.code === 'Space') {
+        if (st.playing) songPause();
+        else songPlay(chorus.m.url, at >= scale.end - 0.05 ? chorus.beats[0].t : at);
+      } else if (e.key === 'Escape') songPause();
+      else if (e.key === 'c' || e.key === 'C') toggleChorusAt(chorus.beats, at);
+      else return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    window.addEventListener('keydown', key, true);
+    return () => window.removeEventListener('keydown', key, true);
+  }, [chorus, scale]);
   // 控制點顯示在「調整後的能量」上：用附近幾拍的平均，避免跟著單一拍跳
   const smooth = (x: number) => {
     const c = Math.round(x * (n - 1));
@@ -205,6 +424,7 @@ function EnergyCurve({ info, shape, onChange }: { info: MusicInfo; shape: Energy
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);
   };
+  /** 右鍵按下空白處：在這裡加一個控制點，按著拖可以直接帶著走 */
   const add = (e: React.PointerEvent) => {
     const box = ref.current!.getBoundingClientRect();
     const x = Math.min(0.99, Math.max(0.01, (e.clientX - box.left) / box.width));
@@ -212,7 +432,6 @@ function EnergyCurve({ info, shape, onChange }: { info: MusicInfo; shape: Energy
     const idx = pts.findIndex((p) => p.x === x);
     const next = { ...shape, points: pts };
     onChange(next);
-    // 新加的點直接開始拖
     shape = next;
     drag(e, idx);
   };
@@ -220,8 +439,30 @@ function EnergyCurve({ info, shape, onChange }: { info: MusicInfo; shape: Energy
     if (idx === 0 || idx === shape.points.length - 1) return;
     onChange({ ...shape, points: shape.points.filter((_, i) => i !== idx) });
   };
+  /** 左鍵拖曳 = 移動播放頭（播放中：拖的時候先停，放開接著播） */
+  const scrub = (e: React.PointerEvent) => {
+    if (e.button !== 0 || !scale || !chorus) return;
+    e.preventDefault();
+    const was = useSongPlay.getState().playing;
+    songPause();
+    const at = (x: number) => {
+      const r = ref.current!.getBoundingClientRect();
+      return scale.t(Math.max(0, Math.min(1, (x - r.left) / r.width)));
+    };
+    useSongPlay.setState({ pos: at(e.clientX) });
+    const move = (ev: PointerEvent) => useSongPlay.setState({ pos: at(ev.clientX) });
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      if (was) songPlay(chorus.m.url, useSongPlay.getState().pos!);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
+  };
+  const headX = scale && pos !== null ? scale.x(pos) * 100 : null;
   return (
-    <div className="ae-curve" ref={ref} onPointerDown={(e) => e.button === 0 && add(e)} onContextMenu={(e) => e.preventDefault()}>
+    <div className={`ae-curve ${scale ? 'scrub' : ''}`} ref={ref} onPointerDown={(e) => (e.button === 2 ? add(e) : scrub(e))} onContextMenu={(e) => e.preventDefault()}>
+      {chorus && chorus.beats.length > 1 && <CurveWave m={chorus.m} beats={chorus.beats} n={n} />}
       <svg viewBox="0 0 1000 100" preserveAspectRatio="none">
         <rect className="band high" x="0" y="0" width="1000" height={(1 - MID_MAX) * 100} />
         <rect className="band mid" x="0" y={(1 - MID_MAX) * 100} width="1000" height={(MID_MAX - LOW_MAX) * 100} />
@@ -229,13 +470,36 @@ function EnergyCurve({ info, shape, onChange }: { info: MusicInfo; shape: Energy
         {info.drops.map((d) => <line key={d} className="drop" x1={(d / n) * 1000} x2={(d / n) * 1000} y1="0" y2="100" />)}
         <path className="base" d={path(info.energy)} />
         <path className="shaped" d={path(shaped)} />
+        {chorus?.t.map((t) => { const x = (beatOf(chorus.beats, t) / n) * 1000; return <line key={t} className={`chorus ${chorus.auto ? 'auto' : ''}`} x1={x} x2={x} y1="0" y2="100" />; })}
       </svg>
+      {chorus && chorus.beats.length > 0 && <ChorusFlags lane={chorus} n={n} box={ref} />}
       {shape.points.map((p, i) => (
         <i key={i} className="ae-handle" style={{ left: `${p.x * 100}%`, top: `${(1 - smooth(p.x)) * 100}%` }}
-          onPointerDown={(e) => e.button === 0 && drag(e, i)} onDoubleClick={(e) => { e.stopPropagation(); remove(i); }}
-          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); remove(i); }} />
+          onPointerDown={(e) => {
+            if (e.button === 0) drag(e, i);
+            // 右鍵點控制點 = 刪掉
+            else if (e.button === 2) { e.preventDefault(); e.stopPropagation(); remove(i); }
+          }}
+          onDoubleClick={(e) => { e.stopPropagation(); remove(i); }}
+          onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }} />
       ))}
+      {headX !== null && <b className={`ae-curve-head ${playing ? 'on' : ''}`} style={{ left: `${headX}%` }} />}
     </div>
+  );
+}
+
+/** 曲線下方：播放 / 暫停、在播放頭加副歌（跟 Space / C 一樣） */
+function SongTransport({ m, beats }: { m: Media; beats: { t: number; down?: boolean }[] }) {
+  const playing = useSongPlay((x) => x.playing);
+  const pos = useSongPlay((x) => x.pos);
+  const at = pos ?? beats[0]?.t ?? 0;
+  return (
+    <>
+      <button className="ec-icon" title={`${playing ? $t('暫停') : $t('播放')} (Space)`} onClick={() => (playing ? songPause() : songPlay(m.url, at >= songEnd - 0.05 ? beats[0].t : at))}>
+        {playing ? <Pause size={13} /> : <Play size={13} />}
+      </button>
+      <button className="ec-icon ae-flag-btn" title={`${$t('在播放頭加副歌')} (C)`} onClick={() => toggleChorusAt(beats, at)}><Flag size={13} /></button>
+    </>
   );
 }
 
@@ -256,14 +520,11 @@ function SectionBar({ info }: { info: MusicInfo }) {
 
 export function AutoEditPanel() {
   const st = useAutoEdit();
-  const audios = useStore((x) => x.audios);
-  const clips = useStore((x) => x.clips);
   const media = useStore((x) => x.media);
   const modules = useStore((x) => x.modules);
-  const loop = useStore((x) => x.loop);
   const combos = usePrefs((x) => x.fxCombos);
   useHistory((h) => h.ver); // 「再一版」能不能用
-  const music = useMemo(() => musicClips({ ...useStore.getState(), audios, clips, media }), [audios, clips, media]);
+  const music = useMemo(() => songMedia({ ...useStore.getState(), media }), [media]);
   const feet = useMemo(() => footage({ ...useStore.getState(), media }), [media]);
   // 分頁開著就先在背景分析影片（匯入素材後按「產生」不用再等）
   const analyze = useAutoEdit((x) => x.analyze);
@@ -278,7 +539,8 @@ export function AutoEditPanel() {
     const t = setTimeout(() => void presample(list, () => stop || useAutoEditRun.getState().running), 800);
     return () => { stop = true; clearTimeout(t); };
   }, [using, analyze, director]);
-  const audioId = st.audioId && music.some((a) => a.id === st.audioId) ? st.audioId : music[0]?.id ?? null;
+  const song = aeSong({ ...useStore.getState(), media }, st);
+  const songSrc = useMemo(() => (song ? songSource({ ...useStore.getState(), media }, song) : null), [song?.mediaId, song?.a, song?.b, media]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 細節區塊預設收起（很少動）
   const [open, setOpen] = useState<Set<string>>(() => new Set());
@@ -287,19 +549,21 @@ export function AutoEditPanel() {
   // 跟拍變速：滑過的種類顯示曲線卡片
   const [speedHover, setSpeedHover] = useState<{ el: HTMLElement; v: SpeedVariant } | null>(null);
   const toggle = (id: string) => setOpen((o) => { const n = new Set(o); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  // 從時間軸跳到素材清單：收起的話打開
+  const aeFocus = useAeFocus((x) => x.n);
+  useEffect(() => { if (aeFocus) setOpen((o) => { if (!o.has('feet-hide')) return o; const n = new Set(o); n.delete('feet-hide'); return n; }); }, [aeFocus]);
 
   // 音樂分析（段落條）
   useEffect(() => {
-    if (!audioId) return;
-    const src = musicSource(useStore.getState(), audioId);
-    if (src) void analyzeSource(src).catch(() => {});
-  }, [audioId, audios, media]);
-  const musicInfo = st.analysis?.audioId === audioId ? st.analysis.info : null;
+    if (songSrc) void analyzeSource(songSrc).catch(() => {});
+  }, [songSrc]);
+  const musicInfo = song && st.analysis?.key === songKey(song) ? st.analysis.info : null;
   const shapedInfo = useMemo(() => (musicInfo ? shapeMusic(musicInfo, st.shape) : null), [musicInfo, st.shape]);
   const levels = [0, 0, 0];
   for (const l of shapedInfo?.level ?? []) levels[l]++;
-  const audio = audios.find((a) => a.id === audioId);
-  const bpm = audio ? mediaBeats(media.find((m) => m.id === audio.mediaId))?.bpm : undefined;
+  const songM = song && media.find((m) => m.id === song.mediaId);
+  const bpm = songM ? mediaBeats(songM)?.bpm : undefined;
+  const chorus = song ? songChorus(song, songSrc?.beats ?? [], shapedInfo) : null;
 
   const p = st.params;
   const setParam = <K extends keyof Recipe>(k: K, v: Recipe[K]) => set({ recipe: 'custom', params: { ...p, [k]: v, id: 'custom' } });
@@ -329,14 +593,14 @@ export function AutoEditPanel() {
 
   const dropOver = useDrag((x) => x.drag?.target?.kind === 'autoEdit');
   const run = useAutoEditRun();
-  const canGo = !run.running && !!audioId && using.length > 0 && (st.range === 'all' || !!loop);
+  const canGo = !run.running && !!songSrc && using.length > 0;
   const replace = canReplaceLast();
   const knob = (label: string, node: React.ReactNode) => <label className="ae-knob"><span>{label}</span>{node}</label>;
   const pct = (v: number, on: (v: number) => void, max = 100) => <DragNumber value={Math.round(v * 100)} min={0} max={max} step={5} decimals={0} suffix="%" onChange={(x) => on(x / 100)} />;
   const beatsKnob = (i: number) => <DragNumber value={p.beatsPerShot[i]} min={1} max={32} step={1} decimals={0} suffix={$t(' 拍')} onChange={(v) => setLevel(i, Math.round(v))} />;
 
   return (
-    <div className={`auto-edit-panel ae-segs-drop ${dropOver ? 'drop-here' : ''}`}>
+    <div className={`auto-edit-panel ae-segs-drop ${dropOver ? 'drop-here' : ''}`} onPointerEnter={() => (aeHover = true)} onPointerLeave={() => (aeHover = false)}>
       <AeRangeDialog />
       {/* 常用：產生、音樂與能量曲線、智慧挑選、素材、風格 */}
       <div className="ae-bar">
@@ -364,29 +628,39 @@ export function AutoEditPanel() {
       {/* 寬的時候左右兩欄：左 = 用什麼剪（音樂、素材）；右 = 怎麼剪（風格、加料） */}
       <div className="ae-cols">
         <div className="ae-col">
-          <div className="ae-card">
+          <div className="ae-card ae-song-drop">
             <div className="ae-card-head">
               <span>{$t('音樂')}</span>
               {bpm && <span className="ae-stat">{bpm.toFixed(1)} BPM{musicInfo && ` · ${$t('{0} 段', musicInfo.sections.length)} · ${$t('{0} 個 drop', musicInfo.drops.length)}`}</span>}
             </div>
             {!music.length ? (
-              <div className="ae-empty">{$t('沒有節拍：先在音訊軌放音樂')}</div>
+              <div className="ae-empty">{$t('素材庫裡沒有音樂')}</div>
             ) : (
               <>
                 <div className="ae-line">
-                  <select className="select ae-grow" value={audioId ?? ''} onChange={(e) => set({ audioId: e.target.value })}>
-                    {music.map((a) => <option key={a.id} value={a.id}>{a.name || media.find((m) => m.id === a.mediaId)?.name} · {a.duration.toFixed(1)}s</option>)}
+                  <select className="select ae-grow" value={song?.mediaId ?? ''} onChange={(e) => { const m = music.find((x) => x.id === e.target.value); if (m) set({ song: { mediaId: m.id, a: 0, b: m.duration } }); }}>
+                    {music.map((m) => <option key={m.id} value={m.id}>{m.name} · {m.duration.toFixed(1)}s</option>)}
                   </select>
-                  {loop && <Seg value={st.range} on={(v) => set({ range: v })} opts={[{ v: 'all', label: $t('整段') }, { v: 'loop' as const, label: $t('循環範圍') }]} />}
+                  {song && songM && (song.a > 0.01 || song.b < songM.duration - 0.01) && <span className="ae-stat">{tc(song.a)} – {tc(song.b)}</span>}
+                  <button className="ec-icon" title={$t('選範圍')} onClick={() => openSongRange()}><Pencil size={13} /></button>
                 </div>
+
                 {musicInfo && (
                   <>
-                    <EnergyCurve info={musicInfo} shape={st.shape} onChange={(shape) => set({ shape })} />
+                    <EnergyCurve info={musicInfo} shape={st.shape} onChange={(shape) => set({ shape })}
+                      chorus={chorus && songSrc && songM ? { ...chorus, beats: songSrc.beats, m: songM } : null} />
                     <SectionBar info={shapedInfo ?? musicInfo} />
                     <div className="ae-line ae-curve-tools">
                       {knob($t('整體強度'), <DragNumber value={Math.round(st.shape.gain * 100)} min={-50} max={50} step={5} decimals={0} suffix="%" onChange={(v) => set({ shape: { ...st.shape, gain: v / 100 } })} />)}
                       {knob($t('對比'), <DragNumber value={Math.round(st.shape.contrast * 100)} min={50} max={200} step={5} decimals={0} suffix="%" onChange={(v) => set({ shape: { ...st.shape, contrast: v / 100 } })} />)}
                       <span className="spacer" />
+                      {chorus && songSrc && songM && <SongTransport m={songM} beats={songSrc.beats} />}
+                      {chorus && (
+                        <span className={`ae-chorus-stat ${chorus.auto ? '' : 'manual'}`} title={$t('副歌')}>
+                          <i />{chorus.auto ? $t('自動（{0}）', chorus.t.length) : $t('手動（{0}）', chorus.t.length)}
+                          {!chorus.auto && <button className="ec-icon" title={$t('改回自動')} onClick={() => editChorus(() => [])}><X size={12} /></button>}
+                        </span>
+                      )}
                       <span className="ae-levels" title={$t('能量分布')}>
                         <i className="high" />{levels[2]}<i className="mid" />{levels[1]}<i className="low" />{levels[0]}
                       </span>
@@ -411,6 +685,8 @@ export function AutoEditPanel() {
             </div>
             <div className="ae-smart">
               <Check v={st.analyze} on={(v) => set({ analyze: v })} title={$t('依運動量、畫質、有沒有人、原本的剪接點挑片段')}>{$t('分析影片內容')}</Check>
+              {st.lead && <div className="ae-seg ae-lead"><img src={st.lead.thumb} alt="" /><span className="ae-seg-name">{$t('主角')}</span><button className="ec-icon" title={$t('清除')} onClick={() => set({ lead: null })}><X size={13} /></button></div>}
+              {st.lead && <Check v={!st.lead.mixed} on={(v) => { const { mixed: _, ...l } = st.lead!; set({ lead: v ? l : { ...l, mixed: true } }); }}>{$t('避開沒有主角的片段')}</Check>}
             </div>
             {!open.has('feet-hide') && <SegList />}
           </div>

@@ -666,6 +666,8 @@ function onKey(e: KeyboardEvent) {
   }
   const k = e.key.toLowerCase();
   const frame = 1 / fps();
+  // 有選取文字（例如程式碼的錯誤訊息）：Ctrl+C 交給瀏覽器複製文字
+  if (mod && k === 'c' && getSelection()?.toString()) return;
   // 滑鼠在素材預覽上：Space / I / O 給素材預覽
   if (sourceHotkey(e)) return;
   // 最後點的是軌道標籤：Delete 刪選取的軌道

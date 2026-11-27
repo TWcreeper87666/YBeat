@@ -7,6 +7,41 @@ export const POP_VARIANTS: PopVariant[] = ['step', 'mono', 'fly', 'shake',
 
 type Point = [number, number];
 
+/** 人的那一塊：至少要有幾張臉那麼大；往臉下面延伸至少幾個臉高，或一路連到畫面下緣（上半身被畫面切掉也算） */
+const BODY_AREA = 2;
+const BODY_BELOW = 0.5;
+
+/**
+ * 去背遮罩只留這張臉所在的那一塊（頭連著身體）：去背模型找的是「顯眼的東西」，背景的樹、招牌也會被框進來。
+ * face = 原圖座標的臉（中心 + 寬高，0..1）。回傳 null = 臉的位置沒有主體，或只有一顆頭（身體被擋住、沒去背到）。
+ */
+export function keepFace(mask: ArrayLike<number>, size: number, face: { x: number; y: number; h: number; w?: number }): Uint8Array | null {
+  const fw = face.w ?? face.h;
+  const on = (i: number) => (mask[i] ?? 0) > 128;
+  const x0 = Math.max(0, Math.floor((face.x - fw * 0.6) * size)), x1 = Math.min(size - 1, Math.ceil((face.x + fw * 0.6) * size));
+  const y0 = Math.max(0, Math.floor((face.y - face.h * 0.6) * size)), y1 = Math.min(size - 1, Math.ceil((face.y + face.h * 0.6) * size));
+  const out = new Uint8Array(size * size);
+  const stack: number[] = [];
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const i = y * size + x;
+    if (on(i) && !out[i]) { out[i] = 255; stack.push(i); }
+  }
+  if (!stack.length) return null;
+  let count = 0, maxY = 0;
+  while (stack.length) {
+    const i = stack.pop()!;
+    count++;
+    const x = i % size, y = (i - x) / size;
+    if (y > maxY) maxY = y;
+    for (const j of [x > 0 ? i - 1 : -1, x < size - 1 ? i + 1 : -1, y > 0 ? i - size : -1, y < size - 1 ? i + size : -1])
+      if (j >= 0 && !out[j] && on(j)) { out[j] = 255; stack.push(j); }
+  }
+  const faceArea = fw * face.h * size * size;
+  const below = maxY / size - (face.y + face.h / 2);
+  const body = maxY >= size - 2 || below >= face.h * BODY_BELOW;
+  return count >= faceArea * BODY_AREA && body ? out : null;
+}
+
 /** 去背遮罩 → SVG 路徑（200×200 座標，evenodd）：每一塊主體的外框與裡面的洞各一條封閉路徑。
  * 太小的碎片（< minArea 比例）略過；用 Douglas–Peucker 簡化（tolerance：遮罩像素）。 */
 export function traceMatte(mask: ArrayLike<number>, size: number,
@@ -125,10 +160,13 @@ export function scoreMatte(mask: ArrayLike<number>, size: number): MatteScore {
   };
 }
 
+/** 剪影窗 / 主體挖洞能用的主體大小（佔原圖的比例；裁到畫面外的部分不影響） */
+export const LOOSE_MIN = 0.03, LOOSE_MAX = 0.75;
+
 /** cover 後主體在畫面上的位置及可用性。 */
 export function popFraming(score: MatteScore, mediaW: number, mediaH: number, frameW: number, frameH: number):
-  { ok: boolean; centered: boolean; cx: number; cy: number; area: number } {
-  if (Math.min(mediaW, mediaH, frameW, frameH) <= 0) return { ok: false, centered: false, cx: 0, cy: 0, area: 0 };
+  { ok: boolean; loose: boolean; centered: boolean; cx: number; cy: number; area: number } {
+  if (Math.min(mediaW, mediaH, frameW, frameH) <= 0) return { ok: false, loose: false, centered: false, cx: 0, cy: 0, area: 0 };
   const k = Math.max(frameW / mediaW, frameH / mediaH);
   const sx = mediaW * k / frameW, sy = mediaH * k / frameH;
   const cx = (score.cu - 0.5) * sx, cy = (score.cv - 0.5) * sy;
@@ -137,13 +175,19 @@ export function popFraming(score: MatteScore, mediaW: number, mediaH: number, fr
     (v0 - 0.5) * sy >= -0.46 && (v1 - 0.5) * sy <= 0.46;
   const area = score.area * sx * sy;
   const centered = Math.abs(cx) <= 0.3 && Math.abs(cy) <= 0.3;
-  return { ok: area >= 0.08 && area <= 0.65 && inFrame && score.edge < 0.02, centered, cx, cy, area };
+  const sized = area >= 0.08 && area <= 0.65;
+  const ok = sized && inFrame && score.edge < 0.02;
+  // 剪影窗 / 主體挖洞從原尺寸往外放大：主體大、碰到邊（人像的身體、直式畫面裁掉的左右）都不會露出切口，只要大小合理
+  const loose = ok || (score.area >= LOOSE_MIN && score.area <= LOOSE_MAX && Math.abs(cx) < 0.45 && Math.abs(cy) < 0.45);
+  return { ok, loose, centered, cx, cy, area };
 }
 
 export interface PlanPop {
   b0: number; b1: number; variant: PopVariant; mediaId: string;
   cx: number; cy: number; side?: -1 | 1;
-  revealMediaId?: string; text?: string; path?: string;
+  revealMediaId?: string; text?: string;
+  /** 主體輪廓（只留臉連著的那一塊）：剪影窗 / 主體挖洞的遮罩；逐拍放大 / 震閃用它把人以外的東西濾掉 */
+  path?: string;
 }
 type PopEase = 'hold' | 'linear' | 'out' | 'back';
 type PopKey = { t: number; v: number; ease: PopEase };
@@ -158,8 +202,33 @@ export interface PopLayer {
   blend?: 'normal' | 'add' | 'screen' | 'multiply' | 'subtract' | 'lighten';
 }
 
-/** 將一個跳出計畫展開為疊加片段。 */
+/** 剪影窗 / 主體挖洞：第 2～4 拍的遮罩倍率（第 1 拍 = 原尺寸） */
+const MASK_GROW = { silhouetteWindow: [1.1, 1.2, 1.35], subjectHole: [1.15, 1.35, 1.6] };
+
+/** 將一個跳出計畫展開為疊加片段；有主體輪廓時，去背層再加上輪廓遮罩（只留這個人） */
 export function expandPop(pop: PlanPop, T: (beat: number) => number): PopLayer[] {
+  const layers = expandLayers(pop, T);
+  return pop.path && pop.variant !== 'silhouetteWindow' && pop.variant !== 'subjectHole' ? layers.map((l) => withOutline(l, pop)) : layers;
+}
+
+/**
+ * 去背層加上主體輪廓遮罩：AI 去背會連背景顯眼的東西（樹、招牌）一起留下，輪廓只有臉連著的那一塊。
+ * 遮罩的位置是畫面座標，只對得上「以主體中心縮放」的層（位移 = cx·(1 − 縮放)、不旋轉）；飛入、旋轉、四格這類跳過。
+ */
+function withOutline(l: PopLayer, pop: PlanPop): PopLayer {
+  if (!l.matte || l.mask || l.mediaId !== pop.mediaId) return l;
+  const k = l.keys ?? {};
+  if (k.rotation?.some((x) => Math.abs(x.v) > 1e-6)) return l;
+  const sc = k.scaleX ?? [{ t: 0, v: 1, ease: 'hold' as const }];
+  if (k.scaleY && k.scaleY.map((x) => x.v).join() !== sc.map((x) => x.v).join()) return l;
+  const follows = (keys: PopKey[] | undefined, c: number) => keys
+    ? keys.every((x) => { const s = sc.find((y) => Math.abs(y.t - x.t) < 1e-6)?.v; return s !== undefined && Math.abs(x.v - c * (1 - s)) < 1e-4; })
+    : sc.every((s) => Math.abs(s.v - 1) < 1e-6);
+  if (!follows(k.x, pop.cx) || !follows(k.y, pop.cy)) return l;
+  return { ...l, mask: { path: pop.path!, invert: false, scale: sc } };
+}
+
+function expandLayers(pop: PlanPop, T: (beat: number) => number): PopLayer[] {
   const t0 = T(pop.b0), t1 = T(pop.b1), end = t1 - t0;
   const layer = (index: number, matte: boolean): PopLayer => ({ layer: index, mediaId: pop.mediaId, t0, t1, matte });
   const steps = (values: number[]) => {
@@ -189,9 +258,8 @@ export function expandPop(pop: PlanPop, T: (beat: number) => number): PopLayer[]
     if (pop.variant === 'silhouetteWindow') masked.mediaId = pop.revealMediaId ?? pop.mediaId;
     else full.mediaId = pop.revealMediaId ?? pop.mediaId;
     masked.mask = { path: pop.path ?? '', invert: pop.variant === 'subjectHole',
-      scale: [1, ...(pop.variant === 'silhouetteWindow' ? [1.25, 1.6, 2.2] : [1.3, 1.8, 2.6])]
-        .map((v, i) => key(T(pop.b0 + i) - t0, v)).concat(key(end,
-          pop.variant === 'silhouetteWindow' ? 2.2 : 2.6)) };
+      // 每拍放大一點就好：放太大看不出人形
+      scale: [1, ...MASK_GROW[pop.variant]].map((v, i) => key(T(pop.b0 + i) - t0, v)).concat(key(end, MASK_GROW[pop.variant].at(-1)!)) };
     return [full, masked];
   }
   if (pop.variant === 'crossShot') {
@@ -304,6 +372,7 @@ export function expandPop(pop: PlanPop, T: (beat: number) => number): PopLayer[]
       opacity: [{ t: 0, v: 0, ease: 'linear' }, { t: beat / 3, v: 1, ease: 'hold' }, { t: end, v: 1, ease: 'hold' }],
     };
   } else {
+    // 從小放大到原尺寸：最後跟完整圖對齊，揭露拍那一格直接接下去
     cutout.keys = steps([0.55, 0.7, 0.85, 1]);
     if (pop.variant === 'shake') {
       const hitSec = Math.min(0.18, (T(pop.b0 + 1) - t0) * 0.8);

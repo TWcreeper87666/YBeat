@@ -9,18 +9,19 @@ import { retryBoxTrack, trackKey, useBoxTracks } from '../engine/boxTrack';
 import { requestSubject, tracking } from '../engine/follow';
 
 /** 預覽上框選目標中的片段（null = 沒有在框選） */
-export const useBoxPick = create<{ clipId: string | null }>(() => ({ clipId: null }));
+export const useBoxPick = create<{ clipId: string | null; mode: 'subject' | 'lead' }>(() => ({ clipId: null, mode: 'subject' }));
 
 /** 開始框選：停止播放、選取片段，時間不在片段裡就移到片段開頭 */
-export function startBoxPick(clipId: string) {
+export function startBoxPick(clipId: string, mode: 'subject' | 'lead' = 'subject') {
   const s = useStore.getState();
   const c = s.clips.find((x) => x.id === clipId);
   if (!c) return;
   const inside = s.time >= c.start && s.time < c.start + c.duration;
   useStore.setState({ playing: false, ...(inside ? {} : { time: c.start }) });
   s.select({ type: 'clip', id: clipId });
-  useBoxPick.setState({ clipId });
+  useBoxPick.setState({ clipId, mode });
 }
+export const startLeadPick = (clipId: string) => startBoxPick(clipId, 'lead');
 export const stopBoxPick = () => useBoxPick.getState().clipId && useBoxPick.setState({ clipId: null });
 
 /** 片段追蹤的進度 / 錯誤（開著就在背景算）；retry = 清掉錯誤重算 */

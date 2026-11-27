@@ -88,14 +88,6 @@ const INTENSITY: Record<string, [string, number, number]> = {
   'fx-vignette': ['amount', 0.3, 0.8],
 };
 
-/**
- * 自動剪輯放這些特效時，參數跟著音樂音量動（min = 安靜時、max = 最大聲時）。
- * 暗角：越大聲，中間亮的範圍越小（外圍的暗往內收）。
- */
-export const AUDIO_DRIVE: Record<string, { param: string; min: number; max: number }> = {
-  'fx-vignette': { param: 'size', min: 0.65, max: 0.28 },
-};
-
 export function intensityParams(id: string, v: number): Record<string, number> | undefined {
   const x = INTENSITY[id];
   if (!x) return undefined;

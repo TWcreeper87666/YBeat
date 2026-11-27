@@ -1,4 +1,4 @@
-import { expandPop, popFraming, scoreMatte, traceMatte, POP_VARIANTS, type MatteScore, type PopVariant } from '../src/engine/subjectPop';
+import { expandPop, keepFace, popFraming, scoreMatte, traceMatte, POP_VARIANTS, type MatteScore, type PopVariant } from '../src/engine/subjectPop';
 
 let fails = 0;
 const ok = (value: boolean, name: string) => {
@@ -37,11 +37,39 @@ ok(edge.bbox[0] === 0 && edge.bbox[1] === 0 && edge.edge > 0.02, 'edge touching 
 const empty = scoreMatte(new Uint8Array(size * size), size);
 ok(empty.area === 0 && empty.edge === 0 && empty.bbox.every((v) => v === 0), 'empty mask');
 
+// 只留臉連著的那一塊：人（頭 + 身體）在中間，右邊有一棵樹
+{
+  const head = (x: number, y: number) => (x - 120) ** 2 + (y - 90) ** 2 <= 30 ** 2;
+  const body = (x: number, y: number) => x >= 80 && x < 160 && y >= 115 && y < 300;
+  const tree = (x: number, y: number) => x >= 240 && x < 300 && y >= 40 && y < 300;
+  const face = { x: 120 / size, y: 90 / size, w: 50 / size, h: 50 / size };
+  const kept = keepFace(mask((x, y) => head(x, y) || body(x, y) || tree(x, y)), size, face);
+  ok(!!kept && kept[150 * size + 120] === 255 && kept[150 * size + 270] === 0, '只留臉連著的那一塊（背景的樹拿掉）');
+  ok(keepFace(mask(head), size, face) === null, '只有一顆頭（沒有身體）：不能用');
+  ok(keepFace(mask(tree), size, face) === null, '臉的位置沒有主體：不能用');
+  // 特寫：臉很大、肩膀一路到畫面下緣（臉下面不到一個臉高）
+  const bigFace = { x: 0.5, y: 0.55, w: 0.35, h: 0.4 };
+  const closeUp = (x: number, y: number) => ((x - 160) ** 2 / 60 ** 2 + (y - 176) ** 2 / 70 ** 2 <= 1) || (y >= 230 && x >= 40 && x < 280);
+  ok(!!keepFace(mask(closeUp), size, bigFace), '特寫的上半身（連到畫面下緣）：可以');
+  // 整個人站在畫面中間：身體沒碰到下緣，但往下延伸夠多
+  const standing = (x: number, y: number) => head(x, y) || (x >= 95 && x < 145 && y >= 115 && y < 200);
+  ok(!!keepFace(mask(standing), size, face), '身體沒碰到下緣、往下延伸夠多：可以');
+}
+
 const frame = (s: MatteScore, mw = 1920, mh = 1080) => popFraming(s, mw, mh, 1920, 1080);
 ok(frame(disc).ok && frame(disc).centered, 'centred disc framing');
 const top = { ...disc, cu: 0.5, cv: 0.15, bbox: [0.25, 0.05, 0.75, 0.25] as MatteScore['bbox'] };
 ok(!frame(top, 1080, 1920).ok, 'portrait cover crops top subject');
 ok(!frame({ ...disc, area: 0.01 }).ok && !frame({ ...disc, area: 0.8 }).ok, 'tiny and huge subjects');
+// 人像：頭在上面、身體一路到下緣
+const bust = scoreMatte(mask((x, y) => (x - 160) ** 2 + (y - 120) ** 2 <= 50 ** 2 || (y >= 160 && x >= 90 && x < 230)), size);
+ok(!frame(bust).ok && frame(bust).loose, '碰到下緣：不能一般跳出，可以做剪影窗 / 主體挖洞');
+const sideCut = scoreMatte(mask((x, y) => x < 120 && y >= 60 && y < 260), size);
+ok(!frame(sideCut).ok && frame(sideCut).loose, '碰到左右邊緣：只做剪影窗 / 主體挖洞');
+ok(frame({ ...disc, area: 0.6 }, 1920, 1080).loose && popFraming({ ...disc, area: 0.6 }, 1920, 1080, 1080, 1920).loose,
+  '橫式素材放進直式畫面：主體看起來很大也可以');
+const farLeft = scoreMatte(mask((x) => x < 30), size);
+ok(!frame(farLeft).loose && !frame({ ...disc, area: 0.01 }).loose && !frame({ ...disc, area: 0.8 }).loose, '在畫面外、太小、太大：都不行');
 
 const T = (b: number) => b * 0.5;
 const base = { b0: 60, b1: 64, mediaId: 'image', cx: 0.2, cy: -0.1 };
@@ -49,6 +77,14 @@ const step = expandPop({ ...base, variant: 'step' }, T);
 ok(step.length === 1 && step[0].matte && step[0].layer === 1 && step[0].t1 === T(64), 'step layer and end');
 ok(step[0].keys?.scaleX?.length === 5 && step[0].keys.scaleX.at(-1)?.v === 1 &&
   step[0].keys.scaleX.every((k) => k.ease === 'hold'), 'step hold scales');
+const masked = expandPop({ ...base, variant: 'step', path: 'M0 0L10 0L10 10Z' }, T)[0];
+ok(masked.matte && masked.mask?.path === 'M0 0L10 0L10 10Z' && !masked.mask.invert &&
+  masked.mask.scale.map((k) => k.v).join() === masked.keys?.scaleX?.map((k) => k.v).join() && masked.keys?.scaleX?.at(-1)?.v === 1,
+  '有主體輪廓：逐拍放大用遮罩只留這個人，遮罩跟著主體縮放，最後回到原尺寸');
+ok(!step[0].mask, '沒有輪廓：只用 AI 去背');
+const outline = 'M0 0L10 0L10 10Z';
+ok(expandPop({ ...base, b0: 62, variant: 'fly', path: outline }, T).every((l) => !l.mask), '飛入（位置在動）：不加輪廓遮罩');
+ok(expandPop({ ...base, variant: 'mono', path: outline }, T).some((l) => l.matte && l.mask?.path === outline), '黑白背景：去背層加輪廓遮罩');
 ok(close(step[0].keys?.x?.[0].v ?? 0, 0.09) && close(step[0].keys?.y?.[0].v ?? 0, -0.045) &&
   step[0].keys?.x?.at(-1)?.v === 0, 'step centre compensation');
 const shake = expandPop({ ...base, variant: 'shake' }, T);
@@ -109,7 +145,7 @@ ok(blur[0].effects?.[0].moduleId === 'fx-blur' && blur[0].effects[0].params.amou
 
 for (const variant of ['silhouetteWindow', 'subjectHole'] as const) {
   const layers = expandPop({ ...base, variant, revealMediaId: 'B', path: 'M10 10L90 10L90 90Z' }, T);
-  const expected = variant === 'silhouetteWindow' ? [1, 1.25, 1.6, 2.2, 2.2] : [1, 1.3, 1.8, 2.6, 2.6];
+  const expected = variant === 'silhouetteWindow' ? [1, 1.1, 1.2, 1.35, 1.35] : [1, 1.15, 1.35, 1.6, 1.6];
   ok(layers.length === 2 && layers[0].mediaId === (variant === 'silhouetteWindow' ? 'image' : 'B') &&
     layers[1].mediaId === (variant === 'silhouetteWindow' ? 'B' : 'image') &&
     layers.every((layer) => !layer.matte && layer.t0 === T(60) && layer.t1 === T(64) && !layer.keys) &&

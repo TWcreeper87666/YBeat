@@ -24,6 +24,9 @@ import { useFaces } from '../engine/face';
 import { useBoxTracks, trackKey } from '../engine/boxTrack';
 import { anchorTime, frameRectToBox, putAnchor, requestSubject, subjectAt, tracking } from '../engine/follow';
 import { stopBoxPick, useBoxPick } from './subjectUi';
+import { leadFromBox } from '../engine/leadPick';
+import { sampledNow } from '../engine/mediaSampler';
+import { useAutoEdit } from '../engine/autoEditSettings';
 import { sampleCtx } from './previewSample';
 
 const frameAspect = () => useStore.getState().format.w / useStore.getState().format.h;
@@ -231,6 +234,7 @@ export function Preview() {
   useEffect(() => {
     const el = boxRef.current;
     if (!el) return;
+    // 2D 畫面：滾輪直接縮放（刻意跟時間軸類的「Ctrl + 滾輪縮放」不同，見 wheelView）
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
       const v = usePreviewView.getState();
@@ -403,6 +407,7 @@ function SubjectOverlay({ W, H }: { W: number; H: number }) {
 /** 框選目標：在預覽上拖一個框 → 在目前這一格加錨點（Esc 取消） */
 function BoxPickLayer({ W, H }: { W: number; H: number }) {
   const clipId = useBoxPick((s) => s.clipId);
+  const mode = useBoxPick((s) => s.mode);
   const [drag, setDrag] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   useEffect(() => {
     if (!clipId) return;
@@ -420,6 +425,19 @@ function BoxPickLayer({ W, H }: { W: number; H: number }) {
     const local = st.time - c.start;
     const box = frameRectToBox(c, m, local, frameAspect(), [d.x0, d.y0], [d.x1, d.y1]);
     if (!box) return;
+    if (mode === 'lead') {
+      const source = anchorTime(c, m, local, modules);
+      stopBoxPick();
+      // 這支影片還沒分析過：要先整支分析（可能要一下子）
+      if (!sampledNow.has(m.id)) toast($t('分析素材中…'));
+      void leadFromBox(m, source, box).then((lead) => {
+        if (lead) {
+          useAutoEdit.getState().set({ lead });
+          toast($t('已指定主角'));
+        } else toast($t('這裡找不到臉'), 'error');
+      }).catch(() => toast($t('這裡找不到臉'), 'error'));
+      return;
+    }
     const prev = c.subject?.kind === 'box' ? c.subject.anchors : [];
     st.updateClip(c.id, { subject: { kind: 'box', anchors: putAnchor(prev, { t: anchorTime(c, m, local, modules), box }) } });
     stopBoxPick();
@@ -447,7 +465,7 @@ function BoxPickLayer({ W, H }: { W: number; H: number }) {
       }}
     >
       {drag && <div className="box-pick-rect" style={{ left: Math.min(drag.x0, drag.x1) * W, top: Math.min(drag.y0, drag.y1) * H, width: Math.abs(drag.x1 - drag.x0) * W, height: Math.abs(drag.y1 - drag.y0) * H }} />}
-      <div className="face-status">{$t('框選目標')}</div>
+      <div className="face-status">{$t(mode === 'lead' ? '指定主角' : '框選目標')}</div>
     </div>
   );
 }

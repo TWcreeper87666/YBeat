@@ -7,7 +7,8 @@ import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import type { ModuleKind } from '../store';
 import { countdown, ApiKeyError, BlockedError, BusyError, RateLimitError, imagePart, listModels, pickDefaultModel, streamTurn, type ModelInfo, type Turn } from './gemini';
-import { moduleShots, previewShot } from './frames';
+import { modulePixels, moduleShots, previewShot } from './frames';
+import { renderProblem, renderPrompt } from './pixelCheck';
 import { parseDuration } from '../engine/params';
 import { chatSystem, moduleSystem, withCustom } from './prompt';
 import { codeBlocks, detectKind, validateModule } from './validate';
@@ -103,6 +104,9 @@ const lookPrompt = (kind: ModuleKind, at: number[]) =>
   (kind === 'transition' ? ' (outgoing clip = the preview frame, incoming clip = a test card).' : '.') +
   ` Check that it visibly does what was asked (not black, not unchanged, nothing broken or off-center). If it looks right, reply with exactly ${LOOKS_OK}. Otherwise reply with the full corrected module in one code block and one short sentence on what was wrong.`;
 
+/** 檢查畫面時用的長度：特效照 @duration，轉場 0.8 秒 */
+const moduleDuration = (c: CheckResult) => (c.kind === 'effect' ? parseDuration(c.code, 0.5) : 0.8);
+
 const fixPrompt = (err: string) =>
   `The app could not compile that module:\n\`\`\`\n${err.slice(0, 1500)}\n\`\`\`\nReply with the full corrected module in one code block.`;
 
@@ -193,9 +197,23 @@ async function runWithFixes(o: {
       }
     }
     const check = checkReply(text, o.hint);
+    // 編譯過了：先讀回像素檢查（整片黑 / 全透明 / 沒變化），有問題就丟回去修（不用看圖）
+    if (check && !check.error && check.kind !== 'remap' && fixes < MAX_FIXES) {
+      let px: ReturnType<typeof modulePixels> = null;
+      try { px = modulePixels(check.kind, check.code, moduleDuration(check)); } catch { /* 沒有 WebGL2：跳過 */ }
+      const problem = px && renderProblem(check.kind, px.base, px.frames, px.other);
+      if (px && problem) {
+        fixes++;
+        o.onFix?.(fixes);
+        seen = { text, check };
+        before = text;
+        added.push({ role: 'user', text: renderPrompt(check.kind, problem, px.at, LOOKS_OK) });
+        continue;
+      }
+    }
     if (check && !check.error && o.look && !looked && check.kind !== 'remap') {
       looked = true;
-      const s = moduleShots(check.kind, check.code, check.kind === 'effect' ? parseDuration(check.code, 0.5) : 0.8);
+      const s = moduleShots(check.kind, check.code, moduleDuration(check));
       if (s) {
         seen = { text, check };
         before = text;

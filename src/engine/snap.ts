@@ -82,13 +82,16 @@ export function rotatedHalf(w: number, h: number, rotDeg: number): { hx: number;
   return { hx: (w * c + h * s) / 2, hy: (w * s + h * c) / 2 };
 }
 
+/** 短影音安全區（右側按鈕、下方標題）只有直式全螢幕（9:16 這類）才有；1:1、4:5、橫式沒有 */
+export const hasSafeArea = (W: number, H: number) => H > 0 && W / H < 0.7;
+
 /** Shift 吸附可以吸的線（px）：畫面四邊、中線；開了輔助網格 → 每一條網格線（含安全區），沒開 → 三分線 */
 export function gridSnapLines(W: number, H: number, g: { grid: boolean; gridRows: number; gridCols: number; gridSafe: boolean }) {
   const x = [0, W / 2, W], y = [0, H / 2, H];
   if (g.grid) {
     for (let i = 1; i < g.gridCols; i++) x.push((i / g.gridCols) * W);
     for (let i = 1; i < g.gridRows; i++) y.push((i / g.gridRows) * H);
-    if (g.gridSafe) {
+    if (g.gridSafe && hasSafeArea(W, H)) {
       x.push(W * 0.04, W * 0.84);
       y.push(H * 0.08, H * 0.78);
     }

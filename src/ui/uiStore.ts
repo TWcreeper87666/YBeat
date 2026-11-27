@@ -149,6 +149,8 @@ export type DropTarget =
   | { kind: 'effect'; fxId: string; stack?: boolean }
   /** 自動剪輯分頁的「片段」：whole = 按住 Alt（整段加入，不選範圍） */
   | { kind: 'autoEdit'; whole: boolean }
+  /** 自動剪輯的「音樂」：換成這首歌（whole = 按住 Alt，整首不選範圍） */
+  | { kind: 'aeSong'; mediaId: string; whole: boolean }
   | null;
 
 export interface DragState {

@@ -11,7 +11,7 @@ import { categoryOf } from '../modules/categories';
 import { BUILTIN_COMBOS } from '../modules/combos';
 import { RECIPES, type FxRule, type Recipe, type RecipeId, type RuleWhen } from '../engine/autoEdit';
 import { transitionOpt } from '../engine/autoEditPools';
-import { footage, lastTake, musicClips, myStyleSettings, styleSettings, useAutoEdit, wholeSeg, type AutoEditSettings } from '../engine/autoEditSettings';
+import { aeSong, footage, lastTake, myStyleSettings, songKey, songMedia, styleSettings, useAutoEdit, wholeSeg, type AutoEditSettings } from '../engine/autoEditSettings';
 import { STYLE_IDS } from '../engine/autoEditStyles';
 import type { BeatEvery } from '../engine/trigger';
 import { FLAT_SHAPE, shapeMusic, type EnergyShape } from '../engine/energyShape';
@@ -70,8 +70,9 @@ export const AUTO_EDIT_DECLS = [
         transition_rate: num('0..1 chance of a transition at a regular cut'),
         section_transition_rate: num('0..1 chance at section boundaries / drops'),
         transition_beats: num('transition length in beats (0.25..4); doubled at sections'),
-        music: { type: 'string', description: 'audio clip id to cut to' },
-        range: { type: 'string', enum: ['all', 'loop'], description: 'whole music clip or the loop range' },
+        music: { type: 'string', description: 'media id of the song to cut to (an audio / video file in the library with beats); the take is placed after the end of the timeline' },
+        music_range: { type: 'array', items: { type: 'number' }, description: '[start, end] seconds inside the song; omit for the whole song' },
+        chorus: { type: 'array', items: { type: 'number' }, description: 'chorus starts, seconds inside the song (subject pops go only there); empty array = detect automatically' },
         order: { type: 'string', enum: ['library', 'shuffle', 'bag'], description: 'library = list order; shuffle = random, picks what fits each section; bag = every media once per round in a shuffled order, segments of the same video kept apart' },
         ken_burns: { type: 'boolean', description: 'slow push in / pull out on images; shots with a detected face (videos too) push in on the face' },
         analyze: { type: 'boolean', description: 'pick video segments by motion / quality / avoiding cuts already inside the source video' },
@@ -130,19 +131,18 @@ function pools(s: S) {
 
 export function readAutoEdit(s: S): Record<string, unknown> {
   const st = useAutoEdit.getState();
-  const music = musicClips(s);
-  const audioId = st.audioId && music.some((a) => a.id === st.audioId) ? st.audioId : music[0]?.id ?? null;
-  const audio = s.audios.find((a) => a.id === audioId);
-  const bpm = audio ? mediaBeats(s.media.find((m) => m.id === audio.mediaId))?.bpm : undefined;
-  const raw = st.analysis?.audioId === audioId ? st.analysis.info : null;
+  const music = songMedia(s);
+  const song = aeSong(s, st);
+  const bpm = song ? mediaBeats(s.media.find((m) => m.id === song.mediaId))?.bpm : undefined;
+  const raw = song && st.analysis?.key === songKey(song) ? st.analysis.info : null;
   const info = raw && shapeMusic(raw, st.shape);
   const p = st.params;
   const P = pools(s);
   const trStrength = new Map(s.modules.filter((m) => m.kind === 'transition').map((m) => [m.id, transitionOpt(m).strength]));
   return {
     music: {
-      selected: audioId,
-      options: music.map((a) => ({ id: a.id, name: a.name || s.media.find((m) => m.id === a.mediaId)?.name, start: r2(a.start), duration: r2(a.duration) })),
+      selected: song ? { id: song.mediaId, range: [r2(song.a), r2(song.b)], chorus: song.chorus ?? [] } : null,
+      options: music.map((m) => ({ id: m.id, name: m.name, duration: r2(m.duration) })),
       ...(bpm ? { bpm: r2(bpm) } : {}),
       ...(info ? {
         beats: info.energy.length,
@@ -151,8 +151,6 @@ export function readAutoEdit(s: S): Record<string, unknown> {
         high_energy_beats: info.level.filter((l) => l === 2).length,
       } : { note: 'not analysed yet (the panel analyses it when opened or on generate)' }),
     },
-    range: st.range,
-    has_loop_range: !!s.loop,
     // replace_last 只有在上一版產生後沒被改過時有用
     last_take_replaceable: lastTake.replaceable(),
     style: st.recipe.startsWith('my:') ? st.myStyles.find((m) => `my:${m.id}` === st.recipe)?.name ?? 'custom' : st.recipe,
@@ -262,15 +260,25 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
   if (intensity !== undefined) patch.intensity = intensity;
   if (params.minShotSec > params.maxShotSec) fail('min_shot_sec must be ≤ max_shot_sec');
 
-  if (a.music !== undefined) {
-    if (!musicClips(s).some((x) => x.id === a.music)) fail(`music: ${String(a.music)} is not an audio clip with beats`);
-    patch.audioId = String(a.music);
-    changed++;
-  }
-  if (a.range !== undefined) {
-    if (a.range !== 'all' && a.range !== 'loop') fail('range must be all or loop');
-    if (a.range === 'loop' && !s.loop) fail('there is no loop range; ask the user to set one');
-    patch.range = a.range as 'all' | 'loop';
+  if (a.music !== undefined || a.music_range !== undefined || a.chorus !== undefined) {
+    const cur = aeSong(s, { song: patch.song !== undefined ? patch.song : useAutoEdit.getState().song });
+    const id = a.music !== undefined ? String(a.music) : cur?.mediaId;
+    const m = songMedia(s).find((x) => x.id === id);
+    if (!m) fail(`music: ${String(id)} is not a library audio / video file with beats`);
+    const same = cur?.mediaId === m!.id;
+    let ab: [number, number] = same && cur ? [cur.a, cur.b] : [0, m!.duration];
+    if (a.music_range !== undefined) {
+      const r = Array.isArray(a.music_range) ? a.music_range.map(Number) : [];
+      if (r.length !== 2 || !r.every(Number.isFinite) || r[0] < 0 || r[1] <= r[0] + 1) fail('music_range must be [start, end] seconds, end > start + 1');
+      ab = [Math.min(r[0], m!.duration), Math.min(r[1], m!.duration)];
+    }
+    let chorus = same ? cur?.chorus : undefined;
+    if (a.chorus !== undefined) {
+      const c = Array.isArray(a.chorus) ? a.chorus.map(Number) : [];
+      if (!c.every((t) => Number.isFinite(t) && t >= 0)) fail('chorus must be an array of seconds');
+      chorus = c.length ? [...new Set(c)].sort((x, y) => x - y) : undefined;
+    }
+    patch.song = { mediaId: m!.id, a: ab[0], b: ab[1], ...(chorus?.length ? { chorus } : {}) };
     changed++;
   }
   if (a.order !== undefined) {

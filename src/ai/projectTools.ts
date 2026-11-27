@@ -3,7 +3,7 @@
  * 修改不會馬上執行：先驗證、收集成操作清單，聊天裡按「套用」才一次執行（一步復原）。
  */
 import { $t, displayName } from '../i18n';
-import { defaultTiming, parseKey, remapFor, srcAvail, uid, useStore, type Clip, type FxItem, type Module, type ModuleKind, type TrSide } from '../store';
+import { defaultTiming, parseKey, remapFor, srcAvail, uid, useStore, type AudioClip, type Clip, type FxItem, type Module, type ModuleKind, type TrSide } from '../store';
 import { parseParams, parsePointCh, type ParamValue, type ParamValues } from '../engine/params';
 import { newKey, sortKeys, type Keyframe } from '../engine/keyframes';
 import { normalizeHits, type FxTiming } from '../engine/trigger';
@@ -229,8 +229,11 @@ export type Op =
   | { op: 'translate_subtitles'; items: { clipId: string; text: string }[] }
   /** 改「自動剪輯」面板的設定（不動專案）；generate = 套用後產生一版 */
   | { op: 'auto_edit'; patch: AutoEditPatch; generate: boolean; replaceLast: boolean }
-  /** 一批新片段 / 特效方塊（自動剪輯）：clip.track = 第幾層（0 = 基本層，1 以上疊在上面），每層一條新的影片軌；特效放在新的特效軌（track 忽略） */
-  | { op: 'add_items'; clips: Clip[]; effects: FxItem[] };
+  /**
+   * 一批新片段 / 特效方塊 / 音樂（自動剪輯）：clip.track = 第幾層（0 = 基本層，1 以上疊在上面）。
+   * 每層放一條這段時間空著的影片軌（比這段時間有東西的軌道都高，沒有就新增）；effect.track = 第幾層特效，放在影片軌上方空著的特效軌；音樂放第一條空著的音訊軌
+   */
+  | { op: 'add_items'; clips: Clip[]; effects: FxItem[]; audios?: AudioClip[] };
 
 /** 提議的修改（顯示用的摘要 + 實際操作） */
 export interface Proposal { summary: string; op: Op }
@@ -846,34 +849,57 @@ function applyOp(op: Op, hooks: ApplyHooks = {}): number {
       // 文字片段沒有素材（mediaId 是空的）
       const clips = op.clips.filter((c) => !!c.text || st.media.some((m) => m.id === c.mediaId && !m.missing));
       const effects = op.effects.filter((e) => ok(e.moduleId));
-      if (!clips.length && !effects.length) return 0;
-      // 影片軌：每一層一條，疊在最上面；只有一條空的影片軌時，基本層直接用它
+      const audios = (op.audios ?? []).filter((a) => st.media.some((m) => m.id === a.mediaId && !m.missing));
+      if (!clips.length && !effects.length && !audios.length) return 0;
+      // 這批東西佔的時間：軌道在這段時間沒東西 = 空著
+      const all = [...clips, ...effects, ...audios];
+      const t0 = Math.min(...all.map((x) => x.start)), t1 = Math.max(...all.map((x) => x.start + x.duration));
+      const busy = (items: { track: number; start: number; duration: number }[], i: number) => items.some((x) => x.track === i && x.start < t1 - 1e-6 && x.start + x.duration > t0 + 1e-6);
+      // 影片軌：每一層一條；用比這段時間有東西的軌道都高的空軌（層的上下順序不變），不夠再新增
       let s = useStore.getState();
-      const layers = clips.length ? Math.max(...clips.map((c) => Math.max(0, Math.round(c.track)))) + 1 : 0;
-      const reuse = s.tracks.video.length === 1 && !s.clips.length && !s.tracks.video[0].locked;
-      const base = reuse ? 0 : s.tracks.video.length;
-      for (let k = reuse ? 1 : 0; k < layers; k++) st.addTrack('video', useStore.getState().tracks.video.length);
+      const layerOf = (c: Clip) => Math.max(0, Math.round(c.track));
+      const layers = clips.length ? Math.max(...clips.map(layerOf)) + 1 : 0;
+      const vts: number[] = [];
+      if (layers) {
+        let floor = -1;
+        s.tracks.video.forEach((t, i) => { if (t.locked || busy(s.clips, i)) floor = i; });
+        for (let i = floor + 1; i < s.tracks.video.length && vts.length < layers; i++) vts.push(i);
+        while (vts.length < layers) {
+          st.addTrack('video', useStore.getState().tracks.video.length);
+          vts.push(useStore.getState().tracks.video.length - 1);
+        }
+      }
       s = useStore.getState();
-      // 特效軌：effect.track = 第幾層（每層一條，層號小的先套用），放在所有影片軌上方；已經有空的就先用
+      // 特效軌：effect.track = 第幾層（每層一條，層號小的先套用），放在所有影片軌上方；這段時間空著的先用
       const fts: number[] = [];
       // 層號可能跳號（0、2）：照順序對到連續的特效軌
       const layerIdx = [...new Set(effects.map((e) => Math.max(0, Math.round(e.track))))].sort((a, b) => a - b);
       if (effects.length) {
         const top = s.tracks.video.length;
-        const need = new Set(effects.map((e) => Math.max(0, Math.round(e.track)))).size;
         s.tracks.fx.forEach((t, i) => {
-          if (fts.length < need && !t.locked && fxLevel(s.tracks, i) >= top && !s.effects.some((e) => e.track === i)) fts.push(i);
+          if (fts.length < layerIdx.length && !t.locked && fxLevel(s.tracks, i) >= top && !busy(s.effects, i)) fts.push(i);
         });
-        while (fts.length < need) {
+        while (fts.length < layerIdx.length) {
           st.addTrack('fx', useStore.getState().tracks.fx.length, top);
           fts.push(useStore.getState().tracks.fx.length - 1);
         }
       }
+      // 音訊軌：第一條這段時間空著的
+      s = useStore.getState();
+      let at = -1;
+      if (audios.length) {
+        at = s.tracks.audio.findIndex((t, i) => !t.locked && !busy(s.audios, i));
+        if (at < 0) {
+          st.addTrack('audio');
+          at = useStore.getState().tracks.audio.length - 1;
+        }
+      }
       useStore.setState((x) => ({
-        clips: [...x.clips, ...clips.map((c) => ({ ...c, track: base + Math.max(0, Math.round(c.track)) }))],
+        clips: [...x.clips, ...clips.map((c) => ({ ...c, track: vts[layerOf(c)] }))],
         effects: [...x.effects, ...effects.map((e) => ({ ...e, track: fts[layerIdx.indexOf(Math.max(0, Math.round(e.track)))] }))],
+        ...(audios.length ? { audios: [...x.audios, ...audios.map((a) => ({ ...a, track: at }))] } : {}),
       }));
-      return clips.length + effects.length;
+      return clips.length + effects.length + audios.length;
     }
     case 'add_effects': {
       if (!st.modules.some((m) => m.id === op.moduleId)) return 0;
@@ -1100,7 +1126,7 @@ export function applyProposals(list: Proposal[], hooks: ApplyHooks = {}): { done
   try {
     for (const p of list) {
       const o = p.op;
-      const want = o.op === 'auto_edit' ? 1 : o.op === 'add_items' ? o.clips.length + o.effects.length : o.op === 'add_effects' ? o.blocks.length : o.op === 'set_transitions' ? o.at.length : 'clipIds' in o ? o.clipIds.length : 'items' in o ? o.items.length : o.targets.length;
+      const want = o.op === 'auto_edit' ? 1 : o.op === 'add_items' ? o.clips.length + o.effects.length + (o.audios?.length ?? 0) : o.op === 'add_effects' ? o.blocks.length : o.op === 'set_transitions' ? o.at.length : 'clipIds' in o ? o.clipIds.length : 'items' in o ? o.items.length : o.targets.length;
       const n = applyOp(p.op, hooks);
       done += n;
       skipped += Math.max(0, want - n);

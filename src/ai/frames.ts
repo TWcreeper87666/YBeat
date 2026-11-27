@@ -49,6 +49,26 @@ let checker: { r: Renderer; c: HTMLCanvasElement } | null = null;
  * 第一張是原始畫面。變速模組、編譯失敗 = null。
  */
 export function moduleShots(kind: ModuleKind, code: string, duration = 1): { shots: Shot[]; at: number[] } | null {
+  const r = renderSamples(kind, code, duration, shot);
+  return r && { shots: [r.base, ...r.frames], at: r.at };
+}
+
+/** 讀回像素用的小圖邊長 */
+const PIX = 32;
+let pixCtx: CanvasRenderingContext2D | null = null;
+const pixels = (src: CanvasImageSource): Uint8ClampedArray => {
+  pixCtx ??= Object.assign(document.createElement('canvas'), { width: PIX, height: PIX }).getContext('2d', { willReadFrequently: true });
+  pixCtx!.clearRect(0, 0, PIX, PIX);
+  pixCtx!.drawImage(src, 0, 0, PIX, PIX);
+  return pixCtx!.getImageData(0, 0, PIX, PIX).data;
+};
+
+/** 跟 moduleShots 一樣算那幾格，但回傳縮小後的像素（給 renderProblem 檢查） */
+export function modulePixels(kind: ModuleKind, code: string, duration = 1) {
+  return renderSamples(kind, code, duration, pixels);
+}
+
+function renderSamples<T>(kind: ModuleKind, code: string, duration: number, read: (c: HTMLCanvasElement) => T): { base: T; other: T; frames: T[]; at: number[] } | null {
   if (kind === 'remap') return null;
   const base = previewCanvas() ?? scaled(card('#ff3d6e', '#6a2c70', 'A'), 160, 160);
   const other = scaled(card('#29d3c2', '#3a0ca3', 'B'), 160, 160);
@@ -60,10 +80,10 @@ export function moduleShots(kind: ModuleKind, code: string, duration = 1): { sho
   r.setSize(base.width, base.height);
   const m = { id: 'ai-check', kind, name: 'ai-check', code };
   const at = SAMPLE_AT[kind];
-  const shots: Shot[] = [shot(base)];
+  const frames: T[] = [];
   for (const p of at) {
     if (!r.thumb(m, p, base, other, duration)) return null;
-    shots.push(shot(c));
+    frames.push(read(c));
   }
-  return { shots, at };
+  return { base: read(base), other: read(other), frames, at };
 }

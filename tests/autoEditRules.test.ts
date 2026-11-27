@@ -141,6 +141,12 @@ const noLane = <T extends { lane?: number }>(list: T[]) => list.map(({ lane: _l,
   ok(r.shots.length > 0 && r.shots.every((s) => !!s.anchor && s.anchor.t >= s.in - 1 - 1e-6), '有主角：每個鏡頭都有追蹤起點（鏡頭範圍前後 1 秒內）');
   const none = plan([], {}, { media: [{ id: 'video', kind: 'video', duration: 40, info }] });
   ok(none.shots.every((s) => !s.anchor && !!s.face), '沒有主角資料：只開一般臉部追蹤');
+  // 別人的臉在 (0.2, 0.4)、主角只在前 10 秒出現在 (0.7, 0.4)
+  const other = { ...info, faces: Array(80).fill({ x: 0.2, y: 0.4, w: 0.1, h: 0.3 }) };
+  const early = leadPts.filter((p) => p.t < 10);
+  const known = plan([], {}, { media: [{ id: 'video', kind: 'video', duration: 40, info: other, leadPts: early, leadKnown: true }] });
+  ok(known.shots.some((s) => s.in > 12) && known.shots.every((s) => (s.anchor ? s.face?.x === 0.7 : !s.face)),
+    '有主角：附近沒有主角的鏡頭不追別人，推近對準主角');
 }
 
 // 影片的一格（popOnly）：只拿來做主體跳出、揭露拍用它，不進一般輪播

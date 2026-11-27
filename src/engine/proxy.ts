@@ -63,7 +63,15 @@ function takeWorker(): Worker {
     }
   };
   workers.push(w);
+  w.postMessage({ type: 'pause', on: previewBusy() });
   return w;
+}
+
+/** 時間軸播放中：代理檔先停著（軟體解碼 + 編碼吃滿 CPU 時預覽會卡），停下來再接著做 */
+const previewBusy = () => useStore.getState().playing;
+function syncPause() {
+  const on = previewBusy();
+  for (const w of workers) w.postMessage({ type: 'pause', on });
 }
 function buildInWorker(m: Media, alive: () => boolean, onProgress: (f: number) => void): Promise<Blob | null> {
   const { w, h } = size(m);
@@ -189,10 +197,11 @@ async function buildByPlayback(
       v.onended = () => void busy.then(res, rej);
       v.requestVideoFrameCallback!(tick);
       v.playbackRate = 2;
-      // 被暫停（例如瀏覽器省電）就接著播；素材被移除就放棄
+      // 時間軸播放中先停；被暫停（例如瀏覽器省電）就接著播；素材被移除就放棄
       const watch = setInterval(() => {
         if (!alive()) return (clearInterval(watch), res());
-        if (v.paused && !v.ended) void v.play().catch(() => {});
+        if (previewBusy()) { if (!v.paused) v.pause(); }
+        else if (v.paused && !v.ended) void v.play().catch(() => {});
       }, 500);
       void v.play().catch((e) => (clearInterval(watch), rej(e)));
       v.addEventListener('ended', () => clearInterval(watch), { once: true });
@@ -340,7 +349,10 @@ export function startProxies() {
     prune();
     pump();
   };
-  useStore.subscribe((s, p) => { if (s.media !== p.media) check(); });
+  useStore.subscribe((s, p) => {
+    if (s.media !== p.media) check();
+    if (s.playing !== p.playing) syncPause();
+  });
   usePrefs.subscribe((s, p) => { if (s.proxy !== p.proxy) check(); });
   // 換畫質：停一下（設定視窗裡可能連點、取消會還原）再把代理檔全部重做
   let built = usePrefs.getState().proxyQuality;
