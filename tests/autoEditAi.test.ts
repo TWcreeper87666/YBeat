@@ -29,7 +29,7 @@ useAutoEdit.getState().reset();
 ok(!isEditTool('get_auto_edit') && isEditTool('set_auto_edit'), 'get 是讀取、set 是修改');
 const g = run('get_auto_edit', {});
 ok(g.style === 'rhythm' && g.media.length === 2 && g.media.every((m: any) => m.on), '讀到預設設定與素材');
-ok(g.transitions.some((t: any) => t.id === 'tr-crossfade' && typeof t.strength === 'number' && t.weight > 0), '轉場附強度與權重');
+ok(g.transitions.some((t: any) => t.id === 'tr-push' && typeof t.strength === 'number' && t.weight > 0), '轉場附強度與權重');
 ok(g.effects.some((a: any) => a.id === 'combo:x') && g.fx_layers.length > 0, '列出可用特效（含我的組合）與特效層');
 
 // 提議：風格 + 數字覆寫 + 只用某分類的轉場 + 換特效層

@@ -140,6 +140,8 @@ export type DragPayload =
   | { kind: 'color'; color: string }
   | { kind: 'text'; preset: string }
   | { kind: 'mask'; shape: string }
+  /** 動畫：範本種類或 'my:<id>' */
+  | { kind: 'anim'; id: string }
   | { kind: 'files'; count: number };
 
 export type DropTarget =
@@ -151,6 +153,8 @@ export type DropTarget =
   | { kind: 'autoEdit'; whole: boolean }
   /** 自動剪輯的「音樂」：換成這首歌（whole = 按住 Alt，整首不選範圍） */
   | { kind: 'aeSong'; mediaId: string; whole: boolean }
+  /** 素材拖到屬性面板裡動畫的某個圖片位置：換那一張 */
+  | { kind: 'animSlot'; animId: string; slotId: string }
   | null;
 
 export interface DragState {

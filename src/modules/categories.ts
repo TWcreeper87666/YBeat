@@ -104,6 +104,8 @@ const MAP: Record<string, string> = {
   'tr-twirl': 'distort',
   'tr-rgbsplit': 'style',
   'remap-speed': 'speed',
+  'remap-none': 'speed',
+  'remap-reverse': 'speed',
   'remap-strobe': 'special',
   'remap-curve': 'curve',
   'remap-pingpong': 'curve',

@@ -6,7 +6,9 @@ import { makeClip, useStore, type Media } from '../src/store';
 import { beginHistoryTransaction, endHistoryTransaction, redo, resetHistory, settleHistory, undo } from '../src/engine/history';
 import { aeFootage, useAutoEdit } from '../src/engine/autoEditSettings';
 import { applyProposals } from '../src/ai/projectTools';
-import { canReplaceLast, chorusBeats, facePush, planItems, songChorus, takeSig, type MusicSource } from '../src/engine/autoEditApply';
+import { autoZones, canReplaceLast, chorusBeats, facePush, planItems, songChorus, songZones, takeSig, type MusicSource } from '../src/engine/autoEditApply';
+import { RECIPES } from '../src/engine/autoEdit';
+import type { MusicInfo } from '../src/engine/musicAnalysis';
 import { mediaToFrame } from '../src/engine/follow';
 import { fxLevel } from '../src/engine/tracks';
 import type { EditPlan } from '../src/engine/autoEdit';
@@ -148,7 +150,7 @@ const mid = srcAt(sc[0], 0.25), quarter = srcAt(sc[0], 0.05) - srcAt(sc[0], 0);
 ok(mid > 0.5 && quarter / 0.05 > (srcAt(sc[0], 0.3) - srcAt(sc[0], 0.2)) / 0.1, '拍點附近比拍與拍之間快');
 const h0 = srcAt(sc[1], 0.5 + 0.01), h1 = srcAt(sc[1], 0.5 + 0.2);
 ok(Math.abs(h0 - h1) < 1e-6 && srcAt(sc[1], 1.5) > h1, '重音定格：停住後再接著播');
-ok(sc[2].remap.moduleId === 'remap-speed', '素材不夠長（3 秒素材從 2.5 秒開始）→ 改回常速');
+ok(sc[2].remap.moduleId === 'remap-none', '素材不夠長（3 秒素材從 2.5 秒開始）→ 改回常速');
 
 // 多層：track = 第幾層 → 每層一條新的影片軌，疊在最上面
 reset(1);
@@ -279,6 +281,19 @@ ok(S().clips.length === 0 && useAutoEdit.getState().kenBurns, '巢狀交易一�
   const tr = (id: string) => S().clips.find((c) => c.id === id)?.track;
   ok(tr(late[0].id) === 0 && tr(late[1].id) === 1 && S().tracks.video.length === Math.max(n0, 2), `接在後面：基本層用第一條軌（${tr(late[0].id)}, ${tr(late[1].id)}）`);
   ok(S().audios.some((a) => a.id === 'au'), '音樂也放上去');
+}
+
+// 自動分段：開場鏡頭長、轉場特效少；高潮段切得密、特效多；歌有自己的分段就不自動分
+{
+  const zb = Array.from({ length: 96 }, (_, i) => ({ t: i * 0.5 }));
+  const zm = { energy: zb.map(() => 0.5), level: zb.map(() => 1), drops: [64], accents: [],
+    sections: [{ b0: 0, b1: 32, energy: 0.3, kind: 'intro' }, { b0: 32, b1: 64, energy: 0.5, kind: 'build' }, { b0: 64, b1: 96, energy: 0.9, kind: 'drop' }] } as MusicInfo;
+  const az = autoZones(zb, 48, zm, RECIPES.rhythm);
+  ok(az.length === 2 && az[0].t0 === 0 && az[0].t1 === 16 && az[1].t0 === 32 && az[1].t1 === 48, '自動分段：開場 + 高潮段');
+  ok(az[0].beatsPerShot! > RECIPES.rhythm.beatsPerShot[0] && az[0].trRate === 0 && az[0].fxRate! < 1, '開場鏡頭長、轉場特效少');
+  ok(az[1].beatsPerShot === RECIPES.rhythm.beatsPerShot[2] && az[1].trRate === 1 && az[1].fxRate! > 1, '高潮逐拍剪接、段落轉場必出');
+  const song = { mediaId: 'x', a: 0, b: 48 };
+  ok(songZones(song, zb, zm, RECIPES.rhythm).auto && !songZones({ ...song, zones: [] }, zb, zm, RECIPES.rhythm).auto && songZones({ ...song, zones: [] }, zb, zm, RECIPES.rhythm).list.length === 0, '自己的分段（空的也算）不自動分');
 }
 
 if (fails) {

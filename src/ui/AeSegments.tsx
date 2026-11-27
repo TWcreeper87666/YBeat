@@ -220,6 +220,14 @@ export function SegList() {
 
 /** 選歌的範圍的視窗：mediaId = 換成這首歌（沒有 = 改目前這首） */
 const useSongRange = create<{ mediaId: string | null }>(() => ({ mediaId: null }));
+
+/** 選範圍的視窗（素材或歌）開著：面板的試聽不要跟視窗的播放搶快捷鍵 */
+export const aeDialogOpen = () => !!useRange.getState().req || !!useSongRange.getState().mediaId;
+/** 選範圍的視窗打開時通知（面板的試聽先停） */
+export function onAeDialogOpen(cb: () => void) {
+  useRange.subscribe((s, p) => { if (s.req && !p.req) cb(); });
+  useSongRange.subscribe((s, p) => { if (s.mediaId && !p.mediaId) cb(); });
+}
 export const openSongRange = (mediaId?: string) => {
   const m = mediaId ?? aeSong(useStore.getState(), useAutoEdit.getState())?.mediaId;
   if (m) { pausePreviews(); useSongRange.setState({ mediaId: m }); }
@@ -244,7 +252,9 @@ function SongRangeDialog() {
   const close = () => useSongRange.setState({ mediaId: null });
   const commit = (a: number, b: number) => {
     const chorus = (song.chorus ?? []).filter((t) => t >= a - 0.5 && t <= b + 0.5);
-    useAutoEdit.getState().set({ song: { mediaId: m.id, a, b, ...(chorus.length ? { chorus } : {}) } });
+    // 分段：範圍外的丟掉、跨出去的截掉
+    const zones = (song.zones ?? []).filter((z) => z.t1 > a + 0.05 && z.t0 < b - 0.05).map((z) => ({ ...z, t0: Math.max(a, z.t0), t1: Math.min(b, z.t1) }));
+    useAutoEdit.getState().set({ song: { mediaId: m.id, a, b, ...(chorus.length ? { chorus } : {}), ...(zones.length ? { zones } : {}) } });
   };
   return createPortal(<RangePicker key={m.id} m={m} init={{ a: song.a, b: song.b }} editing onCommit={commit} onClose={close} />, document.body);
 }

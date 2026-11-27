@@ -1,9 +1,10 @@
 import { $t, LANGS, lang, saveLang, type Lang } from './i18n';
-import { Check, CircleDot, LoaderCircle } from 'lucide-react';
+import { Check, CircleDot, CircleHelp, LoaderCircle } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { FORMATS, formatLabel, projectDuration, useStore } from './store';
 import { InspectorPanel, MediaPanel, ModulePanel, TextPanel } from './ui/LeftPanel';
+import { AnimPanel } from './ui/AnimPanel';
 import { isTextField, modalOpen } from './ui/focus';
 import { MaskPanel } from './ui/MaskPanel';
 import { navEdge, navItem, navRow } from './ui/trackNav';
@@ -21,7 +22,7 @@ import { TabRecHost } from './ui/TabRecord';
 import { fps } from './engine/rulerTicks';
 import { copyHits, copyKeys, cutHits, deleteSelectedHit, deleteSelectedKey, duplicateHits, hitEdge, hitsFocused, keysFocused, navHit, navHitEdge, nudgeHits, nudgeKeys, pasteHits, pasteKeys, selectAllHits, selectAllKeys, splitHit, trimHit } from './ui/EffectControls';
 import { ShapeDrawerHost } from './ui/ShapeDrawer';
-import { SHORTCUTS, TUTORIAL } from './ui/helpText';
+import { HELP_GPU, SHORTCUTS, TUTORIAL } from './ui/helpText';
 import { useLayout, toast, setBusy, stopPreviewFx, confirmDialog, promptDialog, openMenu, useConfirm, type MenuItem } from './ui/uiStore';
 import { formatBytes, measureUsage, wipeAllData, type Usage } from './engine/storageUsage';
 import { DragNumber } from './ui/DragNumber';
@@ -52,6 +53,10 @@ let setDialogGlobal: (d: Dialog) => void = () => {};
 type DialogGuard = { save?: () => void; dirty?: () => boolean; revert?: () => void };
 let guard: DialogGuard = {};
 const openDialog = (d: Dialog) => setDialogGlobal(d);
+/** 說明視窗打開時要捲到、標出來的那一段（使用教學裡的一條） */
+let helpItem: string | null = null;
+/** 打開使用教學、直接跳到這一段（設定、介面上的問號連過來） */
+const openHelp = (item: string) => { helpItem = item; setDialogGlobal(null); setTimeout(() => setDialogGlobal('tutorial')); };
 
 function ExportDialog({ close }: { close: () => void }) {
   const [fps, setFps] = useState(60);
@@ -138,13 +143,23 @@ const KEYS_SEC = -1;
 
 /** 說明視窗：左邊章節、右邊內容，上方搜尋（教學和快捷鍵一起找） */
 function HelpDialog({ close, start }: { close: () => void; start: 'tutorial' | 'shortcuts' }) {
-  const [sec, setSec] = useState(start === 'shortcuts' ? KEYS_SEC : 0);
+  // 從別的地方連過來：開在那一段所在的章節，捲到那一段、亮一下
+  const [target] = useState(() => { const t = helpItem; helpItem = null; return t; });
+  const [sec, setSec] = useState(() => {
+    if (start === 'shortcuts') return KEYS_SEC;
+    const i = target ? TUTORIAL.findIndex((s) => s.items.includes(target)) : -1;
+    return i < 0 ? 0 : i;
+  });
   const [query, setQuery] = useState('');
   const q = query.trim().toLowerCase();
   const bodyRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
-  useEffect(() => { searchRef.current?.focus(); }, []);
-  useEffect(() => { bodyRef.current?.scrollTo({ top: 0 }); }, [sec, q]);
+  useEffect(() => { if (!target) searchRef.current?.focus(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const li = target && !q ? bodyRef.current?.querySelector<HTMLElement>('li.help-target') : null;
+    if (li) li.scrollIntoView({ block: 'center' });
+    else bodyRef.current?.scrollTo({ top: 0 });
+  }, [sec, q]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const hits = q
     ? {
@@ -207,7 +222,7 @@ function HelpDialog({ close, start }: { close: () => void; start: 'tutorial' | '
           ) : (
             <section>
               <h4>{TUTORIAL[sec].title}</h4>
-              <ul>{TUTORIAL[sec].items.map((it) => <li key={it}>{it}</li>)}</ul>
+              <ul>{TUTORIAL[sec].items.map((it) => <li key={it} className={it === target ? 'help-target' : undefined}>{it}</li>)}</ul>
             </section>
           )}
         </div>
@@ -272,11 +287,14 @@ function SaveLayoutDialog({ close }: { close: () => void }) {
 const QUALITIES = [1, 0.75, 0.5, 0.33];
 
 /** 設定的一項：標題、副標題，下面是輸入；inline = 輸入放右邊（數值類） */
-function SetRow({ label, desc, inline, children }: { label: ReactNode; desc: ReactNode; inline?: boolean; children: ReactNode }) {
+/** help = 使用教學裡的一段：名稱可以點（游標變問號），打開說明跳到那裡 */
+function SetRow({ label, desc, inline, help, children }: { label: ReactNode; desc: ReactNode; inline?: boolean; help?: string; children: ReactNode }) {
   return (
     <div className={`set-row ${inline ? 'inline' : ''}`}>
       <div className="set-text">
-        <div className="set-name">{label}</div>
+        {help
+          ? <button type="button" className="set-name set-help" title={$t('說明')} onClick={() => openHelp(help)}>{label}<CircleHelp size={12} /></button>
+          : <div className="set-name">{label}</div>}
         <div className="set-desc">{desc}</div>
       </div>
       <div className="set-ctl">{children}</div>
@@ -285,6 +303,42 @@ function SetRow({ label, desc, inline, children }: { label: ReactNode; desc: Rea
 }
 
 /** 設定 → 專案 → 儲存空間：各項用量，清除全部要確認兩次（第二次要打字） */
+/** 瀏覽器實際用的顯示卡（WebGL 回報的名稱；拿不到 = null） */
+function gpuName(): string | null {
+  try {
+    const gl = document.createElement('canvas').getContext('webgl2');
+    const ext = gl?.getExtension('WEBGL_debug_renderer_info');
+    const raw = gl && ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : '';
+    gl?.getExtension('WEBGL_lose_context')?.loseContext();
+    if (!raw) return null;
+    // Chrome：ANGLE (廠商, 型號 (0x…) Direct3D11 …) → 只留型號
+    const m = /^ANGLE \([^,]*,\s*(.+?)(?:\s*\(0x[0-9A-Fa-f]+\))?(?:\s+Direct3D.*|\s+OpenGL.*|\s+Vulkan.*)?\)?$/.exec(raw);
+    // Mac：ANGLE Metal Renderer: Apple M1, Unspecified Version
+    return (m?.[1] ?? raw).replace(/^ANGLE Metal Renderer:\s*/, '').replace(/,\s*Unspecified Version$/, '').trim();
+  } catch {
+    return null;
+  }
+}
+
+/** 設定 → 預覽：目前用的顯示卡、匯出能不能用硬體編碼 */
+function GpuInfo() {
+  const [hw, setHw] = useState<boolean | null>(null);
+  const name = useMemo(gpuName, []);
+  useEffect(() => {
+    if (typeof VideoEncoder === 'undefined') return void setHw(false);
+    VideoEncoder.isConfigSupported({ codec: 'avc1.640033', width: 1920, height: 1080, bitrate: 20_000_000, framerate: 30, hardwareAcceleration: 'prefer-hardware' })
+      .then((r) => setHw(!!r.supported), () => setHw(false));
+  }, []);
+  // 內顯（筆電常見：有獨立顯卡但瀏覽器跑在內顯上）
+  const integrated = !!name && /intel|uhd|iris|radeon\(tm\) graphics|vega \d+ graphics/i.test(name);
+  return (
+    <span className="set-hint gpu-info">
+      {name ?? $t('不明')}{integrated && $t('（內顯）')}
+      {hw !== null && <> · {hw ? $t('硬體編碼') : $t('軟體編碼')}</>}
+    </span>
+  );
+}
+
 function StorageUsage() {
   const [u, setU] = useState<Usage | null>(null);
   useEffect(() => { let live = true; void measureUsage().then((r) => live && setU(r)); return () => { live = false; }; }, []);
@@ -356,7 +410,7 @@ function SettingsDialog({ close }: { close: () => void }) {
       if (useStore.getState().format !== orig.format) useStore.getState().setFormat(orig.format);
     },
   };
-  type Row = { label: string; desc: string; inline?: boolean; ctl: ReactNode };
+  type Row = { label: string; desc: string; inline?: boolean; help?: string; ctl: ReactNode };
   const secs: { title: string; icon: ReactNode; rows: Row[] }[] = [
     { title: $t('專案'), icon: <Folder size={13} />, rows: [
       { label: $t('輸出比例'), desc: `${$t('匯出與預覽的畫面比例')} · ${fmt.w} × ${fmt.h}`, ctl: (
@@ -368,6 +422,7 @@ function SettingsDialog({ close }: { close: () => void }) {
     ] },
     { title: $t('預覽'), icon: <Eye size={13} />, rows: [
       { label: $t('預覽畫質'), desc: $t('調低編輯會比較順，不影響匯出'), ctl: <Seg value={L.previewScale} on={(q) => L.set({ previewScale: q })} opts={QUALITIES.map((q) => ({ v: q, label: q === 1 ? $t('完整') : `${Math.round(q * 100)}%` }))} /> },
+      { label: $t('顯示卡'), desc: $t('預覽與匯出用的顯示卡'), help: HELP_GPU, ctl: <GpuInfo /> },
       { label: $t('預覽代理檔'), desc: $t('關鍵影格很稀的影片，預覽改用小副本，不影響匯出'), inline: true, ctl: <Switch v={P.proxy} on={(v) => P.set({ proxy: v })} /> },
       ...(P.proxy ? [{ label: $t('代理檔畫質'), desc: $t('越低檔案越小，換了會重新產生'), ctl: <Seg value={P.proxyQuality} on={(q) => P.set({ proxyQuality: q })} opts={[{ v: 'low' as const, label: $t('省空間') }, { v: 'medium' as const, label: $t('標準') }, { v: 'high' as const, label: $t('清晰') }]} /> }] : []),
     ] },
@@ -434,7 +489,7 @@ function SettingsDialog({ close }: { close: () => void }) {
             <section key={s.title}>
               <h4>{s.title}</h4>
               {s.rows.map((r) => (
-                <SetRow key={r.label} label={<Hl text={r.label} q={q} />} desc={<Hl text={r.desc} q={q} />} inline={r.inline}>{r.ctl}</SetRow>
+                <SetRow key={r.label} label={<Hl text={r.label} q={q} />} desc={<Hl text={r.desc} q={q} />} inline={r.inline} help={r.help}>{r.ctl}</SetRow>
               ))}
             </section>
           )) : <p className="help-empty muted">{$t('找不到符合的設定')}</p>}
@@ -499,6 +554,12 @@ function Dialogs() {
   );
 }
 
+/** 剩下的秒數 → 1:05 / 1:02:03 */
+const fmtEta = (sec: number) => {
+  const s = Math.max(0, Math.round(sec)), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), r = s % 60;
+  return h ? `${h}:${String(m).padStart(2, '0')}:${String(r).padStart(2, '0')}` : `${m}:${String(r).padStart(2, '0')}`;
+};
+
 function ExportOverlay() {
   const ex = useStore((s) => s.exporting);
   if (!ex) return null;
@@ -507,6 +568,7 @@ function ExportOverlay() {
       <div className="dialog">
         <h3>{$t('匯出中…')}{' '}{(ex.progress * 100).toFixed(0)}%</h3>
         <div className="bar"><div style={{ width: `${ex.progress * 100}%` }} /></div>
+        <div className="muted export-eta">{ex.cancel ? $t('取消中…') : ex.prep ? $t('準備中…') : ex.eta !== undefined ? $t('剩下約 {0}', fmtEta(ex.eta)) : $t('估算剩餘時間…')}</div>
         <div className="dialog-actions">
           <button className="btn" onClick={() => useStore.setState({ exporting: { ...ex, cancel: true } })}>{$t('取消')}</button>
         </div>
@@ -738,6 +800,7 @@ function onKey(e: KeyboardEvent) {
     else if (k === 'o') { e.preventDefault(); pickFiles().then(importFiles); }
     else if (k === 'e') { e.preventDefault(); openDialog('export'); }
     else if (k === 'j') { e.preventDefault(); mergeOrHint(); }
+    else if (k === 'l') { e.preventDefault(); s.toggleLockSelected(); }
     else if (k === 'g') { e.preventDefault(); if (e.shiftKey) s.ungroupSelected(); else if (!s.groupSelected()) toast($t('至少選兩個項目才能建立群組'), 'error'); }
     else if (k === ',') { e.preventDefault(); openDialog('settings'); }
     // Ctrl+Delete / Backspace = 波紋刪除（同 Shift+Delete）
@@ -852,6 +915,7 @@ export default function App() {
       {createPortal(<ModulePanel kind="effect" />, hosts.effect)}
       {createPortal(<MaskPanel />, hosts.mask)}
       {createPortal(<ModulePanel kind="remap" />, hosts.remap)}
+      {createPortal(<AnimPanel />, hosts.anim)}
       {createPortal(<InspectorPanel />, hosts.inspector)}
       {createPortal(<CodePanel />, hosts.code)}
       {createPortal(<AiPanel />, hosts.ai)}

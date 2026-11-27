@@ -17,6 +17,9 @@ import { PPS_MAX, PPS_MIN } from './engine/rulerTicks';
 import { DEFAULT_TEXT, TEXT_PRESETS, type TextStyle } from './engine/text';
 import type { Mask } from './engine/mask';
 import type { FollowMap, Subject } from './engine/follow';
+import { snapAnimBeats, type AnimItem } from './engine/animation';
+import { triggerBeats } from './engine/trigger';
+export type { AnimItem, AnimLayer, AnimSlot } from './engine/animation';
 
 export type { Module, ModuleKind };
 
@@ -56,6 +59,8 @@ export interface ItemBase {
   group?: string;
   /** 自動剪輯的第幾版（「再一版」換掉標著這個編號的東西）；複製、分割出來的不帶 */
   take?: string;
+  /** 鎖住：位置、長度固定（不能移動、修剪、分割；自己選起來可以刪；屬性照改）；「再一版」時保留 */
+  locked?: true;
 }
 
 /** 特效參數跟著音訊（或隨機）變化 */
@@ -198,8 +203,8 @@ export const FORMATS: { id: string; label: string; w: number; h: number }[] = [
 export const DEFAULT_FORMAT: Format = { w: 1080, h: 1920 };
 export const formatLabel = (f: Format) => FORMATS.find((x) => x.w === f.w && x.h === f.h)?.label ?? `${f.w}×${f.h}`;
 
-export type ItemType = 'clip' | 'effect' | 'audio';
-export type AnyItem = Clip | FxItem | AudioClip;
+export type ItemType = 'clip' | 'effect' | 'audio' | 'anim';
+export type AnyItem = Clip | FxItem | AudioClip | AnimItem;
 export type Selection = { type: ItemType | 'transition' | 'module'; id: string } | null;
 export type TrSide = 'in' | 'out';
 export type TrScope = 'cuts' | 'heads' | 'tails' | 'all';
@@ -216,15 +221,16 @@ export const parseKey = (k: string) => {
   const i = k.indexOf(':');
   return { type: k.slice(0, i) as ItemType, id: k.slice(i + 1) };
 };
-export const KIND_OF: Record<ItemType, TrackKind> = { clip: 'video', effect: 'fx', audio: 'audio' };
-export const LIST = { clip: 'clips', effect: 'effects', audio: 'audios' } as const;
-const isItem = (t: string | undefined): t is ItemType => t === 'clip' || t === 'effect' || t === 'audio';
+export const KIND_OF: Record<ItemType, TrackKind> = { clip: 'video', effect: 'fx', audio: 'audio', anim: 'video' };
+export const LIST = { clip: 'clips', effect: 'effects', audio: 'audios', anim: 'anims' } as const;
+const isItem = (t: string | undefined): t is ItemType => t === 'clip' || t === 'effect' || t === 'audio' || t === 'anim';
 
 interface State {
   media: Media[];
   clips: Clip[];
   effects: FxItem[];
   audios: AudioClip[];
+  anims: AnimItem[];
   markers: Marker[];
   tracks: Tracks;
   modules: Module[];
@@ -241,7 +247,9 @@ interface State {
   snap: boolean;
   leftTab: LeftTab;
   /** 匯出中：t = 正在輸出的那一格（播放列跟著跑），a ~ b = 匯出範圍 */
-  exporting: { progress: number; cancel: boolean; t: number; a: number; b: number } | null;
+  /** eta = 預估還要幾秒（剛開始還算不出來 = 沒有） */
+  /** prep = 還在準備（遮罩、去背、混音），還沒開始輸出畫面 */
+  exporting: { progress: number; cancel: boolean; t: number; a: number; b: number; eta?: number; prep?: boolean } | null;
   /** 輸出畫面大小 */
   format: Format;
   setFormat(f: Format): void;
@@ -256,6 +264,8 @@ interface State {
   addAudio(mediaId: string, start?: number, track?: number, range?: { in: number; duration: number }): void;
   updateClip(id: string, patch: Partial<Clip>): void;
   updateAudio(id: string, patch: Partial<AudioClip>): void;
+  addAnim(item: AnimItem): void;
+  updateAnim(id: string, patch: Partial<AnimItem>): void;
   patchItems(patches: Record<string, Partial<AnyItem>>): void;
   resolveTimelineDrop(keys: string[], mode: TimelineDropMode, insertRange?: { start: number; length: number }): void;
   dropFit(keys: string[]): DropFit | null;
@@ -324,6 +334,8 @@ interface State {
   removeClipAudio(clipId: string): boolean;
   groupSelected(): boolean;
   ungroupSelected(): void;
+  /** 鎖住 / 解鎖選取的項目（有一個沒鎖 = 全部鎖住；連結、群組的一起） */
+  toggleLockSelected(): void;
   /** 合併選取中、首尾相接而且素材連續的片段；回傳合併了幾組 */
   mergeSelected(): number;
   updateModuleCode(id: string, code: string): void;
@@ -345,11 +357,12 @@ interface State {
 
 export const uid = () => Math.random().toString(36).slice(2, 10);
 
-export function projectDuration(s: { clips: Clip[]; effects: FxItem[]; audios: AudioClip[] }) {
+export function projectDuration(s: { clips: Clip[]; effects: FxItem[]; audios: AudioClip[]; anims?: AnimItem[] }) {
   let end = 0;
   for (const c of s.clips) end = Math.max(end, c.start + c.duration);
   for (const e of s.effects) end = Math.max(end, e.start + e.duration);
   for (const a of s.audios) end = Math.max(end, a.start + a.duration);
+  for (const a of s.anims ?? []) end = Math.max(end, a.start + a.duration);
   return end;
 }
 
@@ -408,7 +421,7 @@ export function makeClip(p: Partial<Clip> & { mediaId: string }): Clip {
     start: 0,
     duration: 2,
     in: 0,
-    remap: { moduleId: 'remap-speed', params: {} },
+    remap: { moduleId: 'remap-none', params: {} },
     transitionIn: null,
     fit: 'cover',
     flipX: false,
@@ -460,11 +473,14 @@ const trackEnd = (items: { start: number; duration: number; track: number }[], t
  */
 export function stretchPatch(type: ItemType, it: AnyItem, anchor: number, s: number): Partial<AnyItem> {
   const base = { start: anchor + (it.start - anchor) * s, duration: it.duration * s };
+  if (type === 'anim') return base;
   if (type === 'clip') {
     const c = it as Clip;
     const patch: Partial<Clip> = { ...base, keys: scaleKeyMap(c.keys, s) };
     if (c.remap.moduleId === CURVE_ID && c.remap.keys) {
       patch.remap = { ...c.remap, keys: scaleKeyList(c.remap.keys, s) }; // 曲線跟著拉長 = 整條變慢
+    } else if (c.remap.moduleId === 'remap-none') {
+      patch.remap = { moduleId: 'remap-speed', params: { speed: Math.round((1 / s) * 1000) / 1000 } };
     } else if (c.remap.moduleId === 'remap-speed') {
       const sp = Number(c.remap.params.speed ?? 1);
       patch.remap = { ...c.remap, params: { ...c.remap.params, speed: Math.round((sp / s) * 1000) / 1000 } };
@@ -504,7 +520,7 @@ export function remapFor(c: Clip, moduleId: string, modules: Module[], avail?: n
   const lin: Ease = [0, 0, 1, 1];
   const sp = itemSpeed('clip', c) ?? 1;
   const end = c.duration * sp;
-  const rev = c.remap.moduleId === 'remap-speed' && !!c.remap.params.reverse;
+  const rev = c.remap.moduleId === 'remap-reverse';
   return { moduleId, params: {}, keys: rev ? [newKey(0, end, lin), newKey(c.duration, 0, lin)] : [newKey(0, 0, lin), newKey(c.duration, end, lin)] };
 }
 
@@ -531,11 +547,11 @@ export const mediaUsable = (m: Media | undefined): m is Media => !!m && !m.missi
 export const isTextClip = (c: Clip | undefined): c is Clip & { text: TextStyle } => !!c?.text;
 
 /** 時間軸項目的碰撞範圍（排除 exclude 裡的 key） */
-export function spansOf(s: { clips: Clip[]; effects: FxItem[]; audios: AudioClip[] }, exclude: Set<string> = new Set()): Span[] {
+export function spansOf(s: { clips: Clip[]; effects: FxItem[]; audios: AudioClip[]; anims?: AnimItem[] }, exclude: Set<string> = new Set()): Span[] {
   const out: Span[] = [];
   const attached = attachedAudioIds(s);
-  (['clip', 'effect', 'audio'] as ItemType[]).forEach((type) => {
-    for (const it of s[LIST[type]] as AnyItem[]) {
+  (['clip', 'effect', 'audio', 'anim'] as ItemType[]).forEach((type) => {
+    for (const it of (s[LIST[type]] ?? []) as AnyItem[]) {
       // 連結在影片片段上的音訊跟著影片顯示，不佔音訊軌的位置
       if (type === 'audio' && attached.has(it.id)) continue;
       if (!exclude.has(keyOf(type, it.id))) out.push({ lane: `${KIND_OF[type]}:${it.track}`, start: it.start, duration: it.duration });
@@ -545,6 +561,11 @@ export function spansOf(s: { clips: Clip[]; effects: FxItem[]; audios: AudioClip
 }
 export const laneOf = (type: ItemType, track: number) => `${KIND_OF[type]}:${track}`;
 export const trackLocked = (s: { tracks: Tracks }, type: ItemType, track: number) => !!s.tracks[KIND_OF[type]][track]?.locked;
+/** 位置固定：片段自己鎖住（不能移動、改長度、分割；屬性照改）或在鎖住的軌道上 */
+export const itemFixed = (s: { tracks: Tracks }, type: ItemType, it: { track: number; locked?: true }) => !!it.locked || trackLocked(s, type, it.track);
+/** 會動到位置 / 長度的欄位（鎖住的片段改不了） */
+const GEO = ['start', 'duration', 'track', 'in'] as const;
+const unGeo = <T extends object>(p: T): T => Object.fromEntries(Object.entries(p).filter(([k]) => !(GEO as readonly string[]).includes(k))) as T;
 
 /** 連結在影片片段上的音訊片段 id（時間軸上跟影片畫在一起，不出現在音訊軌） */
 const attachedCache = { clips: null as Clip[] | null, audios: null as AudioClip[] | null, ids: new Set<string>() };
@@ -572,6 +593,9 @@ export const useStore = create<State>()(
         if (s.selection && isItem(s.selection.type)) { const it = findItem(s.selection.type, s.selection.id); return it && !trackLocked(s, s.selection.type, it.track) ? [{ type: s.selection.type, id: s.selection.id }] : []; }
         return [];
       };
+
+      /** 選取裡位置沒有固定的（分割、刪除、修剪、微移用） */
+      const movable = () => { return targets().filter(({ type, id }) => { const it = findItem(type, id); return it && !it.locked; }); };
 
       /** 把一個片段在 t 切開，回傳 [前段, 後段] */
       const splitOne = (type: ItemType, it: AnyItem, t: number): [AnyItem, AnyItem] => {
@@ -647,15 +671,18 @@ export const useStore = create<State>()(
       /** 分割 / 修剪的對象：選取中且跨過播放頭的；沒有就用播放頭下所有影片與音訊片段 */
       const cutTargets = () => {
         const t = get().time;
-        let list = targets().filter(({ type, id }) => {
+        let list = movable().filter(({ type, id }) => {
           const it = findItem(type, id);
-          return it && inside(it, t);
+          return type !== 'anim' && it && inside(it, t);
         });
+        if (!list.length && movable().some((x) => x.type === 'anim')) return [];
         if (!list.length) {
           const s = get();
           list = [
-            ...s.clips.filter((c) => inside(c, t) && !trackLocked(s, 'clip', c.track)).map((c) => ({ type: 'clip' as const, id: c.id })),
-            ...s.audios.filter((c) => inside(c, t) && !trackLocked(s, 'audio', c.track)).map((c) => ({ type: 'audio' as const, id: c.id })),
+            ...s.clips.filter((c) => inside(c, t) && !itemFixed(s, 'clip', c)).map((c) => ({ type: 'clip' as const, id: c.id })),
+            ...s.audios.filter((c) => inside(c, t) && !itemFixed(s, 'audio', c)).map((c) => ({ type: 'audio' as const, id: c.id })),
+            // 特效軌也一起切（沒選東西 = 播放頭經過的所有軌道）
+            ...s.effects.filter((f) => inside(f, t) && !itemFixed(s, 'effect', f)).map((f) => ({ type: 'effect' as const, id: f.id })),
           ];
         }
         return list;
@@ -673,7 +700,7 @@ export const useStore = create<State>()(
         }
         if (!links.size && !groups.size) return keys;
         const out = new Set(keys);
-        (['clip', 'effect', 'audio'] as ItemType[]).forEach((type) => {
+        (['clip', 'effect', 'audio', 'anim'] as ItemType[]).forEach((type) => {
           for (const it of s[LIST[type]] as AnyItem[]) {
             if ((it.link && links.has(it.link)) || (it.group && groups.has(it.group))) out.add(keyOf(type, it.id));
           }
@@ -690,8 +717,9 @@ export const useStore = create<State>()(
           return map.get(v);
         };
         return items.map((it) => {
-          if (!it.link && !it.group && !it.take) return it;
-          const { take: _t, ...rest } = it;
+          if (!it.link && !it.group && !it.take && !it.locked) return it;
+          // 複製 / 貼上出來的不帶版本編號，也不鎖
+          const { take: _t, locked: _l, ...rest } = it;
           return { ...rest, link: re(it.link), group: re(it.group) } as T;
         });
       };
@@ -706,7 +734,7 @@ export const useStore = create<State>()(
         const attached = attachedAudioIds(s);
         const clipByLink = new Map(s.clips.filter((c) => c.link).map((c) => [c.link, c]));
         let gap = Infinity;
-        for (const otherType of ['clip', 'effect', 'audio'] as ItemType[]) {
+        for (const otherType of ['clip', 'effect', 'audio', 'anim'] as ItemType[]) {
           for (const other of s[LIST[otherType]] as AnyItem[]) {
             if (exclude.has(keyOf(otherType, other.id))) continue;
             const parent = otherType === 'audio' && attached.has(other.id) ? clipByLink.get(other.link) : undefined;
@@ -717,8 +745,9 @@ export const useStore = create<State>()(
         }
         if (!Number.isFinite(gap) || gap < 0.05 || gap >= item.duration - 1e-4) return null;
         const media = type === 'clip' ? s.media.find((m) => m.id === (item as Clip).mediaId) : undefined;
-        const speed = type === 'clip' && media?.kind === 'video' && (item as Clip).remap.moduleId === 'remap-speed'
-          && Number((item as Clip).remap.params.speed ?? 1) * item.duration / gap <= 8 + 1e-4;
+        const videoClip = type === 'clip' && media?.kind === 'video' ? item as Clip : null;
+        const speed = !!videoClip && (videoClip.remap.moduleId === 'remap-speed' || videoClip.remap.moduleId === 'remap-none')
+          && (videoClip.remap.moduleId === 'remap-speed' ? Number(videoClip.remap.params.speed ?? 1) : (videoClip.rate ?? 1)) * item.duration / gap <= 8 + 1e-4;
         return { duration: gap, speed };
       };
 
@@ -726,7 +755,7 @@ export const useStore = create<State>()(
         if (!items.length) return null;
         const s = get();
         const minStart = Math.min(...items.map((i) => i.item.start));
-        const add: Record<string, AnyItem[]> = { clips: [], effects: [], audios: [] };
+        const add: Record<string, AnyItem[]> = { clips: [], effects: [], audios: [], anims: [] };
         const keys: string[] = [];
         const targetKind = at?.kind;
         const sourceTracks = items.filter((x) => KIND_OF[x.type] === targetKind).map((x) => x.item.track);
@@ -738,18 +767,19 @@ export const useStore = create<State>()(
           track = Math.max(0, Math.min(track, s.tracks[kind].length - 1));
           if (s.tracks[kind][track]?.locked) return null;
           const n = { ...structuredClone(item), id: uid(), start: Math.max(0, base + (item.start - minStart)), track };
+          if (type === 'anim') { delete (n as AnimItem).take; delete (n as AnimItem).locked; }
           if (type === 'clip' && (n as Clip).effects) (n as Clip).effects = (n as Clip).effects!.map((f) => ({ ...f, id: uid() }));
           add[LIST[type]].push(n);
           keys.push(keyOf(type, n.id));
         }
         // 連結 / 群組：貼上的是新的一組
         {
-          const all = [...add.clips, ...add.effects, ...add.audios];
+          const all = [...add.clips, ...add.effects, ...add.audios, ...add.anims];
           const fresh = freshIds(all);
           const byId = new Map(fresh.map((x) => [x.id, x]));
           for (const k of Object.keys(add)) add[k] = add[k].map((x) => byId.get(x.id)!);
         }
-        const prepared = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((type) => add[LIST[type]].map((item) => ({ type, item })));
+        const prepared = (['clip', 'effect', 'audio', 'anim'] as ItemType[]).flatMap((type) => add[LIST[type]].map((item) => ({ type, item })));
         const linked = new Set((add.clips as Clip[]).map((c) => c.link).filter(Boolean));
         const visible = prepared.filter(({ type, item }) => type !== 'audio' || !item.link || !linked.has(item.link));
         const preview: PlacementGhost[] = visible.map(({ type, item }) => {
@@ -778,6 +808,7 @@ export const useStore = create<State>()(
           clips: [...s.clips, ...(add.clips as Clip[])],
           effects: [...s.effects, ...(add.effects as FxItem[])],
           audios: [...s.audios, ...(add.audios as AudioClip[])],
+          anims: [...s.anims, ...(add.anims as AnimItem[])],
           selected: keys,
           selection: last,
         });
@@ -790,6 +821,7 @@ export const useStore = create<State>()(
         clips: [],
         effects: [],
         audios: [],
+        anims: [],
         markers: [],
         tracks: DEFAULT_TRACKS,
         modules: BUILTIN_MODULES,
@@ -879,25 +911,39 @@ export const useStore = create<State>()(
           set({ audios: [...s.audios, a], selection: { type: 'audio', id: a.id }, selected: [keyOf('audio', a.id)], leftTab: 'editor' });
         },
 
-        updateClip: (id, patch) => set((s) => ({ clips: s.clips.map((c) => (c.id === id && !trackLocked(s, 'clip', c.track) && !trackLocked(s, 'clip', patch.track ?? c.track) ? { ...c, ...patch } : c)) })),
-        updateAudio: (id, patch) => set((s) => ({ audios: s.audios.map((c) => (c.id === id && !trackLocked(s, 'audio', c.track) && !trackLocked(s, 'audio', patch.track ?? c.track) ? { ...c, ...patch } : c)) })),
+        updateClip: (id, patch) => set((s) => ({ clips: s.clips.map((c) => (c.id === id && !trackLocked(s, 'clip', c.track) && !trackLocked(s, 'clip', patch.track ?? c.track) ? { ...c, ...(c.locked ? unGeo(patch) : patch) } : c)) })),
+        updateAudio: (id, patch) => set((s) => ({ audios: s.audios.map((c) => (c.id === id && !trackLocked(s, 'audio', c.track) && !trackLocked(s, 'audio', patch.track ?? c.track) ? { ...c, ...(c.locked ? unGeo(patch) : patch) } : c)) })),
+        addAnim: (item) => set((s) => {
+          if (trackLocked(s, 'anim', item.track)) return {};
+          const start = fitStart(spansOf(s), laneOf('anim', item.track), Math.max(0, item.start), item.duration);
+          return { anims: [...s.anims, snapAnimBeats({ ...item, start }, triggerBeats(1))] };
+        }),
+        updateAnim: (id, patch) => set((s) => ({ anims: s.anims.map((a) => {
+          if (a.id !== id || trackLocked(s, 'anim', a.track) || trackLocked(s, 'anim', patch.track ?? a.track)) return a;
+          const next = { ...a, ...(a.locked ? unGeo(patch) : patch) };
+          return patch.start !== undefined || patch.duration !== undefined ? snapAnimBeats(next, triggerBeats(1)) : next;
+        }) })),
 
         patchItems: (patches) =>
           set((s) => {
             const apply = <T extends AnyItem>(type: ItemType, list: T[]) =>
               list.map((x) => {
                 const p = patches[keyOf(type, x.id)];
-                return p && !trackLocked(s, type, x.track) && !trackLocked(s, type, p.track ?? x.track) ? ({ ...x, ...p } as T) : x;
+                return p && !trackLocked(s, type, x.track) && !trackLocked(s, type, p.track ?? x.track) ? ({ ...x, ...(x.locked ? unGeo(p) : p) } as T) : x;
               });
-            return { clips: apply('clip', s.clips), effects: apply('effect', s.effects), audios: apply('audio', s.audios) };
+            return { clips: apply('clip', s.clips), effects: apply('effect', s.effects), audios: apply('audio', s.audios),
+              anims: apply('anim', s.anims).map((a) => {
+                const p = patches[keyOf('anim', a.id)];
+                return p?.start !== undefined || p?.duration !== undefined ? snapAnimBeats(a as AnimItem, triggerBeats(1)) : a;
+              }) };
           }),
 
         resolveTimelineDrop: (keys, mode, insertRange) => {
           const s = get();
           const moving = new Set(keys);
-          if ((['clip', 'effect', 'audio'] as ItemType[]).some((type) => (s[LIST[type]] as AnyItem[]).some((it) => moving.has(keyOf(type, it.id)) && trackLocked(s, type, it.track)))) return;
+          if ((['clip', 'effect', 'audio', 'anim'] as ItemType[]).some((type) => (s[LIST[type]] as AnyItem[]).some((it) => moving.has(keyOf(type, it.id)) && itemFixed(s, type, it)))) return;
           if (mode === 'trimFit' || mode === 'speedFit') {
-            const items = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((type) =>
+            const items = (['clip', 'effect', 'audio', 'anim'] as ItemType[]).flatMap((type) =>
               (s[LIST[type]] as AnyItem[]).filter((item) => moving.has(keyOf(type, item.id))).map((item) => ({ type, item })));
             const fit = dropFit(items, s, moving);
             if (!fit || (mode === 'speedFit' && !fit.speed)) return;
@@ -916,18 +962,27 @@ export const useStore = create<State>()(
             const parent = type === 'audio' && attached.has(it.id) ? clipByLink.get(it.link) : undefined;
             return parent ? laneOf('clip', parent.track) : laneOf(type, it.track);
           };
-          const dragged = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((type) =>
+          const dragged = (['clip', 'effect', 'audio', 'anim'] as ItemType[]).flatMap((type) =>
             (s[LIST[type]] as AnyItem[]).filter((it) => moving.has(keyOf(type, it.id)))
               .map((it) => ({ lane: lane(type, it), start: it.start, duration: it.duration })));
           if (!dragged.length) return;
           const insertAt = insertRange?.start ?? Math.min(...dragged.map((x) => x.start));
           const insertLength = insertRange?.length ?? Math.max(...dragged.map((x) => x.start + x.duration)) - insertAt;
           const lanes = new Set(dragged.map((x) => x.lane));
-          const lists: Record<string, AnyItem[]> = { clips: [], effects: [], audios: [] };
+          const lists: Record<string, AnyItem[]> = { clips: [], effects: [], audios: [], anims: [] };
           const newBacks: AnyItem[] = [];
-          for (const type of ['clip', 'effect', 'audio'] as ItemType[]) {
+          for (const type of ['clip', 'effect', 'audio', 'anim'] as ItemType[]) {
             for (const it of s[LIST[type]] as AnyItem[]) {
-              if (trackLocked(s, type, it.track)) { lists[LIST[type]].push(it); continue; }
+              if (itemFixed(s, type, it)) { lists[LIST[type]].push(it); continue; }
+              if (type === 'anim') {
+                const selected = moving.has(keyOf(type, it.id));
+                const inLane = lanes.has(lane(type, it));
+                if (selected || (mode !== 'insertAll' && !inLane)) lists.anims.push(it);
+                else if (mode === 'overwrite') {
+                  if (!dragged.some((d) => d.lane === lane(type, it) && d.start < it.start + it.duration && it.start < d.start + d.duration)) lists.anims.push(it);
+                } else lists.anims.push(it.start >= insertAt ? { ...it, start: it.start + insertLength } : it);
+                continue;
+              }
               if (moving.has(keyOf(type, it.id)) || (mode !== 'insertAll' && !lanes.has(lane(type, it)))) {
                 lists[LIST[type]].push(it);
                 continue;
@@ -961,13 +1016,13 @@ export const useStore = create<State>()(
           }
           const fresh = new Map([...byStart.values()].flatMap((g) => freshIds(g)).map((x) => [x.id, x]));
           for (const k of Object.keys(lists)) lists[k] = lists[k].map((x) => fresh.get(x.id) ?? x);
-          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[] });
+          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[], anims: lists.anims as AnimItem[] });
         },
 
         dropFit: (keys) => {
           const s = get();
           const moving = new Set(keys);
-          const items = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((type) =>
+          const items = (['clip', 'effect', 'audio', 'anim'] as ItemType[]).flatMap((type) =>
             (s[LIST[type]] as AnyItem[]).filter((item) => moving.has(keyOf(type, item.id))).map((item) => ({ type, item })));
           return dropFit(items, s, moving);
         },
@@ -1051,7 +1106,7 @@ export const useStore = create<State>()(
 
         setRemap: (clipId, moduleId) =>
           set((s) => ({
-            clips: s.clips.map((c) => (c.id === clipId ? { ...c, remap: remapFor(c, moduleId, s.modules, srcAvail(c, s.media)) } : c)),
+            clips: s.clips.map((c) => (c.id === clipId ? { ...c, remap: remapFor(c, moduleId, s.modules, srcAvail(c, s.media)), ...(moduleId === 'remap-none' ? { rate: 1 } : {}) } : c)),
             selection: { type: 'clip', id: clipId },
             selected: [keyOf('clip', clipId)],
             leftTab: 'editor',
@@ -1115,6 +1170,7 @@ export const useStore = create<State>()(
           set((s) => ({
             clips: s.clips.map((c) => (c.mediaId === oldId ? { ...c, mediaId: newId } : c)),
             audios: s.audios.map((a) => (a.mediaId === oldId ? { ...a, mediaId: newId } : a)),
+            anims: s.anims.map((a) => ({ ...a, slots: a.slots.map((slot) => slot.mediaId === oldId ? { ...slot, mediaId: newId } : slot) })),
             media: s.media.filter((m) => !(m.id === oldId && m.missing)),
           })),
 
@@ -1162,13 +1218,14 @@ export const useStore = create<State>()(
           }
           const dels = targets()
             .map(({ type, id }) => ({ type, it: findItem(type, id) }))
+            // 鎖住的片段自己選起來刪可以（鎖只是防拖動、防「再一版」換掉）；鎖住的軌道照樣不能刪
             .filter((d): d is { type: ItemType; it: AnyItem } => !!d.it && !trackLocked(s, d.type, d.it.track))
             .sort((a, b) => b.it.start - a.it.start); // 從後面刪，波紋位移才不會互相干擾
           if (!dels.length) return void (s.selected.length || s.selection ? undefined : get().removeGap());
-          const lists: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios };
+          const lists: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios, anims: s.anims };
           if (ripple === 'all') {
             const gone = new Set(dels.map((d) => keyOf(d.type, d.it.id)));
-            for (const t of ['clip', 'effect', 'audio'] as ItemType[]) lists[LIST[t]] = lists[LIST[t]].filter((x) => !gone.has(keyOf(t, x.id)));
+            for (const t of ['clip', 'effect', 'audio', 'anim'] as ItemType[]) lists[LIST[t]] = lists[LIST[t]].filter((x) => !gone.has(keyOf(t, x.id)));
             // 刪掉的時間範圍取聯集，從後面往前處理
             const ranges = dels.map((d) => [d.it.start, d.it.start + d.it.duration]).sort((a, b) => a[0] - b[0]);
             const merged: number[][] = [];
@@ -1180,20 +1237,22 @@ export const useStore = create<State>()(
             for (const [a, b] of merged.reverse()) {
               const attached = attachedAudioIds({ clips: lists.clips as Clip[], audios: lists.audios as AudioClip[] });
               const lanes = new Map<string, number>(); // 每條軌最多能往前推多少
-              for (const t of ['clip', 'effect', 'audio'] as ItemType[]) {
+              for (const t of ['clip', 'effect', 'audio', 'anim'] as ItemType[]) {
                 for (const x of lists[LIST[t]]) {
                   if (t === 'audio' && attached.has(x.id)) continue;
                   if (trackLocked(s, t, x.track)) continue;
                   const lane = `${KIND_OF[t]}:${x.track}`;
                   if (!lanes.has(lane)) lanes.set(lane, b - a);
+                  // 鎖住的片段不動：它後面的東西也不能往前推（會疊上去）
+                  if (x.locked && x.start >= b - 1e-3) { lanes.set(lane, 0); continue; }
                   // 留在原地、但結尾超過 a 的項目會擋住後面的東西
                   if (x.start < b - 1e-3 && x.start + x.duration > a) lanes.set(lane, Math.min(lanes.get(lane)!, Math.max(0, b - (x.start + x.duration))));
                 }
               }
-              for (const t of ['clip', 'effect', 'audio'] as ItemType[]) {
+              for (const t of ['clip', 'effect', 'audio', 'anim'] as ItemType[]) {
                 lists[LIST[t]] = lists[LIST[t]].map((x) => {
                   if (t === 'audio' && attached.has(x.id)) return x; // 連結音訊跟著影片同步
-                  if (trackLocked(s, t, x.track)) return x;
+                  if (itemFixed(s, t, x)) return x;
                   const d = lanes.get(`${KIND_OF[t]}:${x.track}`) ?? 0;
                   return d > 1e-6 && x.start >= b - 1e-3 ? { ...x, start: Math.max(0, x.start - d) } : x;
                 });
@@ -1204,11 +1263,13 @@ export const useStore = create<State>()(
               const key = LIST[type];
               const end = it.start + it.duration;
               let l = lists[key].filter((x) => x.id !== it.id);
-              if (ripple) l = l.map((x) => (x.track === it.track && !trackLocked(s, type, x.track) && x.start >= end - 1e-3 ? { ...x, start: Math.max(0, x.start - it.duration) } : x));
+              // 後面有鎖住的片段：這條軌不往前推（推了會疊到它）
+              const held = l.some((x) => x.track === it.track && x.locked && x.start >= end - 1e-3);
+              if (ripple && !held) l = l.map((x) => (x.track === it.track && !trackLocked(s, type, x.track) && x.start >= end - 1e-3 ? { ...x, start: Math.max(0, x.start - it.duration) } : x));
               lists[key] = l;
             }
           }
-          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[], selection: null, selected: [] });
+          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[], anims: lists.anims as AnimItem[], selection: null, selected: [] });
         },
 
         removeGap: () => {
@@ -1228,7 +1289,7 @@ export const useStore = create<State>()(
           if (gap < 1e-6) return false;
           const attached = attachedAudioIds(s);
           const patches: Record<string, Partial<AnyItem>> = {};
-          (['clip', 'effect', 'audio'] as ItemType[]).forEach((type) => {
+          (['clip', 'effect', 'audio', 'anim'] as ItemType[]).forEach((type) => {
             if (KIND_OF[type] !== at.kind) return;
             for (const it of s[LIST[type]] as AnyItem[]) {
               if (it.track !== at.idx || it.start < nextStart - 1e-6 || (type === 'audio' && attached.has(it.id))) continue;
@@ -1245,7 +1306,7 @@ export const useStore = create<State>()(
           const list = cutTargets();
           if (!list.length) return;
           const s = get();
-          const lists: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios };
+          const lists: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios, anims: s.anims };
           const newKeys: string[] = [];
           const backs: AnyItem[] = [];
           for (const { type, id } of list) {
@@ -1260,15 +1321,16 @@ export const useStore = create<State>()(
           const fresh = new Map(freshIds(backs).map((x) => [x.id, x]));
           for (const k of Object.keys(lists)) lists[k] = lists[k].map((x) => fresh.get(x.id) ?? x);
           const last = parseKey(newKeys[newKeys.length - 1]);
-          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[], selected: newKeys, selection: last });
+          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[], anims: lists.anims as AnimItem[], selected: newKeys, selection: last });
         },
 
         splitAtTimes: (times) => {
           const s = get();
-          const list = targets();
+          // 動畫不能分割（切開會破壞拍數、遮罩和揭露的時機）
+          const list = movable().filter(({ type }) => type !== 'anim');
           if (!list.length) return 0;
           const ts = [...times].sort((a, b) => a - b);
-          const lists: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios };
+          const lists: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios, anims: s.anims };
           const newKeys: string[] = [];
           const backs: AnyItem[] = [];
           let cuts = 0;
@@ -1301,16 +1363,24 @@ export const useStore = create<State>()(
           }
           const fresh = new Map([...byStart.values()].flatMap((g) => freshIds(g)).map((x) => [x.id, x]));
           for (const k of Object.keys(lists)) lists[k] = lists[k].map((x) => fresh.get(x.id) ?? x);
-          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[], selected: newKeys, selection: parseKey(newKeys[0]) });
+          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[], anims: lists.anims as AnimItem[], selected: newKeys, selection: parseKey(newKeys[0]) });
           return cuts;
         },
 
         trim: (side) => {
           const t = get().time;
+          const selectedAnim = movable().filter((x) => x.type === 'anim').map((x) => findItem('anim', x.id) as AnimItem);
+          if (selectedAnim.length) {
+            const patches: Record<string, Partial<AnyItem>> = {};
+            for (const a of selectedAnim) if (inside(a, t)) patches[keyOf('anim', a.id)] = side === 'start'
+              ? { start: t, duration: a.start + a.duration - t } : { duration: t - a.start };
+            if (Object.keys(patches).length) get().patchItems(patches);
+            return;
+          }
           const list = cutTargets();
           if (!list.length) return;
           const s = get();
-          const lists: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios };
+          const lists: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios, anims: s.anims };
           for (const { type, id } of list) {
             const key = LIST[type];
             const it = lists[key].find((x) => x.id === id)!;
@@ -1318,11 +1388,11 @@ export const useStore = create<State>()(
             const keep = side === 'start' ? { ...b, id: it.id } : a; // 修掉播放頭前（Q）或後（W）
             lists[key] = lists[key].map((x) => (x.id === id ? keep : x));
           }
-          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[] });
+          set({ clips: lists.clips as Clip[], effects: lists.effects as FxItem[], audios: lists.audios as AudioClip[], anims: lists.anims as AnimItem[] });
         },
 
         nudge: (dt) => {
-          const list = targets();
+          const list = movable();
           if (!list.length) return;
           const s = get();
           const keys = new Set(list.map(({ type, id }) => keyOf(type, id)));
@@ -1397,7 +1467,7 @@ export const useStore = create<State>()(
                 return { ...t, row: r0 > q || (r0 === q && q < L0) ? r0 + 1 : r0 };
               });
             }
-            const items = kind === 'video' ? { clips: shift(s.clips) } : kind === 'fx' ? { effects: shift(s.effects) } : { audios: shift(s.audios) };
+            const items = kind === 'video' ? { clips: shift(s.clips), anims: shift(s.anims) } : kind === 'fx' ? { effects: shift(s.effects) } : { audios: shift(s.audios) };
             return {
               activeTrack: act,
               tracks: next,
@@ -1416,7 +1486,7 @@ export const useStore = create<State>()(
             order.splice(to, 0, from);
             const newIdx = new Map(order.map((old, i) => [old, i]));
             const remap = <T extends AnyItem>(items: T[]) => items.map((x) => ({ ...x, track: newIdx.get(x.track) ?? x.track }));
-            const items = kind === 'video' ? { clips: remap(s.clips) } : kind === 'fx' ? { effects: remap(s.effects) } : { audios: remap(s.audios) };
+            const items = kind === 'video' ? { clips: remap(s.clips), anims: remap(s.anims) } : kind === 'fx' ? { effects: remap(s.effects) } : { audios: remap(s.audios) };
             return {
               activeTrack: s.activeTrack?.kind === kind ? { kind, idx: newIdx.get(s.activeTrack.idx) ?? s.activeTrack.idx } : s.activeTrack,
               tracks: { ...s.tracks, [kind]: order.map((o) => s.tracks[kind][o]) },
@@ -1440,6 +1510,7 @@ export const useStore = create<State>()(
             return {
               tracks,
               ...fixed,
+              anims: remap(s.anims, 'video'),
               audios: remap(s.audios, 'audio'),
               activeTrack: act ? { kind: act.kind, idx: maps[act.kind].get(act.idx) ?? act.idx } : act,
             };
@@ -1448,14 +1519,14 @@ export const useStore = create<State>()(
         trackItemCount: (kind, idx) => {
           const s = get();
           const attached = attachedAudioIds(s);
-          const list = kind === 'video' ? s.clips : kind === 'fx' ? s.effects : s.audios.filter((a) => !attached.has(a.id));
+          const list = kind === 'video' ? [...s.clips, ...s.anims] : kind === 'fx' ? s.effects : s.audios.filter((a) => !attached.has(a.id));
           return list.filter((x) => x.track === idx).length;
         },
 
         deleteTrack: (kind, idx) => {
           const s = get();
           if (idx < 0 || idx >= s.tracks[kind].length) return false;
-          if (s.tracks[kind][idx]?.locked) return false;
+          // 鎖住的軌道也可以整條刪（鎖只是不讓裡面的東西被動到；上面有東西時 UI 會先確認）
           if (kind === 'video' && s.tracks.video.length <= 1) return false;
           const attached = attachedAudioIds(s);
           // 這條軌道上的項目一起刪掉；刪影片時連結的音訊也一起刪
@@ -1464,8 +1535,10 @@ export const useStore = create<State>()(
           const keepAudio = (a: AudioClip) => !(a.link && goneLinks.has(a.link)) && !(kind === 'audio' && a.track === idx && !attached.has(a.id));
           const shift = <T extends AnyItem>(items: T[]) => items.map((x) => (x.track > idx ? { ...x, track: x.track - 1 } : x));
           let clips = s.clips, effects = s.effects;
+          let anims = s.anims;
           let audios = s.audios.filter(keepAudio);
           if (kind === 'video') clips = shift(s.clips.filter((c) => c.track !== idx));
+          if (kind === 'video') anims = shift(s.anims.filter((a) => a.track !== idx));
           if (kind === 'fx') effects = shift(s.effects.filter((e) => e.track !== idx));
           // 連結在影片上的音訊（看不到）在被刪的音訊軌上：換到第一條，軌道 index 往前補
           if (kind === 'audio') audios = audios.map((a) => (a.track === idx ? { ...a, track: 0 } : a.track > idx ? { ...a, track: a.track - 1 } : a));
@@ -1483,10 +1556,11 @@ export const useStore = create<State>()(
           // 音訊反應的來源：刪掉的軌道拿掉、後面的往前補
           if (kind !== 'fx') ({ clips, effects } = remapDriveTracks({ clips, effects }, kind, (j) => (j === idx ? null : j > idx ? j - 1 : j)));
           const act = s.activeTrack;
-          const ids = new Set([...clips, ...effects, ...audios].map((x) => x.id));
+          const ids = new Set([...clips, ...effects, ...audios, ...anims].map((x) => x.id));
           set({
             tracks,
             clips,
+            anims,
             effects,
             audios,
             activeTrack: act?.kind === kind ? (act.idx === idx ? null : act.idx > idx ? { kind, idx: act.idx - 1 } : act) : act,
@@ -1499,7 +1573,7 @@ export const useStore = create<State>()(
           set((s) => {
             const tracks = { ...s.tracks, [kind]: s.tracks[kind].map((t, i) => (i === idx ? { ...t, [key]: !t[key] } : t)) };
             if (key !== 'locked' || !tracks[kind][idx]?.locked) return { tracks };
-            const list = kind === 'video' ? s.clips : kind === 'fx' ? s.effects : s.audios;
+            const list = kind === 'video' ? [...s.clips, ...s.anims] : kind === 'fx' ? s.effects : s.audios;
             const ids = new Set(list.filter((x) => x.track === idx).map((x) => x.id));
             const selected = s.selected.filter((k) => !ids.has(parseKey(k).id));
             const selection = s.selection && isItem(s.selection.type) && ids.has(s.selection.id) ? null : s.selection;
@@ -1568,6 +1642,7 @@ export const useStore = create<State>()(
             ...s.clips.map((c) => keyOf('clip', c.id)),
             ...s.effects.map((c) => keyOf('effect', c.id)),
             ...s.audios.map((c) => keyOf('audio', c.id)),
+            ...s.anims.map((c) => keyOf('anim', c.id)),
           ].filter((key) => {
             const p = parseKey(key);
             const item = findItem(p.type, p.id);
@@ -1666,6 +1741,21 @@ export const useStore = create<State>()(
           if (sel && isItem(sel.type)) set({ selected: [keyOf(sel.type, sel.id)] });
         },
 
+        toggleLockSelected: () => {
+          const s = get();
+          const list = targets();
+          if (!list.length) return;
+          const keys = new Set(expand(list.map(({ type, id }) => keyOf(type, id))));
+          const lock = list.some(({ type, id }) => !findItem(type, id)?.locked);
+          const flip = <T extends AnyItem>(type: ItemType, l: T[]) => l.map((x) => {
+            if (!keys.has(keyOf(type, x.id))) return x;
+            if (lock) return { ...x, locked: true as const };
+            const { locked: _l, ...rest } = x;
+            return rest as T;
+          });
+          set({ clips: flip('clip', s.clips), effects: flip('effect', s.effects), audios: flip('audio', s.audios), anims: flip('anim', s.anims) });
+        },
+
         groupSelected: () => {
           const list = targets();
           if (list.length < 2) return false;
@@ -1687,9 +1777,9 @@ export const useStore = create<State>()(
           const modules = new Map(s.modules.map((m) => [m.id, m]));
           const sel = new Set(targets().map(({ type, id }) => keyOf(type, id)));
           let merged = 0;
-          const out: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios };
+          const out: Record<string, AnyItem[]> = { clips: s.clips, effects: s.effects, audios: s.audios, anims: s.anims };
           const EPS = 0.02;
-          (['clip', 'effect', 'audio'] as ItemType[]).forEach((type) => {
+          (['clip', 'effect', 'audio', 'anim'] as ItemType[]).forEach((type) => {
             const key = LIST[type];
             let list = [...(out[key] as AnyItem[])];
             const picked = list.filter((x) => sel.has(keyOf(type, x.id))).sort((a, b) => a.track - b.track || a.start - b.start);
@@ -1741,7 +1831,7 @@ export const useStore = create<State>()(
           if (merged) {
             const ids = new Set([...out.clips, ...out.effects, ...out.audios].map((x) => x.id));
             const keep = get().selected.filter((k) => ids.has(parseKey(k).id));
-            set({ clips: out.clips as Clip[], effects: out.effects as FxItem[], audios: out.audios as AudioClip[], selected: keep, selection: keep.length ? parseKey(keep[0]) : null });
+            set({ clips: out.clips as Clip[], effects: out.effects as FxItem[], audios: out.audios as AudioClip[], anims: out.anims as AnimItem[], selected: keep, selection: keep.length ? parseKey(keep[0]) : null });
           }
           return merged;
         },

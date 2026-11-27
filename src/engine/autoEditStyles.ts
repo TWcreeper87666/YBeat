@@ -1,9 +1,5 @@
-/**
- * 自動剪輯的內建風格：鏡頭節奏（RECIPES）+ 特效層 + 轉場權重（沒列的轉場 = 1）。
- * 每拍 / 剪接點的特效層是「整段一個方塊」，同一衝突組的兩層不要用在同一種能量（不然後面那層整段讓開）。
- */
+/** 自動剪輯的內建風格：鏡頭節奏、特效層和固定的轉場語彙。 */
 import type { FxRule, RecipeId, RuleWhen } from './autoEdit';
-import type { BeatEvery } from './trigger';
 
 export interface StyleDef {
   rules: FxRule[];
@@ -15,84 +11,60 @@ export interface StyleDef {
 const r = (id: string, moduleId: string, when: RuleWhen, levels: (0 | 1 | 2)[], chance: number, x: Pick<FxRule, 'every' | 'beats' | 'drive'> = {}): FxRule =>
   ({ id, moduleId, on: true, when, levels, chance, ...x });
 
-/** 暗角：整段鋪著（不跟音量） */
 const VIGNETTE = r('vignette', 'fx-vignette', 'section', [0, 1, 2], 1);
-/** 每拍閃白、強度隨機（忽明忽暗） */
-const FLICKER = r('flicker', 'fx-flash', 'beat', [1, 2], 1, { every: 1, drive: { intensity: { source: 'random', min: 0, max: 0.9, rate: 2 } } });
+/** 微弱的隨機頻閃，整段維持質感。 */
+const FLICKER = r('flicker', 'fx-strobe', 'section', [0, 1, 2], 1,
+  { drive: { depth: { source: 'random', min: 0.02, max: 0.16, rate: 8 } } });
+const SHAKE = r('shake', 'fx-shake', 'cut', [0, 1, 2], 1);
 
-/** 強烈的轉場（穩的時候少用） */
-const STRONG = ['tr-whip', 'tr-glitch', 'tr-rgbsplit', 'tr-shake', 'tr-crashzoom', 'tr-flash', 'tr-spin', 'tr-shockwave'];
+/** 只用這一個轉場：'*' = 沒列到的（之後新增、自訂的轉場）一律不用；改成自訂、另存風格時跟著帶走 */
+const transition = (id: string): Record<string, number> => ({ '*': 0, [id]: 1 });
 
 export const STYLES: Record<RecipeId, StyleDef> = {
   calm: {
-    rules: [
-      VIGNETTE,
-      r('letterbox', 'fx-letterbox', 'section', [0], 1),
+    rules: [VIGNETTE, FLICKER, SHAKE,
       r('grain', 'fx-grain', 'section', [0, 1, 2], 1),
-      r('leak', 'fx-lightleak', 'accent', [0, 1], 0.3, { beats: 2 }),
-    ],
-    trWeights: { 'tr-crossfade': 3, 'tr-luma': 2, 'tr-blur': 2, ...Object.fromEntries(STRONG.map((id) => [id, 0.2])) },
+      r('leak', 'fx-lightleak', 'accent', [0, 1], 0.25, { beats: 2 })],
+    trWeights: transition('tr-crossfade'),
   },
   rhythm: {
-    rules: [
-      VIGNETTE,
-      FLICKER,
-      r('pulse', 'fx-zoompulse', 'beat', [2], 1, { every: 2 }),
-      r('rgb', 'fx-rgb', 'accent', [1, 2], 0.4),
-      r('drop', 'fx-flash', 'drop', [0, 1, 2], 1),
-      r('letterbox', 'fx-letterbox', 'section', [0], 1),
-    ],
-    trWeights: { 'tr-push': 2, 'tr-whip': 2, 'tr-flash': 1.5 },
+    rules: [VIGNETTE, FLICKER, SHAKE,
+      r('pulse', 'fx-zoompulse', 'beat', [1, 2], 1, { every: 2 }),
+      r('rgb', 'fx-rgb', 'accent', [1, 2], 0.5),
+      r('drop', 'fx-flash', 'drop', [0, 1, 2], 1)],
+    trWeights: transition('tr-push'),
   },
   hype: {
-    rules: [
-      VIGNETTE,
-      FLICKER,
-      r('shake', 'fx-shake', 'beat', [2], 1, { every: 1 }),
-      r('pulse', 'fx-zoompulse', 'beat', [1], 1, { every: 2 }),
-      r('flash', 'fx-flash', 'cut', [1, 2], 0.6),
-      r('rgb', 'fx-rgb', 'beat', [2], 0.4, { every: 1 }),
-      r('drop', 'fx-shockwave', 'drop', [0, 1, 2], 1),
-    ],
-    trWeights: { 'tr-shake': 2, 'tr-crashzoom': 2, 'tr-flash': 2 },
+    rules: [VIGNETTE, FLICKER, SHAKE,
+      r('pulse', 'fx-zoompulse', 'beat', [2], 1, { every: 1 }),
+      r('flash', 'fx-flash', 'cut', [1, 2], 1),
+      r('rgb', 'fx-rgb', 'accent', [1, 2], 0.6),
+      r('drop', 'fx-shockwave', 'drop', [0, 1, 2], 1)],
+    trWeights: transition('tr-crashzoom'),
   },
   velocity: {
-    rules: [
-      VIGNETTE,
-      FLICKER,
+    rules: [VIGNETTE, FLICKER, SHAKE,
       r('pulse', 'fx-zoompulse', 'beat', [2], 1, { every: 1 }),
-      r('shake', 'fx-shake', 'beat', [1, 2], 0.6, { every: 2 }),
-      r('chroma', 'fx-chromazoom', 'accent', [1], 0.7),
-      r('crash', 'fx-crashzoom', 'accent', [2], 0.5),
-      r('rgb', 'fx-rgb', 'cut', [1, 2], 0.5),
-      r('drop', 'fx-flash', 'drop', [0, 1, 2], 1),
-    ],
-    trWeights: { 'tr-whip': 3, 'tr-zoomblur': 3, 'tr-crashzoom': 2 },
-    speed: { per32: 4, intensity: 0.7 },
+      r('chroma', 'fx-chromazoom', 'accent', [1, 2], 0.7),
+      r('rgb', 'fx-rgb', 'cut', [1, 2], 0.6),
+      r('drop', 'fx-flash', 'drop', [0, 1, 2], 1)],
+    trWeights: transition('tr-zoomblur'),
+    speed: { per32: 4, intensity: 0.75 },
   },
   glitch: {
-    rules: [
-      VIGNETTE,
-      FLICKER,
-      r('glitch', 'fx-glitch', 'cut', [2], 0.5),
-      r('rgb', 'fx-rgb', 'beat', [1], 0.5, { every: 1 }),
-      r('twitch', 'fx-twitch', 'accent', [1, 2], 0.7),
-      r('invert', 'fx-invert', 'beat', [2], 0.25, { every: 4 }),
-      r('duotone', 'fx-duotone', 'section', [0], 1),
-      r('vhs', 'fx-vhs', 'section', [0, 1], 1),
-    ],
-    trWeights: { 'tr-glitch': 3, 'tr-slice': 3, 'tr-rgbsplit': 3, 'tr-pixelate': 2 },
+    rules: [VIGNETTE, FLICKER, SHAKE,
+      r('glitch', 'fx-glitch', 'cut', [1, 2], 1),
+      r('rgb', 'fx-rgb', 'beat', [2], 0.6, { every: 2 }),
+      r('invert', 'fx-invert', 'accent', [2], 0.3),
+      r('vhs', 'fx-vhs', 'section', [0, 1, 2], 1)],
+    trWeights: transition('tr-glitch'),
   },
   flash: {
-    rules: [
-      VIGNETTE,
-      FLICKER,
-      r('flash', 'fx-flash', 'cut', [1, 2], 0.8),
-      r('strobe', 'fx-strobe', 'drop', [0, 1, 2], 1, { beats: 4 }),
-      r('blur', 'fx-blurpulse', 'beat', [2], 0.5, { every: 1 }),
-      r('leak', 'fx-lightleak', 'accent', [0, 1], 0.4, { beats: 2 }),
-    ],
-    trWeights: { 'tr-flash': 3, 'tr-exposure': 3, 'tr-blur': 2 },
+    rules: [VIGNETTE, FLICKER, SHAKE,
+      r('flash', 'fx-flash', 'cut', [1, 2], 1),
+      r('strobe', 'fx-strobe', 'drop', [0, 1, 2], 1, { beats: 2 }),
+      r('blur', 'fx-blurpulse', 'beat', [2], 0.6, { every: 1 })],
+    trWeights: transition('tr-flash'),
   },
 };
 

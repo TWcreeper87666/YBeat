@@ -1,7 +1,7 @@
 import { $t } from '../i18n';
 import { afterRelease, pointerHeld } from './pointerHold';
 import { create } from 'zustand';
-import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, mergeModules, makeClip, useStore, type AudioClip, type Clip, type FxItem, type Marker, type Media, type Tracks } from '../store';
+import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, mergeModules, makeClip, useStore, type AudioClip, type Clip, type FxItem, type AnimItem, type Marker, type Media, type Tracks } from '../store';
 import type { Module } from '../modules/builtin';
 import { historyPath, resetHistory, settleHistory } from './history';
 import { clearDetachedMedia } from './detachedMedia';
@@ -63,6 +63,7 @@ interface Saved {
   clips: Clip[];
   effects: FxItem[];
   audios: AudioClip[];
+  anims?: AnimItem[];
   markers?: Marker[];
   tracks: Tracks;
   format?: Format;
@@ -70,6 +71,8 @@ interface Saved {
   /** 自動剪輯的素材清單（全部素材 / 自選的片段） */
   autoEdit?: AutoEditPart;
 }
+
+export const projectAnims = (data: { anims?: AnimItem[] }): AnimItem[] => data.anims ?? [];
 
 type AutoEditPart = { pick: 'all' | 'list'; segs: AeSeg[]; lead?: AeLead | null; song?: AeSong | null; lastTake?: AutoEditSettings['lastTake'] };
 const autoEditPart = (): AutoEditPart => { const a = useAutoEdit.getState(); return { pick: a.pick, segs: a.segs, lead: a.lead, song: a.song, lastTake: a.lastTake }; };
@@ -90,12 +93,12 @@ let saveTimer = 0;
 let started = false;
 
 /** 上次存檔時的專案內容（物件參照）：復原回這個狀態 = 跟存檔一樣，不用再存 */
-type StoreRefs = Pick<ReturnType<typeof useStore.getState>, 'media' | 'clips' | 'effects' | 'audios' | 'markers' | 'tracks' | 'format'>;
+type StoreRefs = Pick<ReturnType<typeof useStore.getState>, 'media' | 'clips' | 'effects' | 'audios' | 'anims' | 'markers' | 'tracks' | 'format'>;
 type SavedRefs = StoreRefs & { aeSegs: AeSeg[]; aePick: string; aeSong: AeSong | null; aeTake: unknown };
 let savedRefs: SavedRefs | null = null;
-const refsOf = (s: StoreRefs): SavedRefs => ({ media: s.media, clips: s.clips, effects: s.effects, audios: s.audios, markers: s.markers, tracks: s.tracks, format: s.format, aeSegs: useAutoEdit.getState().segs, aePick: useAutoEdit.getState().pick, aeSong: useAutoEdit.getState().song, aeTake: useAutoEdit.getState().lastTake });
+const refsOf = (s: StoreRefs): SavedRefs => ({ media: s.media, clips: s.clips, effects: s.effects, audios: s.audios, anims: s.anims, markers: s.markers, tracks: s.tracks, format: s.format, aeSegs: useAutoEdit.getState().segs, aePick: useAutoEdit.getState().pick, aeSong: useAutoEdit.getState().song, aeTake: useAutoEdit.getState().lastTake });
 const sameStore = (a: StoreRefs, b: StoreRefs) =>
-  a.media === b.media && a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.markers === b.markers && a.tracks === b.tracks && a.format.w === b.format.w && a.format.h === b.format.h; // 比例每次都是新物件，比數值
+  a.media === b.media && a.clips === b.clips && a.effects === b.effects && a.audios === b.audios && a.anims === b.anims && a.markers === b.markers && a.tracks === b.tracks && a.format.w === b.format.w && a.format.h === b.format.h; // 比例每次都是新物件，比數值
 const sameRefs = (a: SavedRefs, b: SavedRefs) => sameStore(a, b) && a.aeSegs === b.aeSegs && a.aePick === b.aePick && a.aeSong === b.aeSong && a.aeTake === b.aeTake;
 
 async function save() {
@@ -110,6 +113,7 @@ async function save() {
     clips: s.clips,
     effects: s.effects,
     audios: s.audios,
+    anims: s.anims,
     markers: s.markers,
     tracks: s.tracks,
     format: s.format,
@@ -215,6 +219,7 @@ async function loadProject() {
         clips: (data.clips ?? []).map((c) => makeClip(c)),
         effects: data.effects ?? [],
         audios: (data.audios ?? []).map((a) => makeAudio(a)),
+        anims: projectAnims(data),
         markers: data.markers ?? [],
         tracks: data.tracks ?? DEFAULT_TRACKS,
         format: data.format ?? DEFAULT_FORMAT,
@@ -234,7 +239,7 @@ async function loadProject() {
 export async function newProject() {
   clearDetachedMedia();
   useStore.setState({
-    media: [], clips: [], effects: [], audios: [], markers: [], tracks: DEFAULT_TRACKS, format: DEFAULT_FORMAT,
+    media: [], clips: [], effects: [], audios: [], anims: [], markers: [], tracks: DEFAULT_TRACKS, format: DEFAULT_FORMAT,
     selection: null, selected: [], time: 0, playing: false, loop: null,
   });
   setAutoEditPart(undefined, []);
@@ -245,9 +250,9 @@ export async function newProject() {
   await saveNow();
 }
 
-const packProject = (s: ReturnType<typeof useStore.getState>): Saved => ({
+export const packProject = (s: ReturnType<typeof useStore.getState>): Saved => ({
   media: s.media.map((m) => ({ ...m, url: '', thumb: m.kind === 'image' ? '' : m.thumb })),
-  clips: s.clips, effects: s.effects, audios: s.audios, markers: s.markers, tracks: s.tracks, format: s.format, modules: s.modules,
+  clips: s.clips, effects: s.effects, audios: s.audios, anims: s.anims, markers: s.markers, tracks: s.tracks, format: s.format, modules: s.modules,
   autoEdit: autoEditPart(),
 });
 
@@ -266,7 +271,7 @@ export async function exportProjectPack(onProgress?: PackProgress): Promise<Blob
 }
 
 const isSaved = (p: Record<string, unknown>): p is Record<string, unknown> & Saved =>
-  Array.isArray(p.media) && Array.isArray(p.clips) && Array.isArray(p.effects) && Array.isArray(p.audios) && !!p.tracks && typeof p.tracks === 'object'
+  Array.isArray(p.media) && Array.isArray(p.clips) && Array.isArray(p.effects) && Array.isArray(p.audios) && (p.anims === undefined || Array.isArray(p.anims)) && !!p.tracks && typeof p.tracks === 'object'
   && p.media.every((m) => !!m && typeof m === 'object' && typeof (m as Media).id === 'string');
 
 /** 先驗證整包（含素材雜湊），再取代目前專案；失敗時目前專案不動。 */
@@ -306,6 +311,7 @@ export async function importProjectPack(file: Blob, onProgress?: PackProgress): 
   useStore.setState({
     media, clips: project.clips.map(makeClip), effects: project.effects,
     audios: project.audios.map(makeAudio), tracks: project.tracks,
+    anims: projectAnims(project),
     markers: project.markers ?? [],
     format: project.format ?? DEFAULT_FORMAT,
     ...(project.modules ? { modules: mergeModules(project.modules) } : {}),

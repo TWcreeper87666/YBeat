@@ -6,9 +6,9 @@ import { attachedAudioIds, makeClip, projectDuration, makeTextClip, uid, useStor
 import { beatSource, mediaBeats, type Beat } from './beats';
 import { getAudioBuffer } from './audio';
 import { analyzeMusic, bandEnvelopes, type Bands, type MusicInfo } from './musicAnalysis';
-import { DEFAULT_OPTIONS, planEdit, popSlots, type EditPlan, type PlanMedia, type PlanOptions, type Recipe, type RuleOpt } from './autoEdit';
+import { DEFAULT_OPTIONS, planEdit, popSlots, type EditPlan, type PlanMedia, type PlanOptions, type PlanZone, type Recipe, type RuleOpt, type FxRule } from './autoEdit';
 import { loadAnalysis, saveAnalysis } from './analysisStore';
-import { aeFootage, aeSong, footage, lastTake, songClip, songKey, songMedia, useAutoEdit, type AeSong, type AutoEditSettings, type Footage } from './autoEditSettings';
+import { aeFootage, aeSong, footage, lastTake, trWeight, songClip, songKey, songMedia, useAutoEdit, type AeSong, type AeZone, type AutoEditSettings, type Footage } from './autoEditSettings';
 import { $t, displayName } from '../i18n';
 import { create } from 'zustand';
 import { sampleAll, type Sampled } from './mediaSampler';
@@ -123,6 +123,9 @@ export function planFor(src: MusicSource, music: MusicInfo, media: Media[], reci
 
 /** 最近幾次主體跳出的種類（跨「再一版」輪流用；重新整理就清掉） */
 let recentPops: PopVariant[] = [];
+/** 最近幾版主體跳出用過的素材（主體、揭露畫面）和影片格（原素材 + 秒數） */
+let recentPopMedia: string[] = [];
+let recentPopFrames: { src: string; t: number }[] = [];
 const RECENT_POPS = 30;
 
 /** 使用者標的副歌（歌的秒數）→ 最近的拍號（在這段範圍外的不算） */
@@ -160,6 +163,92 @@ export function editChorus(fn: (list: number[]) => number[]) {
   const next = [...new Set(fn(cur).map((t) => Math.round(Math.max(song.a, Math.min(song.b, t)) * 1000) / 1000))].sort((a, b) => a - b);
   const { chorus: _c, ...rest } = song;
   st.set({ song: next.length ? { ...rest, chorus: next } : rest });
+}
+
+/**
+ * 自動分段（歌沒有自己的分段時）：開場（第一段）鏡頭長、轉場和特效少（暗角這類常駐的氛圍照樣有）；高潮段（沒有就用副歌點所在的段落）切得密、轉場和特效多。
+ * 數字跟著目前的風格算（換風格就跟著變）
+ */
+export function autoZones(beats: { t: number }[], end: number, music: MusicInfo, p: Recipe, chorus: number[] = []): AeZone[] {
+  const secs = music.sections;
+  if (secs.length < 2 || !beats.length) return [];
+  const tOf = (b: number) => (b >= beats.length ? end : beats[Math.max(0, b)].t);
+  const r = (v: number) => Math.round(v * 100) / 100;
+  const out: AeZone[] = [];
+  const first = secs[0];
+  out.push({ id: `auto:${first.b0}`, t0: tOf(first.b0), t1: tOf(first.b1),
+    beatsPerShot: Math.min(16, Math.max(4, p.beatsPerShot[0] * 2)), trRate: r(p.transitionRate * 0.4), fxRate: 0.3 });
+  let hot = secs.slice(1).filter((x) => x.kind === 'drop');
+  if (!hot.length) hot = secs.slice(1).filter((x) => chorus.some((b) => b >= x.b0 && b < x.b1));
+  for (const x of hot) out.push({ id: `auto:${x.b0}`, t0: tOf(x.b0), t1: tOf(x.b1),
+    beatsPerShot: Math.max(1, p.beatsPerShot[2]), trRate: r(p.sectionTransitionRate), fxRate: 1.5 });
+  return out;
+}
+
+/** 這首歌的分段：自己的（auto = false），或沒有時照段落自動分的 */
+export function songZones(song: AeSong, beats: { t: number }[], music: MusicInfo | null, p: Recipe): { auto: boolean; list: AeZone[] } {
+  if (song.zones) return { auto: false, list: song.zones };
+  if (!music) return { auto: true, list: [] };
+  const chorus = songChorus(song, beats, music).t.map((t) => zoneBeat(t, beats));
+  return { auto: true, list: autoZones(beats, song.b, music, p, chorus) };
+}
+
+/** 面板目前看到的分段（給 editZones、AI 工具用） */
+export function currentZones(s: S = useStore.getState(), st: AutoEditSettings = useAutoEdit.getState()): { auto: boolean; list: AeZone[] } {
+  const song = aeSong(s, st);
+  if (!song) return { auto: true, list: [] };
+  const src = songSource(s, song);
+  const music = src && st.analysis?.key === songKey(song) ? shapeMusic(st.analysis.info, st.shape) : null;
+  return songZones(song, src?.beats ?? [], music, st.params);
+}
+
+lastTake.zones = () => currentZones();
+
+/** 分段改回自動 */
+export function resetZones() {
+  const st = useAutoEdit.getState();
+  const song = aeSong(useStore.getState(), st);
+  if (!song?.zones) return;
+  const { zones: _z, ...rest } = song;
+  st.set({ song: rest });
+}
+
+/** 改分段（歌的秒數）：還是自動的話先把自動分的當成自己的；頭尾夾在歌的範圍內、照開頭排序；太短的丟掉；改完是空的 = 不分段 */
+export function editZones(fn: (list: AeZone[]) => AeZone[]) {
+  const st = useAutoEdit.getState();
+  const song = aeSong(useStore.getState(), st);
+  if (!song) return;
+  const r3 = (t: number) => Math.round(t * 1000) / 1000;
+  const next = fn(currentZones(useStore.getState(), st).list)
+    .map((z) => ({ ...z, t0: r3(Math.max(song.a, Math.min(song.b, z.t0))), t1: r3(Math.max(song.a, Math.min(song.b, z.t1))) }))
+    .filter((z) => z.t1 - z.t0 > 0.05)
+    .sort((a, b) => a.t0 - b.t0);
+  st.set({ song: { ...song, zones: next } });
+}
+
+/** 放進一個新的分段：蓋到的舊分段截掉（整個被蓋住的刪掉、被切成兩半的留兩段） */
+export function carveZones(list: AeZone[], z: AeZone): AeZone[] {
+  const out: AeZone[] = [];
+  for (const o of list) {
+    if (o.id === z.id) continue;
+    if (o.t1 <= z.t0 || o.t0 >= z.t1) { out.push(o); continue; }
+    if (o.t0 < z.t0) out.push({ ...o, t1: z.t0 });
+    if (o.t1 > z.t1) out.push({ ...o, id: o.t0 < z.t0 ? uid() : o.id, t0: z.t1 });
+  }
+  return [...out, z].sort((a, b) => a.t0 - b.t0);
+}
+
+/**
+ * 鎖住的項目（時間軸秒數）→ 新的一版要空出來的拍號範圍：頭往前取到最近的拍、尾往後取到最近的拍
+ * （新的鏡頭只會停在這之前、從這之後開始，不會疊到鎖住的東西）
+ */
+export function lockedBeats(src: MusicSource, a: number, b: number): [number, number] {
+  const n = src.beats.length;
+  let b0 = 0;
+  while (b0 < n && src.time(b0 + 1) <= a + 1e-3) b0++;
+  let b1 = n;
+  while (b1 > b0 + 1 && src.time(b1 - 1) >= b - 1e-3) b1--;
+  return [b0, b1];
 }
 
 /** 時間範圍 → 拍號範圍（頭尾各取範圍內最近的一拍；範圍蓋到片段頭尾就用片段頭尾） */
@@ -251,9 +340,16 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
     };
     c.transitionIn = null;
   }
-  for (const p of plan.pops ?? []) for (const l of expandPop(p, T)) {
-    const c = popClip(l, s, p, mediaOf);
-    if (c) clips.push(c);
+  // 每次主體跳出（去背的那幾層 + 底下的鏡頭 + 揭露的那一個鏡頭）是一個群組：一起選、一起鎖住
+  const base = [...clips];
+  for (const p of plan.pops ?? []) {
+    const group = uid();
+    const t0 = T(p.b0), t1 = T(p.b1);
+    for (const c of base) if (!c.group && c.start < t1 + 1e-6 && c.start + c.duration > t0 + 1e-6) c.group = group;
+    for (const l of expandPop(p, T)) {
+      const c = popClip(l, s, p, mediaOf);
+      if (c) clips.push({ ...c, group });
+    }
   }
   const effects: FxItem[] = [];
   // 特效軌：舊的點綴一層、特效層每層一條（層號小的先套用）
@@ -468,7 +564,7 @@ const POP_ROOM = 4;
  * 影片裡適合做主體跳出的幾格（素材時間，相對指定片段的起點）：
  * 有主角 → 主角的臉最大的那幾格；有臉 → 臉最大的；都沒有 → 影片 30% 的地方。同一支挑的格子至少隔 5 秒。
  */
-export function popFrameCandidates(media: Footage[], extra: Map<string, Partial<PlanMedia>>): { m: Footage; t: number; face?: FaceBox | null }[] {
+export function popFrameCandidates(media: Footage[], extra: Map<string, Partial<PlanMedia>>, rng: () => number = () => 0.5, recent: { src: string; t: number }[] = []): { m: Footage; t: number; face?: FaceBox | null }[] {
   type P = { t: number; h: number; face?: FaceBox | null };
   const out: (P & { m: Footage })[] = [];
   for (const m of media) {
@@ -478,15 +574,21 @@ export function popFrameCandidates(media: Footage[], extra: Map<string, Partial<
     const ok = (t: number) => t <= m.duration - POP_ROOM && !x?.ban?.some(([a, b]) => t >= a - 0.1 && t <= b + POP_ROOM);
     // 臉的位置：去背結果只留這張臉連著的那一塊
     const pts: P[] = x?.leadPts?.length ? x.leadPts.map((p) => ({ t: p.t, h: p.h, face: { x: p.x, y: p.y, w: p.w, h: p.h } }))
-      : (x?.info?.faces ?? []).flatMap((f, i) => (f ? [{ t: i * x!.info!.step, h: f.h, face: f }] : []));
+      // 只用真的偵測過的格（info.faces 中間的格是借最近一次偵測的位置，人動了框就不準，去背會剪到沒有頭）
+      : x?.info?.facesAt ? x.info.facesAt.flatMap((l, i) => { const f = l && bestFace(l); return f ? [{ t: i * x!.info!.step, h: f.h, face: f }] : []; })
+        : (x?.info?.faces ?? []).flatMap((f, i) => (f ? [{ t: i * x!.info!.step, h: f.h, face: f }] : []));
     // 沒有臉：分析過 = 不能用（null），沒分析 = 照舊整個去背結果
     const list: P[] = pts.length ? pts : [{ t: m.duration * 0.3, h: 0, face: x?.info?.faces ? null : undefined }];
     const picked: P[] = [];
-    for (const p of [...list].sort((a, b) => b.h - a.h)) {
+    // 臉越大越優先，但加一點隨機；前幾版用過的那幾秒往後排（每一版換不同的格）
+    const src = m.srcId ?? m.id;
+    const used = (t: number) => recent.some((r) => r.src === src && Math.abs(r.t - ((m.from ?? 0) + t)) < 2);
+    const score = new Map(list.map((p) => [p, p.h * (0.6 + 0.8 * rng()) * (used(p.t) ? 0.25 : 1)]));
+    for (const p of [...list].sort((a, b) => score.get(b)! - score.get(a)!)) {
       if (picked.length >= POP_PER_VIDEO) break;
       if (ok(p.t) && picked.every((q) => Math.abs(q.t - p.t) >= 5)) picked.push(p);
     }
-    for (const p of picked) out.push({ m, ...p });
+    for (const p of picked) out.push({ m, ...p, h: score.get(p)! });
   }
   return out.sort((a, b) => b.h - a.h).slice(0, POP_MAX_FRAMES).map(({ m, t, face }) => ({ m, t, ...(face !== undefined ? { face } : {}) }));
 }
@@ -496,23 +598,65 @@ const POP_MAX_IMAGES = 20;
 
 // ───────────── 面板設定 / 執行 ─────────────
 
+/** 特效層 → 編排器的特效層（關掉的 / 模組不見了 = null） */
+function ruleOpt({ on, ...r }: FxRule, st: AutoEditSettings, s: S): RuleOpt | null {
+  const chance = Math.min(1, r.chance * st.density);
+  if (!on || chance <= 0) return null;
+  const mod = s.modules.find((m) => m.id === r.moduleId && m.kind === 'effect');
+  const combo = mod ? undefined : fxCombo(r.moduleId);
+  const main = combo && s.modules.find((m) => m.id === combo.fx.moduleId);
+  if (!mod && !main) return null; // 模組 / 組合不見了：這層跳過
+  return {
+    ...r, chance, group: r.drive ? 'ambient' : fxGroup((mod ?? main)!), hit: isHitFx((mod ?? main)!),
+    ...(mod && intensityParams(mod.id, st.intensity) ? { params: intensityParams(mod.id, st.intensity) } : {}),
+  };
+}
+
+/** 轉場清單（ids = 只用這些、權重都是 1；沒有 = 照權重） */
+function transitionOpts(st: AutoEditSettings, s: S, ids?: string[]) {
+  return s.modules.filter((m) => m.kind === 'transition' && (ids ? ids.includes(m.id) : trWeight(st.trWeights, m.id) > 0))
+    .map((m) => ({ ...transitionOpt(m), weight: ids ? 1 : trWeight(st.trWeights, m.id) }));
+}
+
+/** 歌的秒數 → 拍號（分段的頭尾已經吸附在拍上；超過最後一拍 = 結尾） */
+export function zoneBeat(t: number, beats: { t: number }[]): number {
+  const i = beats.findIndex((b) => b.t >= t - 0.05);
+  return i < 0 ? beats.length : i;
+}
+
+/**
+ * 分段 → 編排器的分段 + 分段自己的特效層（span = 那段的拍號）。
+ * 分段的特效層接在風格的特效層後面；同一種特效共用一條軌（分段不重疊）
+ */
+export function zoneOptions(zones: AeZone[] | undefined, beats: { t: number }[], st: AutoEditSettings, s: S, lane0: number): { zones: PlanZone[]; rules: RuleOpt[] } {
+  const out: PlanZone[] = [], rules: RuleOpt[] = [];
+  const lanes: string[] = [];
+  for (const z of zones ?? []) {
+    const b0 = zoneBeat(z.t0, beats), b1 = zoneBeat(z.t1, beats);
+    if (b1 - b0 < 1) continue;
+    out.push({
+      b0, b1,
+      ...(z.tr !== undefined ? { transitions: z.tr === null ? null : transitionOpts(st, s, z.tr) } : {}),
+      ...(z.trRate !== undefined ? { transitionRate: z.trRate } : {}),
+      ...(z.fxRate !== undefined ? { fxRate: z.fxRate } : {}),
+      ...(z.beatsPerShot ? { beatsPerShot: z.beatsPerShot } : {}),
+      ...(z.noPop ? { noPop: true as const } : {}),
+      ...(z.noSpeed ? { noSpeed: true as const } : {}),
+    });
+    for (const r of z.rules ?? []) {
+      const o = ruleOpt(r, st, s);
+      if (!o) continue;
+      if (!lanes.includes(r.moduleId)) lanes.push(r.moduleId);
+      rules.push({ ...o, id: `${z.id}:${r.id}`, span: [b0, b1], lane: lane0 + lanes.indexOf(r.moduleId) });
+    }
+  }
+  return { zones: out, rules };
+}
+
 /** 設定 → 編排器的選項（只留目前存在的模組 / 組合） */
 export function planOptions(st: AutoEditSettings, s: S = useStore.getState()): PlanOptions {
-  const tr = s.modules.filter((m) => m.kind === 'transition' && (st.trWeights[m.id] ?? 1) > 0)
-    .map((m) => ({ ...transitionOpt(m), weight: st.trWeights[m.id] ?? 1 }));
-  const rules: RuleOpt[] = [];
-  for (const { on, ...r } of st.rules) {
-    const chance = Math.min(1, r.chance * st.density);
-    if (!on || chance <= 0) continue;
-    const mod = s.modules.find((m) => m.id === r.moduleId && m.kind === 'effect');
-    const combo = mod ? undefined : fxCombo(r.moduleId);
-    const main = combo && s.modules.find((m) => m.id === combo.fx.moduleId);
-    if (!mod && !main) continue; // 模組 / 組合不見了：這層跳過
-    rules.push({
-      ...r, chance, group: r.drive ? 'ambient' : fxGroup((mod ?? main)!), hit: isHitFx((mod ?? main)!),
-      ...(mod && intensityParams(mod.id, st.intensity) ? { params: intensityParams(mod.id, st.intensity) } : {}),
-    });
-  }
+  const tr = transitionOpts(st, s);
+  const rules = st.rules.map((r) => ruleOpt(r, st, s)).filter((r): r is RuleOpt => !!r);
   const pops = st.popOn && st.popVariants.length ? { variants: st.popVariants, per32: st.popsPer32, text: st.popText } : undefined;
   const speed = st.speedOn && st.speedVariants.length ? { variants: st.speedVariants, per32: st.speedsPer32, intensity: st.speedIntensity, every: !!st.speedEvery, boost: st.speedBoost ?? 1 } : undefined;
   return { transitions: tr, accents: [], dropHit: null, rules, kenBurns: st.kenBurns, order: st.order, pops, speed };
@@ -525,7 +669,9 @@ export function takeItems(s: Pick<S, 'clips' | 'effects' | 'audios'>, id: string
 /** 這一版的內容摘要：件數 + 雜湊（手動改過任何一個 = 不一樣） */
 export function takeSig(s: Pick<S, 'clips' | 'effects' | 'audios'>, id: string): string {
   const t = takeItems(s, id);
-  const text = JSON.stringify([t.clips, t.effects, t.audios]);
+  // 鎖住 / 解鎖不算改過（鎖住之後照樣可以「再一版」）
+  const plain = <T extends { locked?: true }>(l: T[]) => l.map(({ locked: _l, ...x }) => x);
+  const text = JSON.stringify([plain(t.clips), plain(t.effects), plain(t.audios)]);
   let h = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
   return `${t.clips.length + t.effects.length + t.audios.length}:${(h >>> 0).toString(36)}`;
@@ -669,7 +815,7 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
       }
     }
     // 影片：挑幾格去背（有主角就挑主角的臉最大的那幾格），主體跳出後揭露那一拍直接從這格接著播
-    const cands = popFrameCandidates(media, extra);
+    const cands = popFrameCandidates(media, extra, Math.random, recentPopFrames);
     for (let i = 0; i < cands.length; i++) {
       if (stopped()) return { error: 'cancelled' };
       const { m, t, face } = cands[i];
@@ -726,9 +872,12 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
   try {
     // 再一版：放在上一版的位置；新的一版：接在時間軸最後面（原本有什麼都不管）
     let at = snapFrame(projectDuration(useStore.getState()));
+    // 上一版鎖住的東西：先拿下來（新的一版才會放在同樣的軌道上），剪完原封不動放回去
+    let kept: { clips: Clip[]; effects: FxItem[]; audios: AudioClip[] } = { clips: [], effects: [], audios: [] };
     if (replace) {
       const old = takeItems(useStore.getState(), replace);
       at = Math.min(...[...old.clips, ...old.effects, ...old.audios].map((x) => x.start));
+      kept = { clips: old.clips.filter((x) => x.locked), effects: old.effects.filter((x) => x.locked), audios: old.audios.filter((x) => x.locked) };
       useStore.setState((x) => ({ clips: x.clips.filter((c) => c.take !== replace), effects: x.effects.filter((e) => e.take !== replace), audios: x.audios.filter((a) => a.take !== replace) }));
     }
     s = useStore.getState();
@@ -738,20 +887,39 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
     if (!src) return { error: 'noMusic' };
     const seed = (Math.random() * 2 ** 31) >>> 0;
     const opts = planOptions(st, s);
+    // 分段：這段的轉場 / 特效層 / 鏡頭長度蓋過風格
+    const zo = zoneOptions(songZones(song, src.beats, music, st.params).list, src.beats, st, s, opts.rules?.length ?? 0);
+    if (zo.zones.length) opts.zones = zo.zones;
+    if (zo.rules.length) opts.rules = [...(opts.rules ?? []), ...zo.rules];
+    // 鎖住的範圍（拍號）：鏡頭、跳出、變速不排進去；鎖住的特效那幾拍不再疊特效
+    const spans = (l: { start: number; duration: number }[]) => l.map((x) => lockedBeats(src, x.start, x.start + x.duration));
+    if (kept.clips.length || kept.effects.length) opts.locked = { shots: spans(kept.clips), fx: spans(kept.effects) };
     // 使用者標的副歌：主體跳出只放在這些地方
     const chorus = chorusBeats(song.chorus, src.beats);
     if (opts.pops && chorus.length) opts.pops = { ...opts.pops, at: chorus };
     // 前幾版用過的主體跳出種類：這一版先用還沒出現過的
-    if (opts.pops) opts.pops = { ...opts.pops, recent: recentPops };
+    if (opts.pops) opts.pops = { ...opts.pops, recent: recentPops, recentMedia: recentPopMedia };
     const plan = planFor(src, music, [...media, ...frames], st.params, seed, opts, undefined, extra);
     recentPops = [...recentPops, ...plan.pops.map((x) => x.variant)].slice(-RECENT_POPS);
+    useAutoEditRun.setState({ pops: { key: songKey(song), list: plan.pops.map((x) => ({ b: x.b1, variant: x.variant })) } });
+    recentPopMedia = [...recentPopMedia, ...plan.pops.flatMap((x) => [x.mediaId, ...(x.revealMediaId ? [x.revealMediaId] : [])])].slice(-RECENT_POPS);
+    recentPopFrames = [...recentPopFrames, ...plan.pops.flatMap((x) => [x.mediaId, x.revealMediaId ?? '']).flatMap((id) => {
+      const f = frames.find((m) => m.id === id);
+      return f ? [{ src: f.srcId ?? f.id, t: f.from ?? 0 }] : [];
+    })].slice(-RECENT_POPS);
     const { clips, effects } = planItems(plan, src, s, [...media, ...frames]);
     if (!clips.length) return { error: 'empty' };
     plannedPops = plan.pops?.length ?? 0;
     masks = plan.pops.filter((x) => x.variant === 'silhouetteWindow' || x.variant === 'subjectHole').length;
     popStats = st.popOn && st.popVariants.length && plan.popStats ? { ...plan.popStats, why: popWhy } : undefined;
-    const p: Proposal = { summary: 'auto edit', op: { op: 'add_items', clips: clips.map((c) => ({ ...c, take })), effects: effects.map((e) => ({ ...e, take })), audios: [audio] } };
+    // 歌鎖住了：用鎖住的那一段，不再放一次
+    const p: Proposal = { summary: 'auto edit', op: { op: 'add_items', clips: clips.map((c) => ({ ...c, take })), effects: effects.map((e) => ({ ...e, take })), audios: kept.audios.length ? [] : [audio] } };
     applyProposals([p]);
+    // 鎖住的放回原位（換成這一版的編號，下次「再一版」照樣保留）
+    if (kept.clips.length || kept.effects.length || kept.audios.length) {
+      const tag = <T extends { take?: string }>(l: T[]) => l.map((x) => ({ ...x, take }));
+      useStore.setState((x) => ({ clips: [...x.clips, ...tag(kept.clips)], effects: [...x.effects, ...tag(kept.effects)], audios: [...x.audios, ...tag(kept.audios)] }));
+    }
     useAutoEdit.getState().set({ lastTake: { id: take, sig: takeSig(useStore.getState(), take) } });
     ok = true;
     shots = clips.length;
@@ -776,6 +944,8 @@ export interface AutoEditRun {
   result: { ok: boolean; text: string } | null;
   /** 這次做了哪些步驟（AI 分頁顯示用；每一步一行） */
   log: string[];
+  /** 最近一版的主體跳出：在哪一拍揭露（歌的拍號）、哪一種；key = 哪首歌哪一段（songKey） */
+  pops?: { key: string; list: { b: number; variant: PopVariant }[] };
 }
 export const useAutoEditRun = create<AutoEditRun>(() => ({ running: false, label: '', frac: null, result: null, log: [] }));
 

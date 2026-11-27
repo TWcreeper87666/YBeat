@@ -15,6 +15,11 @@ const near = (a: number, b: number, e = 1e-3) => Math.abs(a - b) < e;
 const media: any = { id: 'v', name: 'v', kind: 'video', url: '', width: 100, height: 100, duration: 20, thumb: '', hasAudio: false };
 const clip = (p: any = {}): any => ({ id: 'c', mediaId: 'v', track: 0, start: 0, duration: 4, in: 2, fit: 'cover', transform: { x: 0, y: 0, scaleX: 1, scaleY: 1, rotation: 0, opacity: 1 }, keys: {}, remap: { moduleId: 'remap-speed', params: {} }, transitionIn: null, transitionOut: null, volume: 1, ...p });
 const modules = new Map(BUILTIN_MODULES.map((m) => [m.id, m]));
+ok(near(clipSource(clip({ remap: { moduleId: 'remap-none', params: {} } }), 2, media, modules).src, 4), '無：保持正常播放');
+ok(near(clipSource(clip({ remap: { moduleId: 'remap-reverse', params: {} } }), 0, media, modules).src, 6)
+  && near(clipSource(clip({ remap: { moduleId: 'remap-reverse', params: {} } }), 2, media, modules).src, 4), '倒播：從片段尾端往回播放');
+const stretchedNone = stretchPatch('clip', clip({ remap: { moduleId: 'remap-none', params: {} } }), 0, 0.5) as any;
+ok(stretchedNone.remap?.moduleId === 'remap-speed' && near(stretchedNone.remap.params.speed, 2), '無：拖曳縮短片段後切到 2× 變速');
 
 // 正播後倒播（內建）套用 → 曲線模式
 const pp = BUILTIN_MODULES.find((m) => m.id === 'remap-pingpong')!;
@@ -29,7 +34,7 @@ ok(clipSource(c, 1, media, modules).rate > 0 && clipSource(c, 3, media, modules)
 // 切到「曲線」：從目前的速度開始
 const fast = remapFor(clip({ remap: { moduleId: 'remap-speed', params: { speed: 2 } } }), CURVE_ID, BUILTIN_MODULES);
 ok(fast.keys!.length === 2 && near(fast.keys![1].v, 8), '2× 切成曲線：結尾素材時間 = 長度 × 2');
-const rev = remapFor(clip({ remap: { moduleId: 'remap-speed', params: { reverse: true } } }), CURVE_ID, BUILTIN_MODULES);
+const rev = remapFor(clip({ remap: { moduleId: 'remap-reverse', params: {} } }), CURVE_ID, BUILTIN_MODULES);
 ok(near(rev.keys![0].v, 4) && near(rev.keys![1].v, 0), '倒放切成曲線：從尾巴倒回開頭');
 ok(remapFor(c, CURVE_ID, BUILTIN_MODULES) === c.remap, '本來就是曲線：保留原本的曲線');
 ok(remapFor(c, 'remap-strobe', BUILTIN_MODULES).keys === undefined, '換成其他模式：曲線拿掉');

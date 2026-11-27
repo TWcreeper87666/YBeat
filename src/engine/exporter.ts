@@ -6,6 +6,7 @@ import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
 import { projectDuration, useStore } from '../store';
 import { getRenderer, makeCtx } from './renderer';
 import { SAMPLE_RATE, mixdown, stopAudioPreview } from './audio';
+import { DemuxCache, SequentialVideoReader } from './matteDecode';
 
 export function downloadBlob(blob: Blob, name: string) {
   const a = document.createElement('a');
@@ -15,10 +16,13 @@ export function downloadBlob(blob: Blob, name: string) {
   setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
 }
 
+/** 先找顯示卡的硬體編碼器（NVENC / Quick Sync…），沒有才讓瀏覽器自己選（可能是軟體編碼） */
 async function pickVideoConfig(w: number, h: number, fps: number, bitrate: number) {
-  for (const codec of ['avc1.640034', 'avc1.640033', 'avc1.4d0034', 'avc1.42003e']) {
-    const c: VideoEncoderConfig = { codec, width: w, height: h, bitrate, framerate: fps };
-    if ((await VideoEncoder.isConfigSupported(c)).supported) return c;
+  for (const hw of ['prefer-hardware', 'no-preference'] as const) {
+    for (const codec of ['avc1.640034', 'avc1.640033', 'avc1.4d0034', 'avc1.42003e']) {
+      const c: VideoEncoderConfig = { codec, width: w, height: h, bitrate, framerate: fps, hardwareAcceleration: hw };
+      if ((await VideoEncoder.isConfigSupported(c)).supported) return c;
+    }
   }
   return null;
 }
@@ -49,18 +53,27 @@ export async function exportMp4(fps: number, range?: { a: number; b: number }, b
   if (dur <= 0) throw new Error($t('時間軸是空的'));
   const total = Math.ceil(dur * fps);
   const ctx = makeCtx(st0);
-  // 自訂遮罩形狀要先解碼好（預覽時是背景載入）
-  const fxs = [...st0.effects, ...st0.clips.flatMap((c) => c.effects ?? [])];
-  await ensureShapes(fxs.map((f) => f.mask?.shape ?? 'none'));
-  // AI 去背：遮罩要先全部算好
-  await prepareMattes(st0.clips, ctx.media, ctx.modules);
-  await prepareSubjects(st0.clips, ctx.media, ctx.modules);
-
+  // 匯出畫面馬上出來（準備遮罩、去背可能要一陣子），準備中也可以取消
+  useStore.setState({ playing: false, exporting: { progress: 0, cancel: false, t: start, a: start, b: start + dur, prep: true } });
+  const stopIfCancelled = () => { if (useStore.getState().exporting?.cancel) throw new Error($t('已取消')); };
+  let vConfig: VideoEncoderConfig | null;
+  try {
+    // 自訂遮罩形狀要先解碼好（預覽時是背景載入）
+    const fxs = [...st0.effects, ...st0.clips.flatMap((c) => c.effects ?? [])];
+    await ensureShapes(fxs.map((f) => f.mask?.shape ?? 'none'));
+    stopIfCancelled();
+    // AI 去背：遮罩要先全部算好
+    await prepareMattes(st0.clips, ctx.media, ctx.modules);
+    stopIfCancelled();
+    await prepareSubjects(st0.clips, ctx.media, ctx.modules);
+    stopIfCancelled();
+    vConfig = await pickVideoConfig(st0.format.w, st0.format.h, fps, bitrate);
+    if (!vConfig) throw new Error($t('找不到可用的 H.264 編碼設定'));
+  } catch (e) {
+    useStore.setState({ exporting: null });
+    throw e;
+  }
   const { w: FW, h: FH } = st0.format;
-  const vConfig = await pickVideoConfig(FW, FH, fps, bitrate);
-  if (!vConfig) throw new Error($t('找不到可用的 H.264 編碼設定'));
-
-  useStore.setState({ playing: false, exporting: { progress: 0, cancel: false, t: start, a: start, b: start + dur } });
   // 匯出一律用全解析度（預覽可能是縮小的）；匯出中預覽迴圈不會改大小
   r.setSize(FW, FH);
   r.pauseAll();
@@ -68,6 +81,12 @@ export async function exportMp4(fps: number, range?: { a: number; b: number }, b
 
   let encodeError: unknown = null;
   let encoder: VideoEncoder | null = null;
+  const readers = new Map<string, SequentialVideoReader>();
+  const demuxCache = new DemuxCache();
+  /** 這一格用到的片段（沒用到的解碼器馬上關掉，硬體解碼器的數量有限） */
+  const usedNow = new Set<string>();
+  const unsupported = new Set<string>();
+  const seekClips = new Set<string>();
   try {
     const mixed = await mixdown(st0, ctx.modules, dur, start);
     const aPick = mixed ? await pickAudioConfig() : null;
@@ -104,23 +123,75 @@ export async function exportMp4(fps: number, range?: { a: number; b: number }, b
 
     encoder = new VideoEncoder({ output: (chunk, meta) => muxer.addVideoChunk(chunk, meta), error: (e) => (encodeError = e) });
     encoder.configure(vConfig);
-    for (let i = 0; i < total; i++) {
-      if (useStore.getState().exporting?.cancel) throw new Error($t('已取消'));
-      if (encodeError) throw encodeError;
-      const t = start + i / fps;
-      await r.prepareExact(ctx, t);
-      r.render(ctx, t, 'export');
-      const frame = new VideoFrame(r.canvas, { timestamp: Math.round((i * 1e6) / fps), duration: Math.round(1e6 / fps) });
-      encoder.encode(frame, { keyFrame: i % (fps * 2) === 0 });
-      frame.close();
-      while (encoder.encodeQueueSize > 6) await new Promise((res) => setTimeout(res, 1));
-      if (i % 5 === 0) useStore.setState({ exporting: { progress: i / total, cancel: false, t, a: start, b: start + dur } });
+    const cancelled = () => !!useStore.getState().exporting?.cancel;
+    const frameFor = async (clip: { id: string }, media: { id: string; url: string }, sourceTime: number) => {
+      if (unsupported.has(media.id) || seekClips.has(clip.id)) return null;
+      usedNow.add(clip.id);
+      try {
+        let reader = readers.get(clip.id);
+        if (!reader) {
+          reader = await SequentialVideoReader.open(media.url, demuxCache);
+          readers.set(clip.id, reader);
+        }
+        const frame = await reader.frameAt(sourceTime, () => !cancelled());
+        if (cancelled()) throw new Error('export cancelled');
+        if (!frame) {
+          reader.close();
+          readers.delete(clip.id);
+          seekClips.add(clip.id);
+        }
+        return frame;
+      } catch (e) {
+        if (cancelled()) throw e;
+        console.warn('Sequential export decode unavailable; using video seek', media.id, e);
+        readers.get(clip.id)?.close();
+        readers.delete(clip.id);
+        unsupported.add(media.id);
+        return null;
+      }
+    };
+    // 按取消：卡在某一格（等影片跳轉）時也馬上停
+    const untilCancel = () => new Promise<'cancel'>((res) => {
+      const id = setInterval(() => { if (cancelled()) { clearInterval(id); res('cancel'); } }, 100);
+      stopWatch.push(() => clearInterval(id));
+    });
+    const stopWatch: (() => void)[] = [];
+    const t0 = performance.now();
+    useStore.setState((s) => ({ exporting: s.exporting && { ...s.exporting, prep: undefined } }));
+    try {
+      for (let i = 0; i < total; i++) {
+        if (cancelled()) throw new Error($t('已取消'));
+        if (encodeError) throw encodeError;
+        const t = start + i / fps;
+        usedNow.clear();
+        if (await Promise.race([r.prepareExact(ctx, t, frameFor), untilCancel()]) === 'cancel') throw new Error($t('已取消'));
+        stopWatch.splice(0).forEach((f) => f());
+        // 片段播完了：關掉它的解碼器（匯出時間只往後走，不會再用到）
+        for (const [id, reader] of readers) if (!usedNow.has(id)) { reader.close(); readers.delete(id); }
+        r.render(ctx, t, 'export');
+        const frame = new VideoFrame(r.canvas, { timestamp: Math.round((i * 1e6) / fps), duration: Math.round(1e6 / fps) });
+        encoder.encode(frame, { keyFrame: i % (fps * 2) === 0 });
+        frame.close();
+        while (encoder.encodeQueueSize > 6 && !encodeError && !cancelled()) await new Promise((res) => setTimeout(res, 1));
+        if (i % 5 === 0) {
+          // 預估剩下的時間：照目前的平均速度（前 2 秒還不準，不顯示）
+          const spent = (performance.now() - t0) / 1000, p = (i + 1) / total;
+          const eta = spent > 2 ? (spent / p) * (1 - p) : undefined;
+          // 不要蓋掉使用者剛按的取消
+          useStore.setState((s) => ({ exporting: s.exporting && { ...s.exporting, progress: i / total, t, ...(eta !== undefined ? { eta } : {}) } }));
+        }
+      }
+    } finally {
+      stopWatch.forEach((f) => f());
     }
     await encoder.flush();
     if (encodeError) throw encodeError;
     muxer.finalize();
     return new Blob([target.buffer], { type: 'video/mp4' });
   } finally {
+    r.clearExportFrames();
+    readers.forEach((reader) => reader.close());
+    demuxCache.clear();
     if (encoder && encoder.state !== 'closed') encoder.close();
     useStore.setState({ exporting: null });
   }

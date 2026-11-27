@@ -10,6 +10,8 @@ type Point = [number, number];
 /** 人的那一塊：至少要有幾張臉那麼大；往臉下面延伸至少幾個臉高，或一路連到畫面下緣（上半身被畫面切掉也算） */
 const BODY_AREA = 2;
 const BODY_BELOW = 0.5;
+/** 臉框裡至少要有這麼多是主體（頭真的在框裡） */
+const HEAD_FILL = 0.35;
 
 /**
  * 去背遮罩只留這張臉所在的那一塊（頭連著身體）：去背模型找的是「顯眼的東西」，背景的樹、招牌也會被框進來。
@@ -39,7 +41,17 @@ export function keepFace(mask: ArrayLike<number>, size: number, face: { x: numbe
   const faceArea = fw * face.h * size * size;
   const below = maxY / size - (face.y + face.h / 2);
   const body = maxY >= size - 2 || below >= face.h * BODY_BELOW;
-  return count >= faceArea * BODY_AREA && body ? out : null;
+  // 頭要真的在：臉框裡大部分是這一塊、而且這一塊有往上蓋到臉框的上半（框偏到肩膀、身體時會剪出沒有頭的主體）
+  const fx0 = Math.max(0, Math.floor((face.x - fw / 2) * size)), fx1 = Math.min(size - 1, Math.ceil((face.x + fw / 2) * size));
+  const fy0 = Math.max(0, Math.floor((face.y - face.h / 2) * size)), fy1 = Math.min(size - 1, Math.ceil((face.y + face.h / 2) * size));
+  const fyMid = Math.round(face.y * size);
+  let inFace = 0, boxN = 0, upper = 0;
+  for (let y = fy0; y <= fy1; y++) for (let x = fx0; x <= fx1; x++) {
+    boxN++;
+    if (out[y * size + x]) { inFace++; if (y < fyMid) upper++; }
+  }
+  const head = boxN > 0 && inFace >= boxN * HEAD_FILL && upper >= boxN * HEAD_FILL * 0.3;
+  return count >= faceArea * BODY_AREA && body && head ? out : null;
 }
 
 /** 去背遮罩 → SVG 路徑（200×200 座標，evenodd）：每一塊主體的外框與裡面的洞各一條封閉路徑。

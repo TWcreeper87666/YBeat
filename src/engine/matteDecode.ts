@@ -88,6 +88,145 @@ async function demux(buf: ArrayBuffer): Promise<{ file: ReturnType<typeof create
   return { file, track, samples };
 }
 
+type Demuxed = { file: ReturnType<typeof createFile>; track: Track; samples: Sample[] };
+
+/**
+ * 匯出用的拆檔快取：自動剪輯會在好幾支影片之間跳來跳去，共用的快取只留 2 支會一直重拆整個檔案。
+ * 依檔案大小留最近用過的，總共不超過 maxBytes
+ */
+export class DemuxCache {
+  private map = new Map<string, { p: Promise<Demuxed>; bytes: number }>();
+  constructor(private readonly maxBytes = 1.5 * 1024 ** 3) {}
+  get(url: string): Promise<Demuxed> {
+    const hit = this.map.get(url);
+    if (hit) { this.map.delete(url); this.map.set(url, hit); return hit.p; }
+    const e = { p: Promise.resolve(null as unknown as Demuxed), bytes: 0 };
+    e.p = fetch(url).then((r) => r.arrayBuffer()).then((buf) => { e.bytes = buf.byteLength; this.trim(url); return demux(buf); });
+    e.p.catch(() => this.map.delete(url));
+    this.map.set(url, e);
+    return e.p;
+  }
+  private trim(keep: string) {
+    let total = [...this.map.values()].reduce((s, x) => s + x.bytes, 0);
+    for (const [k, x] of this.map) {
+      if (total <= this.maxBytes) break;
+      if (k === keep) continue;
+      this.map.delete(k);
+      total -= x.bytes;
+    }
+  }
+  clear() { this.map.clear(); }
+}
+
+/** 匯出時一個片段一個解碼器，跟著匯出的時間往後解（不用每一格 seek） */
+export class SequentialVideoReader {
+  private dec: VideoDecoder | null = null;
+  private queue: VideoFrame[] = [];
+  private held: VideoFrame | null = null;
+  private nextSample = 0;
+  private lastTime = -Infinity;
+  private flushed = false;
+  private error: Error | null = null;
+
+  private constructor(
+    private readonly samples: Sample[],
+    private readonly times: number[],
+    private readonly timescale: number,
+    private readonly config: VideoDecoderConfig,
+  ) {}
+
+  static async open(url: string, cache?: DemuxCache): Promise<SequentialVideoReader> {
+    if (typeof VideoDecoder === 'undefined') throw new Error('no WebCodecs');
+    const { file, track, samples } = await (cache ? cache.get(url) : demuxUrl(url));
+    const shift = editShift(track);
+    const config: VideoDecoderConfig = {
+      codec: track.codec,
+      codedWidth: track.video?.width ?? track.track_width,
+      codedHeight: track.video?.height ?? track.track_height,
+      description: description(file, track),
+    };
+    if (!(await VideoDecoder.isConfigSupported(config)).supported) throw new Error(`codec not supported: ${track.codec}`);
+    return new SequentialVideoReader(samples, samples.map((s) => s.cts / track.timescale + shift), track.timescale, config);
+  }
+
+  private reset(time: number) {
+    this.dec?.close();
+    this.queue.forEach((f) => f.close());
+    this.queue = [];
+    this.held?.close();
+    this.held = null;
+    this.error = null;
+    this.flushed = false;
+    // Samples are in decode order; B frames can make their presentation times nonmonotonic.
+    let first = 0;
+    let bestTime = -Infinity;
+    for (let i = 0; i < this.times.length; i++) {
+      const pts = this.times[i];
+      if (pts <= time && pts >= bestTime) { first = i; bestTime = pts; }
+    }
+    while (first > 0 && !this.samples[first].is_sync) first--;
+    this.nextSample = first;
+    this.dec = new VideoDecoder({
+      output: (frame) => this.queue.push(frame),
+      error: (e) => { this.error = e instanceof Error ? e : new Error(String(e)); },
+    });
+    this.dec.configure(this.config);
+  }
+
+  async frameAt(time: number, alive: () => boolean): Promise<VideoFrame | null> {
+    if (!this.samples.length) return null;
+    // A backwards remap would restart the same GOP every output frame. Let the
+    // exporter's seek path handle that clip instead.
+    if (time < this.lastTime - 1e-4) return null;
+    // 往後跳很遠（變速曲線的跳格、片段中間被剪掉一段）：目標前面有更近的關鍵影格就從那裡重新開始，不要一路解過去
+    if (this.dec && time - this.lastTime > 2) {
+      let k = -1;
+      for (let i = 0; i < this.samples.length; i++) if (this.samples[i].is_sync && this.times[i] <= time) k = i;
+      if (k > this.nextSample) this.dec = null;
+    }
+    if (!this.dec) this.reset(time);
+    this.lastTime = time;
+    const dec = this.dec!;
+    for (;;) {
+      if (!alive()) return null;
+      if (this.error) throw this.error;
+      while (this.queue.length && this.queue[0].timestamp / 1e6 <= time + 1e-4) {
+        this.held?.close();
+        this.held = this.queue.shift()!;
+      }
+      if (this.queue.length) return this.held ?? this.queue[0];
+      if (this.flushed) return this.held;
+      if (this.nextSample >= this.samples.length) {
+        await dec.flush();
+        this.flushed = true;
+        continue;
+      }
+      // Decode in order with bounded backpressure. The decoder emits presentation-ordered frames.
+      const end = Math.min(this.nextSample + 8, this.samples.length);
+      for (; this.nextSample < end; this.nextSample++) {
+        const s = this.samples[this.nextSample];
+        dec.decode(new EncodedVideoChunk({
+          type: s.is_sync ? 'key' : 'delta',
+          timestamp: Math.round(this.times[this.nextSample] * 1e6),
+          duration: Math.round(s.duration / this.timescale * 1e6),
+          data: s.data!,
+        }));
+        while (dec.decodeQueueSize > 12 && !this.error && alive()) await waitDequeue(dec);
+      }
+      if (!this.queue.length && this.nextSample < this.samples.length) await waitDequeue(dec);
+    }
+  }
+
+  close() {
+    this.dec?.close();
+    this.dec = null;
+    this.held?.close();
+    this.held = null;
+    this.queue.forEach((f) => f.close());
+    this.queue = [];
+  }
+}
+
 /**
  * 解碼 [from, to]（素材時間，秒）範圍內的每一格；skip(pts) = true 的格子不處理（已經算過）。
  * onFrame 處理完（推論完）才會繼續解碼，記憶體不會一直堆。

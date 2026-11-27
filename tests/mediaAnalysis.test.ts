@@ -1,4 +1,4 @@
-import { analyzeSamples, bestIn, frameStats, grayOf, peopleIn, peopleScore, scoreWindow, type FrameSample, type MediaInfo } from '../src/engine/mediaAnalysis';
+import { analyzeSamples, bestIn, faceIn, frameStats, grayOf, peopleIn, peopleScore, scoreWindow, type FrameSample, type MediaInfo } from '../src/engine/mediaAnalysis';
 
 let fails = 0;
 const ok = (condition: boolean, name: string) => {
@@ -43,5 +43,14 @@ ok(Number.isFinite(bestIn(allCuts, 3, 0, [], zero)), 'all cuts fallback');
   ok(peopleScore([]) === 0 && peopleScore([{ h: 0.5 }]) === 1 && Math.abs(peopleScore([{ h: 0.05 }, { h: 0.1 }]) - 0.4) < 1e-9, 'peopleScore 看最大的臉');
 }
 
+// 兩個人輪流是最大的臉：只平均中間那格的那個人，不會落在兩人中間
+{
+  const A = { x: 0.25, y: 0.4, h: 0.2 }, B = { x: 0.75, y: 0.4, h: 0.2 };
+  const two = { step: 0.5, faces: [A, B, A, B, A, B] } as unknown as MediaInfo;
+  const f = faceIn(two, 0, 3)!;
+  ok(Math.abs(f.x - 0.5) > 0.2, 'faceIn does not average two people');
+  const one = { step: 0.5, faces: [A, { ...A, x: 0.27 }, null, A] } as unknown as MediaInfo;
+  ok(Math.abs(faceIn(one, 0, 2)!.x - 0.255) < 0.01, 'faceIn averages the same person');
+}
 console.log(fails ? `\n${fails} media analysis failures` : '\nMedia analysis passed');
 if (fails) process.exit(1);

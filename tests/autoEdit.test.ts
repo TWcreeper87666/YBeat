@@ -73,7 +73,7 @@ const always: Recipe = { ...RECIPES.rhythm, id: 'custom', transitionRate: 1, sec
 const single = withOptions(options({ transitions: [{ id: 'one', strength: 0.5 }] }), 42, always);
 ok(single.shots.filter((s) => s.transition?.moduleId === 'one').length > single.shots.length / 2, '只開一種轉場：每個剪接點都可以用（不再隔鏡）');
 ok(single.recipe === 'custom', '自訂配方 id 保留');
-ok(single.shots.every((s) => !s.transition || s.transition.beats === (s.b0 === 32 || s.b0 === 64 ? 1 : 0.5)), '轉場長度依切點加倍');
+ok(single.shots.every((s) => !s.transition || s.transition.beats === (s.b0 === 32 || s.b0 === 64 ? always.transitionBeats * 2 : always.transitionBeats)), '轉場長度依切點加倍');
 ok(withOptions(options({ transitions: [{ id: 'soft', strength: 0.1 }] }), 42, always).shots.some((s) => s.transition?.moduleId === 'soft'), '純柔和轉場可用');
 ok(withOptions(options({ transitions: [{ id: 'hard', strength: 0.9 }] }), 42, always).shots.some((s) => s.transition?.moduleId === 'hard'), '純強烈轉場可用');
 const mixed = options({ transitions: [{ id: 'soft', strength: 0 }, { id: 'mid', strength: 0.5 }, { id: 'hard', strength: 1 }] });
@@ -135,6 +135,15 @@ ok(popped.pops.every((p, i) => i === 0 || p.b1 - popped.pops[i - 1].b1 >= 16), '
     { b0: 64, b1: 96, energy: 0.3, kind: 'body' }, { b0: 96, b1: 128, energy: 0.9, kind: 'body' }] };
   const multi = planEdit({ ...input, music: twoChorus, media: three, options: popOptions });
   ok(multi.pops.length >= 2 && new Set(multi.pops.map((p) => p.mediaId)).size === multi.pops.length, `每次主體跳出換一張圖：${multi.pops.map((p) => p.mediaId)}`);
+  // 再一版：前一版用過的主體往後排
+  const once = planEdit({ ...input, media: three, range: [32, 70], options: popOptions });
+  const used = once.pops.map((p) => p.mediaId);
+  const again = planEdit({ ...input, seed: 7, media: three, range: [32, 70], options: options({ pops: { variants: ['step'], per32: 4, recentMedia: used } }) });
+  ok(used.length > 0 && again.pops.length > 0 && again.pops.every((p) => !used.includes(p.mediaId)), `再一版換別的主體：${used} → ${again.pops.map((p) => p.mediaId)}`);
+  // 揭露畫面（剪影窗）：每版不固定同一張
+  const win: PlanMedia[] = [...three.map((m) => ({ ...m, pop: { ...m.pop!, path: 'M0 0L1 0L1 1Z' } })), ...['r1', 'r2', 'r3'].map((id) => ({ id, kind: 'image' as const, duration: 0, pop: { ok: false, centered: false, cx: 0, cy: 0 } }))];
+  const reveals = new Set(Array.from({ length: 12 }, (_, seed) => planEdit({ ...input, seed, media: win, range: [32, 70], options: options({ pops: { variants: ['silhouetteWindow'], per32: 4 } }) }).pops[0]?.revealMediaId));
+  ok(reveals.size > 1, `剪影窗的揭露畫面會換：${[...reveals]}`);
 }
 const noPops = planEdit({ ...input, options: options({ pops: { variants: [], per32: 4 } }) });
 ok(plan.pops.length === 0 && noPops.pops.length === 0 && JSON.stringify(plan.shots) === JSON.stringify(noPops.shots), 'disabled pops preserve shots');
@@ -402,5 +411,46 @@ const rotated = planEdit({ ...input, media: rotationMedia });
 ok(rotated.shots.every((s, i) => i === 0 || s.mediaId !== rotated.shots[i - 1].mediaId) &&
   Array.from({ length: Math.floor(rotated.shots.length / 3) }, (_, i) => rotated.shots.slice(i * 3, i * 3 + 3))
     .every((round) => new Set(round.map((s) => s.mediaId)).size === 3), 'roles and weights preserve rotation');
+
+// 分段：轉場 / 特效層 / 鏡頭長度只在那一段改
+{
+  const rule = (id: string, moduleId: string, span?: [number, number]): NonNullable<PlanOptions['rules']>[number] =>
+    ({ id, moduleId, when: 'beat', every: 1, levels: [0, 1, 2], chance: 1, group: 'shake', hit: false, ...(span ? { span } : {}) });
+  const all = { ...RECIPES.rhythm, transitionRate: 1, sectionTransitionRate: 1 };
+  const z = withOptions(options({
+    accents: [], dropHit: null,
+    transitions: [{ id: 'tr-crossfade', strength: 0.1 }, { id: 'tr-flash', strength: 1 }],
+    rules: [rule('style', 'fx-shake'), rule('zone', 'fx-glitch', [80, 96])],
+    zones: [
+      { b0: 16, b1: 40, transitions: null, beatsPerShot: 8 },
+      { b0: 80, b1: 96, transitions: [{ id: 'tr-push', strength: 0.5 }], fxRate: 0 },
+    ],
+  }), 42, all);
+  const inside = (b: number, b0: number, b1: number) => b >= b0 && b < b1;
+  ok([16, 40, 80, 96].every((b) => z.shots.some((s) => s.b0 === b)), '分段頭尾是剪接點');
+  ok(z.shots.filter((s) => inside(s.b0, 16, 40)).every((s) => !s.transition), '分段不用轉場');
+  ok(z.shots.filter((s) => inside(s.b0, 81, 96)).every((s) => s.transition?.moduleId === 'tr-push') && z.shots.some((s) => inside(s.b0, 81, 96)), '分段只用指定的轉場');
+  ok(z.shots.filter((s) => inside(s.b0, 16, 40)).some((s) => s.b1 - s.b0 === 8), '分段固定鏡頭長度');
+  ok(z.overlays.filter((o) => o.moduleId === 'fx-shake').every((o) => o.b1 <= 80 || o.b0 >= 96), '分段關掉風格特效層');
+  ok(z.overlays.some((o) => o.moduleId === 'fx-glitch') && z.overlays.filter((o) => o.moduleId === 'fx-glitch').every((o) => o.b0 >= 80 && o.b1 <= 96), '分段自己的特效層只在範圍內');
+  ok(z.overlays.some((o) => o.moduleId === 'fx-shake' && o.b0 < 80), '分段外照風格');
+  const half = withOptions(options({ accents: [], dropHit: null, rules: [{ ...rule('style', 'fx-shake'), chance: 0.8 }], zones: [{ b0: 0, b1: 32, fxRate: 0.5 }] }));
+  ok(half.overlays.some((o) => o.b0 < 32 && o.trigger?.chance === 0.4) && half.overlays.some((o) => o.b0 >= 32 && o.trigger?.chance === 0.8), '分段特效量乘上觸發機率');
+  // 分段的特效量不影響氛圍類（暗角、微弱頻閃常駐）
+  const amb = withOptions(options({ accents: [], dropHit: null, rules: [{ id: 'vig', moduleId: 'fx-vignette', when: 'section', levels: [0, 1, 2], chance: 1, group: 'ambient', hit: false }], zones: [{ b0: 0, b1: 32, fxRate: 0 }] }));
+  ok(amb.overlays.some((o) => o.moduleId === 'fx-vignette' && o.b0 === 0), '分段特效量 0% 時氛圍照樣有');
+  const sp = withOptions(options({ speed: { variants: ['beatPulse'], per32: 0, intensity: 0.5, every: true }, zones: [{ b0: 32, b1: 64, noSpeed: true }] }), 42, speedRecipe);
+  ok(sp.shots.filter((s) => inside(s.b0, 32, 64)).every((s) => !s.speed) && sp.shots.some((s) => s.speed && !inside(s.b0, 32, 64)), '分段不變速');
+}
+// 鎖住的範圍：不排鏡頭、不放跳出、不疊特效；前後的鏡頭剛好接到範圍兩端
+{
+  const lk = withOptions(options({ accents: [], dropHit: null, pops: { variants: ['step'], per32: 4 },
+    rules: [{ id: 'sh', moduleId: 'fx-shake', when: 'beat', every: 1, levels: [0, 1, 2], chance: 1, group: 'shake', hit: false }],
+    locked: { shots: [[60, 70]], fx: [[20, 30]] } }));
+  ok(lk.shots.every((s) => s.b1 <= 60 || s.b0 >= 70), '鎖住的範圍不排鏡頭');
+  ok(lk.shots.some((s) => s.b1 === 60) && lk.shots.some((s) => s.b0 === 70), '前後的鏡頭接到鎖住的範圍兩端');
+  ok(lk.pops.every((p) => p.b1 + 1 <= 60 || p.b1 - 4 >= 70), '鎖住的範圍附近不放跳出');
+  ok(lk.overlays.every((o) => o.b1 <= 20 || o.b0 >= 30), '鎖住的特效那幾拍不再疊特效');
+}
 console.log(fails ? `\n${fails} 項測試失敗` : '\n全部通過');
 if (fails) process.exit(1);

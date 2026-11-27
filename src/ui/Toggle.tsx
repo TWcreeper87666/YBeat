@@ -23,7 +23,7 @@ const ownControl = (e: React.PointerEvent) => {
   const el = (e.target as HTMLElement).closest('input, button, select, textarea, a');
   return !!el && el !== e.currentTarget && !el.closest('.switch');
 };
-function paintProps(v: boolean, on: (v: boolean) => void) {
+export function paintProps(v: boolean, on: (v: boolean) => void) {
   return {
     onPointerDown: (e: React.PointerEvent) => {
       if (e.button !== 0 || ownControl(e)) return;

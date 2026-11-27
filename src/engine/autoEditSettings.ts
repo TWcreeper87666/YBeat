@@ -78,8 +78,24 @@ export type StyleKey = RecipeId | 'custom' | `my:${string}`;
 /** 自己存的風格：鏡頭節奏、特效層、轉場權重、密度、強度 */
 export interface MyStyle { id: string; name: string; params: Recipe; rules: FxRule[]; trWeights: Record<string, number>; density: number; intensity: number }
 
-/** 要剪的歌：素材的 a..b 秒；chorus = 使用者標的副歌（歌的秒數，空 / 沒有 = 自動找） */
-export interface AeSong { mediaId: string; a: number; b: number; chorus?: number[] }
+/** 要剪的歌：素材的 a..b 秒；chorus = 使用者標的副歌（歌的秒數，空 / 沒有 = 自動找）；zones = 分段設定（沒有 = 照段落自動分；[] = 不分段） */
+export interface AeSong { mediaId: string; a: number; b: number; chorus?: number[]; zones?: AeZone[] }
+
+/**
+ * 分段：歌的 t0..t1 秒（吸附在拍上、不重疊）；沒寫的欄位 = 照風格。
+ * tr：null = 不用轉場、陣列 = 只用這些；fxRate = 風格特效層的機率倍數（0 = 不出現）；rules = 這段自己的特效層；prompt = 給 AI 的指示
+ */
+export interface AeZone {
+  id: string; t0: number; t1: number;
+  tr?: string[] | null;
+  trRate?: number;
+  fxRate?: number;
+  rules?: FxRule[];
+  beatsPerShot?: number;
+  noPop?: true;
+  noSpeed?: true;
+  prompt?: string;
+}
 
 /** 指定的主角：臉的特徵（SFace 128 維）+ 臉部縮圖（data URL） */
 export interface AeLead { emb: number[]; thumb: string; /** 只有別人的片段也用（追蹤、推近照樣只對主角） */ mixed?: true }
@@ -115,14 +131,18 @@ export function aeFootage(s: S, st: AutoEditSettings): Footage[] {
   return out;
 }
 
+/** 轉場的權重：沒列到的用 '*'（風格只用一個轉場時 = 0），都沒有 = 1 */
+export const trWeight = (w: Record<string, number>, id: string) => w[id] ?? w['*'] ?? 1;
+
 /** 風格的特效層 + 轉場權重（複製一份，面板改了不會動到內建的） */
 export const styleFields = (id: RecipeId): Pick<AutoEditSettings, 'rules' | 'trWeights'> =>
   ({ rules: structuredClone(STYLES[id].rules), trWeights: { ...STYLES[id].trWeights } });
 
-/** 選風格：鏡頭節奏、特效層、轉場權重都換成風格的；速度感另外把跟拍變速調多 */
+/** 選風格：鏡頭節奏、特效層、轉場權重都換成風格的；穩關閉變速，速度感加強變速。 */
 export function styleSettings(id: RecipeId): Partial<AutoEditSettings> {
   const sp = STYLES[id].speed;
-  return { recipe: id, params: { ...RECIPES[id] }, ...styleFields(id), ...(sp ? { speedOn: true, speedsPer32: sp.per32, speedIntensity: sp.intensity } : {}) };
+  return { recipe: id, params: { ...RECIPES[id] }, ...styleFields(id),
+    ...(id === 'calm' ? { speedOn: false } : sp ? { speedOn: true, speedsPer32: sp.per32, speedIntensity: sp.intensity } : {}) };
 }
 
 /** 選自己的風格 */
@@ -194,8 +214,8 @@ trackHistory(
   (v) => useAutoEdit.setState(v as Partial<AutoEditSettings>),
 );
 
-/** 上一版還能不能被「再一版」換掉（autoEditApply 設定；給 AI 工具看，避免 import 循環） */
-export const lastTake = { replaceable: () => false };
+/** 上一版還能不能被「再一版」換掉、目前的分段（autoEditApply 設定；給 AI 工具看，避免 import 循環） */
+export const lastTake = { replaceable: () => false, zones: (): { auto: boolean; list: AeZone[] } => ({ auto: true, list: [] }) };
 
 /** 可以當歌的素材：有節拍的音訊 / 影片；音訊排前面，再來長的排前面 */
 export function songMedia(s: S): Media[] {

@@ -4,6 +4,7 @@ import type { ClipFx, FxItem, TransitionRef } from './store';
 import type { Transform } from './engine/transform';
 import type { TextStyle } from './engine/text';
 import { BUILTIN_COMBOS } from './modules/combos';
+import type { AnimItem } from './engine/animation';
 
 /** 使用者存的文字樣式（文字素材庫的「我的樣式」）：連同位置、轉場、片段特效一起存 */
 export interface UserTextStyle {
@@ -47,6 +48,8 @@ interface Prefs {
   proxyQuality: ProxyQuality;
   textStyles: UserTextStyle[];
   fxCombos: FxCombo[];
+  /** 我的動畫：存的是整個動畫（圖層、關鍵影格、每個圖片位置用的素材；位置 / 軌道不算） */
+  animPresets: AnimPreset[];
   /** 介面主題 */
   theme: Theme;
   /** 疊在預覽上的框的顏色 */
@@ -54,10 +57,13 @@ interface Prefs {
   set(p: Partial<Omit<Prefs, 'set'>>): void;
 }
 
+/** 我的動畫（素材 id 跨專案不一定在：拿來用時找不到的位置變成待補） */
+export interface AnimPreset { id: string; name: string; item: AnimItem }
+
 export const usePrefs = create<Prefs>()(
-  persist((set) => ({ stillDur: 2, transDur: 0.4, autosave: true, proxy: true, proxyQuality: 'medium', textStyles: [], fxCombos: [], theme: 'dark', overlay: OVERLAY_DEFAULT, set: (p) => set(p) }), {
+  persist((set) => ({ stillDur: 2, transDur: 0.4, autosave: true, proxy: true, proxyQuality: 'medium', textStyles: [], fxCombos: [], animPresets: [], theme: 'dark', overlay: OVERLAY_DEFAULT, set: (p) => set(p) }), {
     name: 'ybeat-prefs',
-    partialize: (s) => ({ stillDur: s.stillDur, transDur: s.transDur, autosave: s.autosave, proxy: s.proxy, proxyQuality: s.proxyQuality, textStyles: s.textStyles, fxCombos: s.fxCombos, theme: s.theme, overlay: s.overlay }),
+    partialize: (s) => ({ stillDur: s.stillDur, transDur: s.transDur, autosave: s.autosave, proxy: s.proxy, proxyQuality: s.proxyQuality, textStyles: s.textStyles, fxCombos: s.fxCombos, animPresets: s.animPresets, theme: s.theme, overlay: s.overlay }),
   }),
 );
 

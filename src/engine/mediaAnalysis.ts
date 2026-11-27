@@ -62,16 +62,24 @@ export function bestFace(faces: { x: number; y: number; h: number }[]): FaceBox 
 export function faceIn(info: MediaInfo, t0: number, t1: number): FaceBox | null {
   const f = info.faces;
   if (!f?.length) return null;
-  let x = 0, y = 0, h = 0, n = 0, any = false;
+  // 每格的「最大的臉」可能換人（兩個人同框）：以離中間最近那格的臉為準，只平均同一個人（位置接近）的格，不然會平均到兩人中間
+  let ref: FaceBox | null = null, refD = Infinity, any = false;
+  const mid = (t0 + t1) / 2;
   for (let i = 0; i < f.length; i++) {
     const t = i * info.step;
     if (t < t0 || t >= t1) continue;
     any = true;
-    const b = f[i];
-    if (b) { x += b.x; y += b.y; h += b.h; n++; }
+    if (f[i] && Math.abs(t - mid) < refD) { refD = Math.abs(t - mid); ref = f[i]; }
   }
   if (!any) return f[Math.min(f.length - 1, Math.max(0, Math.round((t0 + t1) / (2 * info.step))))] ?? null;
-  return n ? { x: x / n, y: y / n, h: h / n } : null;
+  if (!ref) return null;
+  let x = 0, y = 0, h = 0, n = 0;
+  for (let i = 0; i < f.length; i++) {
+    const t = i * info.step, b = f[i];
+    if (t < t0 || t >= t1 || !b || Math.abs(b.x - ref.x) > ref.h * 1.5 || Math.abs(b.y - ref.y) > ref.h) continue;
+    x += b.x; y += b.y; h += b.h; n++;
+  }
+  return { x: x / n, y: y / n, h: h / n, ...(ref.w !== undefined ? { w: ref.w } : {}) };
 }
 
 /** 一格畫面的「有人」分數：最大那張臉的高度佔畫面 25% 以上 = 1 */

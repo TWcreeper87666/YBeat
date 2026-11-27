@@ -54,6 +54,9 @@ ok(empty.area === 0 && empty.edge === 0 && empty.bbox.every((v) => v === 0), 'em
   // 整個人站在畫面中間：身體沒碰到下緣，但往下延伸夠多
   const standing = (x: number, y: number) => head(x, y) || (x >= 95 && x < 145 && y >= 115 && y < 200);
   ok(!!keepFace(mask(standing), size, face), '身體沒碰到下緣、往下延伸夠多：可以');
+  // 臉框偏到肩膀（人已經移開，框還在舊位置）：框裡只有身體的上緣，沒有頭
+  const shifted = { x: 120 / size, y: 120 / size, w: 50 / size, h: 50 / size };
+  ok(keepFace(mask(body), size, shifted) === null, '臉框落在身體上（沒有頭）：不能用');
 }
 
 const frame = (s: MatteScore, mw = 1920, mh = 1080) => popFraming(s, mw, mh, 1920, 1080);

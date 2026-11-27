@@ -3,7 +3,7 @@
  * 預覽 / 匯出時直接拿最接近的那一格。推論在 matteWorker.ts 裡跑。
  */
 import { create } from 'zustand';
-import type { Clip, Media, Module } from '../store';
+import { useStore, type Clip, type Media, type Module } from '../store';
 import { clipSource } from './remap';
 import type { MatteReq, MatteRes } from './matteWorker';
 import { hasKeyIn, insertKey, pickFrame, snapFps, toKey } from './matteIndex';
@@ -484,6 +484,13 @@ export function requestMatte(clip: Clip, media: Media, modules: Map<string, Modu
   const key = `${media.id}|${clip.in}|${clip.duration}|${clip.rate}|${JSON.stringify(clip.remap)}`;
   if (requested.get(clip.id) === key) return;
   requested.set(clip.id, key);
+  // 動畫的圖層（id = anim:<動畫>:<圖片位置>:<圖層>）不在時間軸上：只用那一格（定格），動畫還用著這張就繼續算
+  if (clip.id.startsWith('anim:')) {
+    const [, animId, slotId] = clip.id.split(':');
+    const still = () => !!useStore.getState().anims.find((a) => a.id === animId)?.slots.some((s) => s.id === slotId && s.mediaId === media.id && Math.abs(s.sourceTime - clip.in) < 1e-6);
+    void ensureMatte(media, [media.kind === 'image' ? 0 : +clip.in.toFixed(4)], { id: clip.id, still });
+    return;
+  }
   void ensureMatte(media, matteFrames(clip, media, modules), { id: clip.id, still: clipStill(clip, (c) => !!c.aiMatte) });
 }
 

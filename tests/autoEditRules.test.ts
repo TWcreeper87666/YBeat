@@ -1,6 +1,9 @@
 import { DEFAULT_OPTIONS, planEdit, RECIPES, type PlanInput, type PlanOptions, type RuleOpt } from '../src/engine/autoEdit';
 import type { MusicInfo } from '../src/engine/musicAnalysis';
 import { chanceWindow, hitWindow, picked, triggerMarks, type FxTrigger } from '../src/engine/trigger';
+import { STYLES, STYLE_IDS } from '../src/engine/autoEditStyles';
+import { BUILTIN_MODULES } from '../src/modules/builtin';
+import { fxGroup, transitionOpt } from '../src/engine/autoEditPools';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -21,6 +24,29 @@ const rule = (id: string, when: RuleOpt['when'], group: RuleOpt['group'], extra:
 const plan = (rules: RuleOpt[], changes: Partial<PlanOptions> = {}, request: Partial<PlanInput> = {}) =>
   planEdit({ ...input, ...request, options: { ...DEFAULT_OPTIONS, transitions: [], accents: [], dropHit: null, rules, ...changes } });
 const noLane = <T extends { lane?: number }>(list: T[]) => list.map(({ lane: _l, ...rest }) => rest);
+
+// 內建風格：高潮逐拍換鏡、段落固定轉場、每個切點震動、氛圍整段鋪著。
+{
+  const fastBeats = Array.from({ length: 32 }, (_, i) => ({ t: i * 60 / 170, down: i % 4 === 0 }));
+  const hot: MusicInfo = { energy: Array(32).fill(0.9), level: Array(32).fill(2),
+    sections: [{ b0: 0, b1: 16, energy: 0.9, kind: 'body' }, { b0: 16, b1: 32, energy: 0.9, kind: 'drop' }],
+    drops: [16], accents: [] };
+  for (const id of STYLE_IDS) {
+    const style = STYLES[id];
+    const transitions = BUILTIN_MODULES.filter((m) => m.kind === 'transition' && style.trWeights[m.id] > 0)
+      .map(transitionOpt);
+    const rules: RuleOpt[] = style.rules.map((r) => {
+      const mod = BUILTIN_MODULES.find((m) => m.id === r.moduleId)!;
+      return { ...r, group: r.drive ? 'ambient' : fxGroup(mod), hit: false };
+    });
+    const result = planEdit({ beats: fastBeats, music: hot, media: input.media, recipe: RECIPES[id], seed: 42,
+      options: { ...DEFAULT_OPTIONS, transitions, accents: [], dropHit: null, rules } });
+    ok(transitions.length === 1 && result.shots.slice(1).every((s) => !s.transition || s.transition.moduleId === transitions[0].id), `${id} 只用一種轉場`);
+    ok(result.overlays.some((o) => o.moduleId === 'fx-shake' && o.trigger?.kind === 'cut') &&
+      ['fx-vignette', 'fx-strobe'].every((moduleId) => result.overlays.some((o) => o.moduleId === moduleId && o.b0 === 0 && o.b1 === 16)), `${id} 剪接震動與整段氛圍`);
+    if (id !== 'calm') ok(result.shots.every((s) => s.b1 - s.b0 === 1), `${id} 170 BPM 高能量逐拍換鏡`);
+  }
+}
 
 // 可重現、加一層不影響其他東西
 {

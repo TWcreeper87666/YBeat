@@ -415,7 +415,7 @@ function propose(name: string, a: Record<string, unknown>, s: S): { p: Proposal;
     const targets = arr(a.targets).map((t) => parseTarget(s, t));
     if (!targets.length) fail('targets is empty');
     tooMany(targets.length);
-    if (targets.some((t) => t.kind === 'remap')) fail('remap cannot be removed; set_remap to remap-speed instead');
+    if (targets.some((t) => t.kind === 'remap')) fail('remap cannot be removed; set_remap to remap-none instead');
     return { p: { summary: $t('刪除 ×{0}', targets.length), op: { op: 'remove', targets } }, warn };
   }
   if (name === 'set_keyframes') {
@@ -610,7 +610,8 @@ function readTimeline(s: S, a: Record<string, unknown>) {
     tracks: { video: s.tracks.video.length, fx: s.tracks.fx.length, audio: s.tracks.audio.length },
     clips: cut(clips).map((c) => {
       const m = media.get(c.mediaId);
-      const remap = c.remap.moduleId !== 'remap-speed' || (c.remap.params.speed ?? 1) !== 1 ? { module: c.remap.moduleId, ...pv(c.remap.params) } : undefined;
+      const remap = c.remap.moduleId !== 'remap-none' && (c.remap.moduleId !== 'remap-speed' || (c.remap.params.speed ?? 1) !== 1)
+        ? { module: c.remap.moduleId, ...pv(c.remap.params) } : undefined;
       const fx = (c.effects ?? []).filter((f) => !f.base).map((f) => ({ id: f.id, module: f.moduleId, ...pv(f.params) }));
       return {
         id: c.id, track: c.track, start: r3(c.start), end: r3(c.start + c.duration),

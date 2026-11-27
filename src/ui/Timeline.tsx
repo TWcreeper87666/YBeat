@@ -1,4 +1,6 @@
 import { matteCoverage, requestMatte, useMatte } from '../engine/matte';
+import { animName } from './PopPicker';
+import { POP_VARIANTS, type PopVariant } from '../engine/subjectPop';
 import { openEditorWindow } from './EditorWindow';
 import { clickTransition, copyTransition, hasTransitionClipboard, pasteTransition, removeTransitions, useTrSel } from './trSelect';
 import { $t, displayName } from '../i18n';
@@ -9,7 +11,7 @@ import {
   trSelId, type TrScope, type TrSide,
   attachedAudioIds, linkedAudioOf,
   KIND_OF, LIST, TRACK_H, fxLevel, itemSpeed, keyOf, laneOf, mediaUsable, parseKey, projectDuration, spansOf, stretchPatch, useStore, displayRows,
-  type AnyItem, type AudioClip, type Clip, type DropFit, type FxItem, type ItemType, type Media, type PasteResult, type PlacementGhost, type TrackKind, type Tracks, type TimelineDropMode,
+  type AnyItem, type AnimItem, type AudioClip, type Clip, type DropFit, type FxItem, type ItemType, type Media, type PasteResult, type PlacementGhost, type TrackKind, type Tracks, type TimelineDropMode,
 } from '../store';
 import { sortClips, transitionWindow, makeCtx, type TrWindow } from '../engine/renderer';
 import { cutPoints, cutTracks, triggerBeats, triggerMarks } from '../engine/trigger';
@@ -42,6 +44,7 @@ import { boxCoverage, useBoxTracks } from '../engine/boxTrack';
 import { marqueeClamp } from './marqueeClamp';
 import { useResolvedTheme } from '../prefs';
 import { wheelViewAction } from './wheelView';
+import { focusSection } from './EffectControls';
 
 const SNAP_PX = 8;
 /** 時間軸預設長度（秒）；專案比這個長才依專案長度延伸 */
@@ -140,7 +143,7 @@ function nearest(v: number, pts: number[], _pps?: number) {
 function snapPoints(exclude: Set<string>, includePlayhead = true) {
   const s = useStore.getState();
   const pts = [0, ...(includePlayhead ? [s.time] : []), ...beatSnapPoints(), ...s.markers.filter((m) => !exclude.has(`marker:${m.id}`)).map((m) => m.t)];
-  (['clip', 'effect', 'audio'] as ItemType[]).forEach((type) => {
+  (['clip', 'effect', 'audio', 'anim'] as ItemType[]).forEach((type) => {
     for (const c of s[LIST[type]] as AnyItem[]) if (!exclude.has(keyOf(type, c.id))) pts.push(c.start, c.start + c.duration);
   });
   // 轉場的頭尾（跟著片段一起移動的、正在拖的那個轉場不算）
@@ -299,7 +302,7 @@ function stretchItems(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 
       useStore.getState().patchItems(patches);
       const affected: Record<string, { left: number; width: number }> = {};
       const now = useStore.getState();
-      for (const t of ['clip', 'effect', 'audio'] as ItemType[]) for (const other of now[LIST[t]] as AnyItem[]) {
+      for (const t of ['clip', 'effect', 'audio', 'anim'] as ItemType[]) for (const other of now[LIST[t]] as AnyItem[]) {
         const otherKey = keyOf(t, other.id);
         if (movingKeys.has(otherKey)) continue;
         const target = { lane: laneOf(t, other.track), start: other.start, duration: other.duration };
@@ -369,7 +372,7 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
   e.preventDefault();
   if (useStore.getState().tracks[KIND_OF[type]][it.track]?.locked) return;
   stopPreviewFx();
-  if (e.altKey && (type === 'clip' || type === 'audio')) return slipItem(e, type, it);
+  if (e.altKey && (type === 'clip' || type === 'audio') && !it.locked) return slipItem(e, type, it);
   const S = useStore.getState();
   const key = keyOf(type, it.id);
   if (e.ctrlKey || e.metaKey) return S.select({ type, id: it.id }, 'toggle');
@@ -384,7 +387,8 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
     .map(parseKey)
     .map(({ type: t, id }) => ({ type: t, it: (st[LIST[t]] as AnyItem[]).find((x) => x.id === id)! }))
     .filter((g) => g.it);
-  if (group.some((g) => st.tracks[KIND_OF[g.type]][g.it.track]?.locked)) return;
+  // 鎖住的片段（或選取裡有鎖住的）：只選取、不拖
+  if (group.some((g) => st.tracks[KIND_OF[g.type]][g.it.track]?.locked || g.it.locked)) return;
   const pps = st.pps;
   // 吸附點不含播放頭（播放頭會跟著片段走）
   const pts = snapPoints(new Set(st.selected)).slice(0);
@@ -439,11 +443,11 @@ function itemPointerDown(e: React.PointerEvent, type: ItemType, it: AnyItem) {
         const parent = t === 'audio' && attached.has(x.id) ? current.clips.find((c) => c.link && c.link === x.link) : undefined;
         return parent ? laneOf('clip', parent.track) : laneOf(t, x.track);
       };
-      const movedSpans = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((t) =>
+      const movedSpans = (['clip', 'effect', 'audio', 'anim'] as ItemType[]).flatMap((t) =>
         (current[LIST[t]] as AnyItem[]).filter((x) => movingKeys.has(keyOf(t, x.id)))
           .map((x) => ({ lane: visualLane(t, x), start: x.start, duration: x.duration })));
       const affected: Record<string, { left: number; width: number }> = {};
-      (['clip', 'effect', 'audio'] as ItemType[]).forEach((t) => {
+      (['clip', 'effect', 'audio', 'anim'] as ItemType[]).forEach((t) => {
         for (const other of current[LIST[t]] as AnyItem[]) {
           const k = keyOf(t, other.id);
           if (movingKeys.has(k)) continue;
@@ -492,6 +496,8 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
   e.preventDefault();
   const before = useStore.getState();
   const key = keyOf(type, it.id);
+  // 鎖住的片段：邊緣也不能拖，當作點片段本身
+  if (it.locked) return void (before.selected.includes(key) ? undefined : before.select({ type, id: it.id }));
   // Ctrl / Shift 多選中不小心點到邊緣：當作點片段本身（加選 / 範圍選取），不要打斷選取
   if ((e.ctrlKey || e.metaKey) && !before.selected.includes(key)) return before.select({ type, id: it.id }, 'toggle');
   if (e.shiftKey && !e.ctrlKey && !e.metaKey) return before.select({ type, id: it.id }, 'range');
@@ -503,7 +509,7 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
   const showEffectiveSnap = (snap: { v: number; d: number }, edge: number) => {
     showSnap(snapTargetIfApplied(snap, edge));
   };
-  const trimItems = (['clip', 'effect', 'audio'] as ItemType[]).flatMap((itemType) => {
+  const trimItems = (['clip', 'effect', 'audio', 'anim'] as ItemType[]).flatMap((itemType) => {
     const selectedIds = S.selected.map(parseKey).filter((selected) => selected.type === itemType).map((selected) => selected.id);
     if (itemType === type) selectedIds.push(it.id);
     return selectedItemsAtTime(S[LIST[itemType]] as AnyItem[], selectedIds, edge0, side === 'r' ? 'end' : 'start')
@@ -664,7 +670,7 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
     useStore.getState().patchItems(patches);
     speedMode = speeding;
     const affected: Record<string, { left: number; width: number }> = {};
-    for (const itemType of ['clip', 'effect', 'audio'] as ItemType[]) {
+    for (const itemType of ['clip', 'effect', 'audio', 'anim'] as ItemType[]) {
       for (const other of useStore.getState()[LIST[itemType]] as AnyItem[]) {
         const otherKey = keyOf(itemType, other.id);
         if (movingKeys.has(otherKey)) continue;
@@ -827,7 +833,7 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
   const n = useStore.getState().selected.length;
   const items: MenuItem[] = [
     // 編輯視窗：屬性 + 預覽的對話框（影片 / 文字片段、特效軌的特效）
-    ...(type !== 'audio' ? [{ label: $t('在編輯視窗中編輯…'), shortcut: $t('雙擊'), action: () => openItemEditor(type, it.id) }, { separator: true } as MenuItem] : []),
+    ...(type !== 'audio' && type !== 'anim' ? [{ label: $t('在編輯視窗中編輯…'), shortcut: $t('雙擊'), action: () => openItemEditor(type, it.id) }, { separator: true } as MenuItem] : []),
     // 分割（S）、修剪（Q / W）不放選單：快捷鍵與工具列就夠了
     { label: $t('節拍'), submenu: beatMenuItems() },
     { separator: true },
@@ -872,6 +878,8 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
     });
   }
   if (n > 1) items.push({ label: $t('合併片段'), shortcut: 'Ctrl+J', action: () => mergeOrHint() });
+  const allLocked = sel.every(({ type: t, id }) => (st[LIST[t]] as AnyItem[]).find((x) => x.id === id)?.locked);
+  items.push({ label: allLocked ? $t('解鎖') : $t('鎖住'), shortcut: 'Ctrl+L', action: () => S.toggleLockSelected() });
   if (grouped) items.push({ label: $t('解除群組'), shortcut: 'Ctrl+Shift+G', action: () => S.ungroupSelected() });
   else if (n > 1) items.push({ label: $t('建立群組'), shortcut: 'Ctrl+G', action: () => S.groupSelected() });
   if ((type === 'clip' || type === 'audio') && media) {
@@ -1146,14 +1154,41 @@ function SubjectBar({ clip, media, width, stack }: { clip: Clip; media: Media; w
 }
 
 /** 片段有追蹤：時間軸上的小標記（進度看底部的進度條） */
+function JumpBadge({ type, item, section, title, children, className = '' }: {
+  type: ItemType; item: AnyItem; section?: string; title: string; children: React.ReactNode; className?: string;
+}) {
+  return <button type="button" className={`badge click ${className}`} title={title}
+    onPointerDown={(e) => e.stopPropagation()}
+    onDoubleClick={(e) => e.stopPropagation()}
+    onClick={(e) => {
+      e.stopPropagation();
+      useStore.getState().select({ type, id: item.id });
+      if (section) focusSection(section);
+    }}>{children}</button>;
+}
+
+function LockBadge({ type, item }: { type: ItemType; item: AnyItem }) {
+  return <button type="button" className="lock-ico" title={$t('解鎖')}
+    onPointerDown={(e) => e.stopPropagation()}
+    onDoubleClick={(e) => e.stopPropagation()}
+    onClick={(e) => {
+      e.stopPropagation();
+      const s = useStore.getState();
+      if (s.tracks[KIND_OF[type]][item.track]?.locked) return;
+      // 選取它（連結、群組的一起）再解鎖：主體跳出那一組不會只解開一層
+      s.select({ type, id: item.id });
+      useStore.getState().toggleLockSelected();
+    }}><Lock size={10} /></button>;
+}
+
 function SubjectBadge({ clip, media }: { clip: Clip; media: Media }) {
   const st = useSubjectStatus(clip, media);
   const face = clip.subject?.kind === 'face';
   return (
-    <span className={`badge face ${st.err ? 'error' : ''}`} title={st.err ?? (face ? $t('臉部追蹤') : $t('追蹤'))}>
+    <JumpBadge type="clip" item={clip} section="track" className={`face ${st.err ? 'error' : ''}`} title={st.err ?? (face ? $t('臉部追蹤') : $t('追蹤'))}>
       {face ? <ScanFace size={10} /> : <Crosshair size={10} />}
       {st.err ? ' !' : ''}
-    </span>
+    </JumpBadge>
   );
 }
 
@@ -1169,11 +1204,11 @@ const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel,
   return (
     <div
       data-key={key}
-      className={`clip ${la ? 'av' : ''} ${isText ? 'textclip' : ''} ${sel ? 'sel' : ''} ${ok && !(drop === 'relink' && dropThumb) ? '' : 'missing'} ${drop ? 'drop-hint' : ''} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
+      className={`clip ${c.locked ? 'locked' : ''} ${c.duration * pps < NARROW ? 'narrow' : ''} ${la ? 'av' : ''} ${isText ? 'textclip' : ''} ${sel ? 'sel' : ''} ${ok && !(drop === 'relink' && dropThumb) ? '' : 'missing'} ${drop ? 'drop-hint' : ''} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
       style={{
         left: c.start * pps,
-        width: Math.max(4, c.duration * pps),
-        '--x': `${c.start * pps}px`, '--w': `${Math.max(4, c.duration * pps)}px`,
+        width: Math.max(1, c.duration * pps),
+        '--x': `${c.start * pps}px`, '--w': `${Math.max(1, c.duration * pps)}px`,
         '--overlap-left': `${preview.affected?.left ?? 0}px`, '--overlap-width': `${preview.affected?.width ?? 0}px`,
         backgroundImage: relinkGhost ? dropThumb : !isText && ok && m!.thumb ? `url(${m!.thumb})` : undefined,
       } as React.CSSProperties}
@@ -1189,16 +1224,22 @@ const ClipView = React.memo(function ClipView({ c, m, la, name: label, pps, sel,
       {tracking(c) && ok && !isText && m && <SubjectBar clip={c} media={m} width={c.duration * pps} stack={!!c.aiMatte} />}
       {c.link && <Link2 size={11} className="link-ico" />}
       {c.group && <Group size={11} className="link-ico" />}
+      {c.locked && <LockBadge type="clip" item={c} />}
       <span className="clip-name" title={`${name} · ${c.duration.toFixed(2)}s`}>{name}</span>
-      {remapName && <span className="badge"><Gauge size={10} /> {remapName}</span>}
-      {!!c.effects?.some((f) => !f.base) && <span className="badge" title={$t('片段特效')}><Sparkles size={10} /> {c.effects!.filter((f) => !f.base).length}</span>}
+      {(remapName || +sp.toFixed(2) !== 1) && <JumpBadge type="clip" item={c} section="speed" title={`${remapName ?? $t('變速')} · ${+sp.toFixed(2)}×`}><Gauge size={10} /></JumpBadge>}
+      {!!c.effects?.some((f) => !f.base) && <JumpBadge type="clip" item={c} section={`cfx.${c.effects!.find((f) => !f.base)!.id}`} title={$t('片段特效')}><Sparkles size={10} /> {c.effects!.filter((f) => !f.base).length}</JumpBadge>}
       {tracking(c) && ok && !isText && m && <SubjectBadge clip={c} media={m} />}
       {drop === 'replace' && <span className="badge replace-tag"><Replace size={10} /> {$t('取代')}</span>}
       {drop === 'effect' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段特效')}</span>}
       {drop === 'mask' && <span className="badge replace-tag"><Plus size={10} /> {$t('片段遮罩')}</span>}
-      {+sp.toFixed(2) !== 1 && <span className="badge">{+sp.toFixed(2)}×</span>}
       <OpBadge k={key} />
-      {ok && !isText && m!.hasAudio && m!.kind === 'video' && (la ? la.volume === 0 : c.volume === 0 && !c.audioSplit) && <span className="badge"><VolumeX size={10} /></span>}
+      {ok && !isText && m!.hasAudio && m!.kind === 'video' && (la ? la.volume === 0 : c.volume === 0 && !c.audioSplit) && (
+        <span className="badge click" title={$t('取消靜音')}
+          onPointerDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); const st = useStore.getState(); if (la) st.updateAudio(la.id, { volume: 1 }); else st.updateClip(c.id, { volume: 1 }); }}>
+          <VolumeX size={10} />
+        </span>
+      )}
       {la && (
         <div className="av-strip" title={$t('連結的音訊（右鍵「取消影音連結」可以分開成獨立的音訊片段）')}>
           {ok && <Waveform media={m!} inT={la.in} dur={la.duration * (la.rate ?? 1)} width={Math.max(4, c.duration * pps)} gain={{ volume: la.volume, fadeIn: la.fadeIn, fadeOut: la.fadeOut, len: la.duration }} />}
@@ -1218,10 +1259,10 @@ const TransitionView = React.memo(function TransitionView({ c, prev, next, side,
   const hint = w.mode === 'head' ? $t('從透明轉入') : w.mode === 'tail' ? $t('轉到透明') : '';
   return (
     <div
-      className={`transition ${w.mode} ${sel ? 'sel' : ''}`}
+      className={`transition ${w.mode} ${w.d * pps < 16 ? 'narrow' : ''} ${sel ? 'sel' : ''}`}
       data-tr={`${c.id}:${side}`}
       title={$t('{0}（拖兩側調整長度）', name) + (hint ? ` · ${hint}` : '')}
-      style={{ left: w.t0 * pps, width: Math.max(14, w.d * pps) }}
+      style={{ left: w.t0 * pps, width: Math.max(2, w.d * pps) }}
       onPointerDown={(e) => {
         e.stopPropagation();
         if (e.button === 0) { stopPreviewFx(); clickTransition(trSelId(c.id, side), e); }
@@ -1263,8 +1304,8 @@ const FxView = React.memo(function FxView({ f, pps, sel, name, drop, masked, mar
   return (
     <div
       data-key={key}
-      className={`fxitem ${tr ? 'trblock' : ''} ${sel ? 'sel' : ''} ${drop ? 'drop-hint replace' : ''} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
-      style={{ left: f.start * pps, width: Math.max(4, f.duration * pps), '--x': `${f.start * pps}px`, '--w': `${Math.max(4, f.duration * pps)}px`, '--overlap-left': `${preview.affected?.left ?? 0}px`, '--overlap-width': `${preview.affected?.width ?? 0}px` } as React.CSSProperties}
+      className={`fxitem ${f.locked ? 'locked' : ''} ${f.duration * pps < NARROW ? 'narrow' : ''} ${tr ? 'trblock' : ''} ${sel ? 'sel' : ''} ${drop ? 'drop-hint replace' : ''} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
+      style={{ left: f.start * pps, width: Math.max(1, f.duration * pps), '--x': `${f.start * pps}px`, '--w': `${Math.max(1, f.duration * pps)}px`, '--overlap-left': `${preview.affected?.left ?? 0}px`, '--overlap-width': `${preview.affected?.width ?? 0}px` } as React.CSSProperties}
       onPointerDown={(e) => itemPointerDown(e, 'effect', f)}
       onDoubleClick={() => openItemEditor('effect', f.id)}
       onContextMenu={(e) => itemMenu(e, 'effect', f)}
@@ -1273,9 +1314,10 @@ const FxView = React.memo(function FxView({ f, pps, sel, name, drop, masked, mar
       {marks && marks.split(',').map((m) => <i key={m} className="fx-trig" style={{ left: Number(m) * pps }} />)}
       {f.trigger && (tr ? <ArrowRightLeft size={10} className="link-ico" /> : <Repeat size={10} className="link-ico" />)}
       {f.group && <Group size={11} className="link-ico" />}
+      {f.locked && <LockBadge type="effect" item={f} />}
       <span className="clip-name" title={`${name} · ${f.duration.toFixed(2)}s`}>{name}</span>
-      {!!f.stack?.length && <span className="badge" title={$t('另外疊加 {0} 個特效', f.stack.length)}><Layers size={10} /> {f.stack.length}</span>}
-      {masked && <span className="badge" title={$t('有遮罩')}><CircleDashed size={10} /></span>}
+      {!!f.stack?.length && <JumpBadge type="effect" item={f} section={`sfx.${f.stack![0].id}`} title={$t('另外疊加 {0} 個特效', f.stack.length)}><Layers size={10} /> {f.stack.length}</JumpBadge>}
+      {masked && <JumpBadge type="effect" item={f} section="fx.mask" title={$t('有遮罩')}><CircleDashed size={10} /></JumpBadge>}
       {drop && <span className="badge replace-tag"><Replace size={10} /> {$t('取代')}</span>}
       <OpBadge k={key} />
       <div className="handle r" onPointerDown={(e) => resizeItem(e, 'effect', f, 'r', false)} />
@@ -1283,17 +1325,43 @@ const FxView = React.memo(function FxView({ f, pps, sel, name, drop, masked, mar
   );
 });
 
+/** 動畫方塊的名稱：自己取的 → 範本的名稱 → 「動畫」 */
+const animLabel = (a: AnimItem) => a.name ?? (a.presetId && (POP_VARIANTS as string[]).includes(a.presetId) ? animName(a.presetId as PopVariant) : $t('動畫'));
+
+const AnimView = React.memo(function AnimView({ a, pps, sel, missing }: { a: AnimItem; pps: number; sel: boolean; missing: boolean }) {
+  const key = keyOf('anim', a.id);
+  const preview = movePreview(key);
+  const opCls = useOpCls(key);
+  return <div data-key={key}
+    className={`fxitem ${a.locked ? 'locked' : ''} ${sel ? 'sel' : ''} ${missing ? 'missing' : ''} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
+    style={{ left: a.start * pps, width: Math.max(1, a.duration * pps), '--x': `${a.start * pps}px`, '--w': `${Math.max(1, a.duration * pps)}px` } as React.CSSProperties}
+    onPointerDown={(e) => itemPointerDown(e, 'anim', a)} onContextMenu={(e) => itemMenu(e, 'anim', a)}>
+    <div className="handle l" onPointerDown={(e) => resizeItem(e, 'anim', a, 'l', false)} />
+    {a.locked && <LockBadge type="anim" item={a} />}
+    <span className="clip-name" title={animLabel(a)}>{animLabel(a)}</span>
+    {missing && <span className="badge" title={$t('缺少素材')}><TriangleAlert size={10} /></span>}
+    <OpBadge k={key} />
+    <div className="handle r" onPointerDown={(e) => resizeItem(e, 'anim', a, 'r', false)} />
+  </div>;
+});
+
+/**
+ * 比左右內距（10px × 2 + 邊框）還窄的片段：border-box 的寬度撐不下內距、邊框，畫出來會比實際長度寬，
+ * 縮小時看起來跟其他軌道對不齊 → 拿掉內距和邊框、不畫裡面的東西（寬度照實際長度，最少 1px）
+ */
+const NARROW = 24;
+
 const AudioView = React.memo(function AudioView({ a, m, pps, sel }: { a: AudioClip; m: Media | undefined; pps: number; sel: boolean }) {
   const label = a.name ?? m?.name ?? $t('未知素材');
   const key = keyOf('audio', a.id);
   const preview = movePreview(key);
   const opCls = useOpCls(key);
   const ok = mediaUsable(m);
-  const w = Math.max(4, a.duration * pps);
+  const w = Math.max(1, a.duration * pps);
   return (
     <div
       data-key={key}
-      className={`audioitem ${sel ? 'sel' : ''} ${ok ? '' : 'missing'} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
+      className={`audioitem ${a.locked ? 'locked' : ''} ${w < NARROW ? 'narrow' : ''} ${sel ? 'sel' : ''} ${ok ? '' : 'missing'} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
       style={{ left: a.start * pps, width: w, '--x': `${a.start * pps}px`, '--w': `${w}px`, '--overlap-left': `${preview.affected?.left ?? 0}px`, '--overlap-width': `${preview.affected?.width ?? 0}px` } as React.CSSProperties}
       title={ok ? undefined : $t('素材遺失：右鍵「重新連結素材…」')}
       onPointerDown={(e) => itemPointerDown(e, 'audio', a)}
@@ -1302,7 +1370,7 @@ const AudioView = React.memo(function AudioView({ a, m, pps, sel }: { a: AudioCl
       {ok && <Waveform media={m} inT={a.in} dur={a.duration * (a.rate ?? 1)} width={w} gain={{ volume: a.volume, fadeIn: a.fadeIn, fadeOut: a.fadeOut, len: a.duration }} />}
       {ok && <AudioBeats a={a} pps={pps} />}
       {ok && a.take && <AudioChorus a={a} pps={pps} />}
-      {+(a.rate ?? 1).toFixed(2) !== 1 && <span className="badge">{+(a.rate ?? 1).toFixed(2)}×</span>}
+      {+(a.rate ?? 1).toFixed(2) !== 1 && <JumpBadge type="audio" item={a} title={$t('速率')}>{+(a.rate ?? 1).toFixed(2)}×</JumpBadge>}
       <OpBadge k={key} />
       {a.fadeIn > 0 && <div className="fade in" style={{ width: a.fadeIn * pps }} />}
       {a.fadeOut > 0 && <div className="fade out" style={{ width: a.fadeOut * pps }} />}
@@ -1310,6 +1378,7 @@ const AudioView = React.memo(function AudioView({ a, m, pps, sel }: { a: AudioCl
       {!ok && <TriangleAlert size={12} className="warn-ico" />}
       {a.link && <Link2 size={11} className="link-ico" />}
       {a.group && <Group size={11} className="link-ico" />}
+      {a.locked && <LockBadge type="audio" item={a} />}
       <span className="clip-name" title={`${label} · ${a.duration.toFixed(2)}s`}>{ok ? label : $t('遺失：{0}', label)}</span>
       <div className="handle r" onPointerDown={(e) => resizeItem(e, 'audio', a, 'r', true, ok ? m.duration : Infinity)} />
     </div>
@@ -1355,10 +1424,10 @@ function pickTrack(rows: Row[], r: Row, mode: 'single' | 'toggle' | 'range') {
   else st.setActiveTrack(keys.length ? parseRowKey(keys[keys.length - 1]) : null);
 }
 
-/** 刪除多條軌道（鎖定的跳過）；上面有項目先確認，整批算一步復原 */
+/** 刪除多條軌道（鎖住的也可以）；上面有項目先確認，整批算一步復原 */
 export async function deleteTracks(rows: Row[]) {
   const st = useStore.getState();
-  const list = rows.filter((r) => st.tracks[r.kind][r.idx] && !st.tracks[r.kind][r.idx].locked);
+  const list = rows.filter((r) => st.tracks[r.kind][r.idx]);
   if (!list.length) return;
   if (list.filter((r) => r.kind === 'video').length >= st.tracks.video.length) return toast($t('至少要保留一條影片軌'), 'error');
   const n = list.reduce((a, r) => a + st.trackItemCount(r.kind, r.idx), 0);
@@ -1393,6 +1462,7 @@ function emptyTracks(): Row[] {
 
 export function Timeline() {
   const clips = useStore((s) => s.clips);
+  const anims = useStore((s) => s.anims);
   const effects = useStore((s) => s.effects);
   const audios = useStore((s) => s.audios);
   const markers = useStore((s) => s.markers);
@@ -1447,7 +1517,7 @@ export function Timeline() {
   /** 看得到的時間軸寬度（px） */
   const [view, setView] = useState({ w: 800 });
   // 時間軸長度：預設 MIN_LEN 秒；專案更長就是專案長度再多 10%（不會無限往右延伸）；至少填滿看得到的寬度
-  const dur = Math.max(projectDuration({ clips, effects, audios }), ...markers.map((m) => m.t));
+  const dur = Math.max(projectDuration({ clips, effects, audios, anims }), ...markers.map((m) => m.t));
   const end = Math.max(MIN_LEN, dur * 1.1 + 2, view.w / pps);
   /** 縮放時要固定在畫面上同一個位置的時間點（滑鼠 / 播放頭 / 畫面中間） */
   const zoomAnchor = useRef<{ t: number; off: number } | null>(null);
@@ -1473,7 +1543,7 @@ export function Timeline() {
     if (!el) return;
     // 時間軸自己管水平捲動（overflow-x: hidden），scrollIntoView 不可靠：自己算
     const box = scrollRef.current;
-    const it = sel.type === 'clip' || sel.type === 'effect' || sel.type === 'audio' ? (useStore.getState()[LIST[sel.type]] as AnyItem[]).find((x) => x.id === sel.id) : undefined;
+    const it = sel.type === 'clip' || sel.type === 'effect' || sel.type === 'audio' || sel.type === 'anim' ? (useStore.getState()[LIST[sel.type]] as AnyItem[]).find((x) => x.id === sel.id) : undefined;
     if (box && it) {
       const pps = useStore.getState().pps;
       const viewW = box.clientWidth - labelW;
@@ -1841,7 +1911,7 @@ export function Timeline() {
   const renderLane = (kind: TrackKind, idx: number) => {
     if (kind === 'video') {
       const sorted = sortClips(clips.filter((c) => c.track === idx));
-      return sorted.map((c, i) => {
+      return [...sorted.map((c, i) => {
         const isDrop = dropClip?.clipId === c.id ? dropClip.action : null;
         return (
           <React.Fragment key={c.id}>
@@ -1852,7 +1922,7 @@ export function Timeline() {
               name={itemName('clip', c, media, modules)}
               pps={pps}
               sel={isSel('clip', c.id)}
-              remapName={c.remap.moduleId !== 'remap-speed' ? modName(c.remap.moduleId) : null}
+              remapName={c.remap.moduleId === 'remap-none' || (c.remap.moduleId === 'remap-speed' && Number(c.remap.params.speed ?? 1) === 1) ? null : modName(c.remap.moduleId)}
               drop={isDrop}
               dropThumb={isDrop === 'relink' || isDrop === 'replace' ? dropThumb : undefined}
             />
@@ -1866,7 +1936,7 @@ export function Timeline() {
             {isDrop === 'transitionOut' && <div className="transition ghost" style={{ left: (c.start + c.duration - 0.4) * pps, width: 0.4 * pps }}><ArrowRightToLine size={11} /></div>}
           </React.Fragment>
         );
-      });
+      }), ...anims.filter((a) => a.track === idx).map((a) => <AnimView key={a.id} a={a} pps={pps} sel={isSel('anim', a.id)} missing={a.slots.some((slot) => a.layers.some((l) => l.slotId === slot.id && !l.text) && (!slot.mediaId || !mediaUsable(mediaOf(slot.mediaId))))} />)];
     }
     if (kind === 'fx') {
       return effects

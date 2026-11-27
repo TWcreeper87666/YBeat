@@ -301,12 +301,22 @@ vec4 transition(vec2 uv) {
 // t：片段內時間（秒）；p：參數；info：{ dur 片段長度, srcDur 素材總長, in 素材起點 }
 // 可用 ease.inOutCubic / ease.outExpo / ease.outBack ... 與 ease.clamp
 
-const remapSpeed = `// 變速 / 倒放
-// @param speed: float = 1 (0.1..8) "速度"
-// @param reverse: bool = false "倒放"
+const remapNone = `// 無
 function remap(t, p, info) {
-  const s = t * p.speed;
-  return p.reverse ? info.dur * p.speed - s : s;
+  return t;
+}
+`;
+
+const remapReverse = `// 倒播
+function remap(t, p, info) {
+  return info.dur - t;
+}
+`;
+
+const remapSpeed = `// 變速
+// @param speed: float = 1 (0.1..8) "速度"
+function remap(t, p, info) {
+  return t * p.speed;
 }
 `;
 
@@ -359,7 +369,9 @@ const BASE_MODULES: Module[] = [
   mk('tr-diagonal', 'transition', '斜切 Diagonal Wipe', diagonal, 2),
   mk('tr-iris', 'transition', '圓形擴散 Iris', iris, 4),
   mk('tr-flash', 'transition', '閃白 Flash Cut', flashCut),
-  mk('remap-speed', 'remap', '變速 / 倒放', remapSpeed),
+  mk('remap-none', 'remap', '無', remapNone),
+  mk('remap-reverse', 'remap', '倒播', remapReverse),
+  mk('remap-speed', 'remap', '變速', remapSpeed),
   mk('remap-curve', 'remap', '曲線', remapCurve),
   mk('remap-pingpong', 'remap', '正播後倒播', curve_remap_pingpong),
   mk('remap-reverse-forward', 'remap', '倒播後正播', curve_remap_reverse_forward),

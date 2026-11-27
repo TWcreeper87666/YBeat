@@ -1,4 +1,5 @@
 import { snapFrame } from '../engine/rulerTicks';
+import { animDropDur, placeAnim, setAnimSlot } from '../engine/animPlace';
 import { stopLibraryPreview } from './SourcePanel';
 import { $t, displayName } from '../i18n';
 import type React from 'react';
@@ -59,6 +60,7 @@ function laneDuration(payload: DragPayload): { dur: number; label: string; accep
     return { dur: stillDur(), label: p?.name ?? '', accepts: (k) => k === 'video' };
   }
   if (payload.kind === 'files') return { dur: stillDur(), label: $t('{0} 個檔案', payload.count), accepts: (k) => k !== 'fx' };
+  if (payload.kind === 'anim') return { dur: animDropDur(), label: $t('動畫'), accepts: (k) => k === 'video' };
   return null;
 }
 
@@ -83,6 +85,15 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
     if (song) return { kind: 'aeSong', mediaId: song.id, whole: alt };
     if (onSong) return null;
     return ids.some((id) => { const m = s.media.find((x) => x.id === id); return mediaUsable(m) && m.kind !== 'audio'; }) ? { kind: 'autoEdit', whole: alt } : null;
+  }
+  // 素材拖到動畫的圖片位置（屬性面板裡的那一列）：換那一張
+  if (payload.kind === 'media') {
+    const slotEl = els.find((e) => e.dataset.animSlot);
+    if (slotEl) {
+      const [animId, slotId] = slotEl.dataset.animSlot!.split('|');
+      const m = s.media.find((x) => x.id === payload.id);
+      return mediaUsable(m) && m.kind !== 'audio' ? { kind: 'animSlot', animId, slotId } : null;
+    }
   }
   // 拖到「屬性」面板：套用到目前選取的項目（特效 → 片段特效 / 取代特效軌上的特效；轉場 → 進場；變速 → 時間重映射）
   const insp = els.find((e) => e.classList?.contains('panel-inspector'));
@@ -247,6 +258,8 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
     const fit = gap >= 0.05 && gap < info.dur - 1e-4 ? { duration: gap, speed: false } : null;
     return { kind: 'lane', lane, idx, time, duration: info.dur, label: info.label, overlap: { fit, replaceId } };
   }
+  // 動畫：照游標位置（放下時會吸附到拍、放到底下片段的上面那條空軌，不在這條軌上找空位）
+  if (payload.kind === 'anim') return { kind: 'lane', lane, idx, time, duration: info.dur, label: info.label };
   // 同一軌不能重疊：放到最近的空位；圖片 / 色板 / 文字放進空隙時縮短到剛好填滿
   const flexible = payload.kind === 'text';
   const fit = flexible ? fitInGap(spansOf(s), `${lane}:${idx}`, time, info.dur) : { start: fitStart(spansOf(s), `${lane}:${idx}`, time, info.dur), duration: info.dur };
@@ -259,6 +272,14 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
   const s = useStore.getState();
   if (!target) {
     if (files) await importMany(files);
+    return;
+  }
+  if (target.kind === 'animSlot') {
+    if (payload.kind === 'media') setAnimSlot(target.animId, target.slotId, payload.id);
+    return;
+  }
+  if (payload.kind === 'anim') {
+    if (target.kind === 'lane' && !placeAnim(payload.id, target.idx, target.time)) toast($t('這裡不能放'), 'error');
     return;
   }
   if (target.kind === 'aeSong') {

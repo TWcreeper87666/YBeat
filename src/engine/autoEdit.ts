@@ -21,11 +21,11 @@ export interface Recipe {
 export type RecipeId = 'calm' | 'rhythm' | 'hype' | 'velocity' | 'glitch' | 'flash';
 export const RECIPES: Record<RecipeId, Recipe> = {
   calm: { id: 'calm', beatsPerShot: [8, 4, 4], jitter: 0.1, transitionRate: 0.25, sectionTransitionRate: 0.6, accentsPer32: 0.5, minShotSec: 1.2, maxShotSec: 8, transitionBeats: 1 },
-  rhythm: { id: 'rhythm', beatsPerShot: [4, 2, 1], jitter: 0.2, transitionRate: 0.15, sectionTransitionRate: 0.8, accentsPer32: 2, minShotSec: 0.35, maxShotSec: 6, transitionBeats: 0.5 },
-  hype: { id: 'hype', beatsPerShot: [2, 1, 1], jitter: 0.25, transitionRate: 0.1, sectionTransitionRate: 1, accentsPer32: 4, minShotSec: 0.2, maxShotSec: 4, transitionBeats: 0.5 },
-  velocity: { id: 'velocity', beatsPerShot: [2, 1, 1], jitter: 0.2, transitionRate: 0.2, sectionTransitionRate: 1, accentsPer32: 0, minShotSec: 0.2, maxShotSec: 4, transitionBeats: 0.5 },
-  glitch: { id: 'glitch', beatsPerShot: [4, 2, 1], jitter: 0.25, transitionRate: 0.2, sectionTransitionRate: 0.9, accentsPer32: 0, minShotSec: 0.25, maxShotSec: 5, transitionBeats: 0.5 },
-  flash: { id: 'flash', beatsPerShot: [4, 2, 1], jitter: 0.2, transitionRate: 0.2, sectionTransitionRate: 0.9, accentsPer32: 0, minShotSec: 0.25, maxShotSec: 5, transitionBeats: 0.5 },
+  rhythm: { id: 'rhythm', beatsPerShot: [4, 2, 1], jitter: 0, transitionRate: 0, sectionTransitionRate: 1, accentsPer32: 2, minShotSec: 0.18, maxShotSec: 6, transitionBeats: 0.35 },
+  hype: { id: 'hype', beatsPerShot: [2, 1, 1], jitter: 0, transitionRate: 0, sectionTransitionRate: 1, accentsPer32: 4, minShotSec: 0.18, maxShotSec: 4, transitionBeats: 0.35 },
+  velocity: { id: 'velocity', beatsPerShot: [2, 1, 1], jitter: 0, transitionRate: 0, sectionTransitionRate: 1, accentsPer32: 0, minShotSec: 0.18, maxShotSec: 4, transitionBeats: 0.35 },
+  glitch: { id: 'glitch', beatsPerShot: [4, 2, 1], jitter: 0, transitionRate: 0, sectionTransitionRate: 1, accentsPer32: 0, minShotSec: 0.18, maxShotSec: 5, transitionBeats: 0.35 },
+  flash: { id: 'flash', beatsPerShot: [4, 2, 1], jitter: 0, transitionRate: 0, sectionTransitionRate: 1, accentsPer32: 0, minShotSec: 0.18, maxShotSec: 5, transitionBeats: 0.35 },
 };
 /** strength：0 柔和，1 強烈；weight：相對出現機會（沒有 = 1，0 = 不用）。 */
 export interface TransitionOpt { id: string; strength: number; weight?: number }
@@ -57,6 +57,23 @@ export interface RuleOpt extends Omit<FxRule, 'on'> {
   group: FxGroup;
   hit: boolean;
   params?: Record<string, number | boolean>;
+  /** 分段自己的特效層：只在這個拍號範圍 [b0, b1) 裡出現，不受分段的 fxRate 影響 */
+  span?: [number, number];
+  /** 放在第幾條特效軌（沒有 = 在 rules 裡的索引） */
+  lane?: number;
+}
+/**
+ * 分段（拍號 [b0, b1)）：這段裡的設定蓋過風格；沒寫的欄位 = 照風格。
+ * transitions：null = 不用轉場、陣列 = 只用這些；fxRate = 風格的特效層在這段的機率倍數（0 = 不出現）
+ */
+export interface PlanZone {
+  b0: number; b1: number;
+  transitions?: TransitionOpt[] | null;
+  transitionRate?: number;
+  fxRate?: number;
+  beatsPerShot?: number;
+  noPop?: true;
+  noSpeed?: true;
 }
 /** 計畫裡的觸發（套用成 FxItem.trigger）；chance < 1 = 只在挑中的時機點觸發 */
 export type PlanTrigger = { kind: 'beat'; every: BeatEvery; chance?: number; seed?: number } | { kind: 'cut'; chance?: number; seed?: number };
@@ -72,11 +89,17 @@ export interface PlanOptions {
   /** at = 使用者標的副歌開頭（拍號）：有的話只在這些地方跳出，不看次數上限 */
   pops?: { variants: PopVariant[]; per32: number; text?: string; at?: number[];
     /** 前幾版用過的種類（新的在後）：先輪到還沒出現過的，勾的每一種都會輪到 */
-    recent?: PopVariant[] };
+    recent?: PopVariant[];
+    /** 前幾版用過的主體 / 揭露畫面（素材 id，新的在後）：這一版先換別的 */
+    recentMedia?: string[] };
   /** every = 每個影片鏡頭都套用（不看次數、間隔）；boost = 整體加速（素材用掉的倍數，1 = 不加速） */
   speed?: { variants: SpeedVariant[]; per32: number; intensity: number; every?: boolean; boost?: number };
   /** 特效層（依清單順序；同優先度時前面的贏） */
   rules?: RuleOpt[];
+  /** 分段（不重疊）；分段的頭尾一定是剪接點 */
+  zones?: PlanZone[];
+  /** 上一版鎖住的範圍（拍號 [b0, b1)）：shots = 不排鏡頭、跳出、變速（鎖住的片段在那裡）；fx = 不疊特效 */
+  locked?: { shots: [number, number][]; fx: [number, number][] };
 }
 export const DEFAULT_OPTIONS: PlanOptions = {
   transitions: [
@@ -208,7 +231,12 @@ export function planEdit(input: PlanInput): EditPlan {
     if (section.b1 > start && section.b1 < end) hard.add(section.b1);
   }
   for (const drop of music.drops) if (drop > start && drop < end) hard.add(drop);
-  const hardCuts = [...hard].sort((a, b) => a - b);
+  const zones = settings.zones ?? [];
+  const zoneAt = (b: number) => zones.find((z) => z.b0 <= b && b < z.b1);
+  const inZone = (key: 'noPop' | 'noSpeed', b0: number, b1: number) => zones.some((z) => z[key] && b0 < z.b1 && z.b0 < b1);
+  const lockedShots = settings.locked?.shots ?? [], lockedFx = settings.locked?.fx ?? [];
+  const inLocked = (b0: number, b1: number) => lockedShots.some(([a, b]) => b0 < b && a < b1);
+  const hardCuts = [...new Set([...hard, ...zones.flatMap((z) => [z.b0, z.b1]), ...lockedShots.flat()].filter((b) => b > start && b < end))].sort((a, b) => a - b);
   const duration = (b0: number, b1: number) => beatTime(beats, b1) - beatTime(beats, b0);
 
   // 用獨立亂數決定跳出，避免改動原本的剪輯順序。
@@ -229,6 +257,7 @@ export function planEdit(input: PlanInput): EditPlan {
       if (!budget.has(bucket)) budget.set(bucket, Math.floor(popOptions.per32) + (popRng() < popOptions.per32 % 1 ? 1 : 0));
       if (!marked.length && (counts.get(bucket) ?? 0) >= budget.get(bucket)!) continue;
       if (plan.pops.some((p) => Math.abs(p.b1 - b1) < 16)) continue;
+      if (inZone('noPop', b1 - 4, b1 + 1) || inLocked(b1 - 4, b1 + 1)) continue;
       const sectionKind = music.sections.find((s) => s.b0 <= b1 && b1 < s.b1)?.kind;
       const candidates = media.filter((m) => m.kind === 'image' && (m.pop?.ok || m.pop?.loose) &&
         (m.weight !== 0 || !media.some((item) => item.weight !== 0)));
@@ -236,8 +265,11 @@ export function planEdit(input: PlanInput): EditPlan {
         ? candidates.filter((m) => m.popSuit !== 0) : candidates;
       // 窗口至少需有另一個底軌素材。
       if (media.length < 2) continue;
+      // 前幾版用過的往後排（越近用過扣越多），每一版換一張
+      const recentMedia = popOptions.recentMedia ?? [];
+      const staleness = (id: string) => { const i = recentMedia.lastIndexOf(id); return i < 0 ? 0 : 1.5 * (i + 1) / recentMedia.length + 0.5; };
       const ranked = subjects.map((m) => ({ m, rank: (m.roles === undefined ? 0.5 : sectionKind && m.roles.includes(sectionKind) ? 1 : 0) +
-        (m.weight ?? 0.5) * 0.5 + (m.popSuit ?? 0.5) + popRng() * 0.3 -
+        (m.weight ?? 0.5) * 0.5 + (m.popSuit ?? 0.5) + popRng() * 0.8 - staleness(m.id) -
         // 已經做過主體跳出的圖往後排，每次換一張
         plan.pops.filter((p) => p.mediaId === m.id).length * 2 })).sort((a, b) => b.rank - a.rank);
       let picked: PlanPop | undefined;
@@ -246,8 +278,13 @@ export function planEdit(input: PlanInput): EditPlan {
         const revealImages = media.filter((other) => !other.popOnly && other.id !== m.id && other.id !== m.srcId &&
           !plan.pops.some((p) => (p.mediaId === other.id || p.revealMediaId === other.id) &&
             b1 - 4 < p.b1 && p.b0 < b1));
-        const revealImage = revealImages.find((other) => other.kind === 'image' && other.pop?.ok === false) ??
-          revealImages.find((other) => other.kind === 'image') ?? revealImages[0];
+        // 揭露的畫面：偏好不能做主體的圖 > 其他圖 > 影片；同一級裡隨機挑，前幾版用過的先跳過
+        const tiers = [revealImages.filter((o) => o.kind === 'image' && o.pop?.ok === false),
+          revealImages.filter((o) => o.kind === 'image'), revealImages];
+        const tier = tiers.find((t) => t.length) ?? [];
+        const freshTier = tier.filter((o) => staleness(o.id) === 0);
+        const revealPool = freshTier.length ? freshTier : tier;
+        const revealImage = revealPool.length ? revealPool[Math.floor(popRng() * revealPool.length)] : undefined;
         const variants = enabled.filter((v) => (!['step', 'shake', 'trail', 'grid', 'spin', 'halo'].includes(v) || m.pop!.centered) &&
           (v !== 'crossShot' || !!revealImage && media.some((base) =>
             base.id !== m.id && base.id !== revealImage.id &&
@@ -326,7 +363,7 @@ export function planEdit(input: PlanInput): EditPlan {
       const { b0, b1, variant, event } = proposal;
       if (chosenEvents.some((b) => Math.abs(b - event) < 8) ||
         [...fixed.values()].some((shot) => b0 < shot.b1 + 4 && shot.b0 < b1 + 4) ||
-        plan.pops.some((pop) => b0 < pop.b1 && pop.b0 < b1 || pop.b1 >= b0 && pop.b1 < b1)) continue;
+        plan.pops.some((pop) => b0 < pop.b1 && pop.b0 < b1 || pop.b1 >= b0 && pop.b1 < b1) || inZone('noSpeed', b0, b1) || inLocked(b0, b1)) continue;
       const bucket = Math.floor((b0 - start) / 32);
       if (!speedBudget.has(bucket)) speedBudget.set(bucket,
         Math.floor(speedOptions.per32) + (speedRng() < speedOptions.per32 % 1 ? 1 : 0));
@@ -423,6 +460,9 @@ export function planEdit(input: PlanInput): EditPlan {
   let previousMotion = 0;
   let previousTransition = '';
   for (let b0 = start; b0 < end;) {
+    // 鎖住的範圍：上一版的片段留在那裡，跳過去
+    const lock = lockedShots.find(([a, b]) => a <= b0 && b0 < b);
+    if (lock) { b0 = lock[1]; previousTransition = ''; continue; }
     const fixedShot = fixed.get(b0);
     if (fixedShot) {
       if (!queue.length) refill();
@@ -436,7 +476,8 @@ export function planEdit(input: PlanInput): EditPlan {
       continue;
     }
     const level = music.level[b0] ?? 1;
-    let length = Math.max(1, recipe.beatsPerShot[level]);
+    const zone = zoneAt(b0);
+    let length = Math.max(1, zone?.beatsPerShot ?? recipe.beatsPerShot[level]);
     if (rng() < recipe.jitter) length = rng() < 0.5 ? Math.max(1, Math.round(length / 2)) : length * 2;
     const stop = reserveReverse
       ? Math.min(hardCuts.find((b) => b > b0) ?? end,
@@ -515,12 +556,14 @@ export function planEdit(input: PlanInput): EditPlan {
         ? { from: { scale: 1, x: 0, y: 0 }, to: { scale: 1 + delta, x, y } }
         : { from: { scale: 1 + delta, x, y }, to: { scale: 1, x: 0, y: 0 } };
     }
-    if (plan.shots.length && settings.transitions.length && !reserved) {
+    // 分段：這段的轉場清單 / 頻率（null = 不用轉場）
+    const trList = zone?.transitions === undefined ? settings.transitions : zone.transitions ?? [];
+    if (plan.shots.length && trList.length && !reserved) {
       const special = hard.has(b0) && b0 !== start;
       // 上一個鏡頭剪前倒抽：倒帶衝進硬切或強烈的轉場（柔和的轉場會把倒帶的力道吃掉）
       const rewound = plan.shots.at(-1)?.speed?.variant === 'rewindToCut';
-      if (rng() < (special ? recipe.sectionTransitionRate : recipe.transitionRate)) {
-        const usable = settings.transitions.filter((option) => (option.weight ?? 1) > 0 && (!rewound || STRONG_TR.has(option.id)));
+      if (rng() < (zone?.transitionRate ?? (special ? recipe.sectionTransitionRate : recipe.transitionRate))) {
+        const usable = trList.filter((option) => (option.weight ?? 1) > 0 && (!rewound || STRONG_TR.has(option.id)));
         // 不連續用同一個；只開了一種（例如全部都要 Crash Zoom）就照用
         const fresh = usable.filter((option) => option.id !== previousTransition);
         const options = fresh.length ? fresh : usable;
@@ -626,6 +669,7 @@ export function planEdit(input: PlanInput): EditPlan {
       const shot = plan.shots[i];
       if (shot.speed) { lastEnd = shot.b1; continue; }
       const item = media.find((m) => m.id === shot.mediaId);
+      if (inZone('noSpeed', shot.b0, shot.b1)) continue;
       const nextFixed = reserveReverse ? plan.shots.slice(i + 1).find((s) => !!s.speed) : undefined;
       if (item?.kind !== 'video') continue;
       if (!every && (shot.b0 - lastEnd < 4 || nextFixed && nextFixed.b0 - shot.b1 < 4)) { skipped('spacing'); continue; }
@@ -710,19 +754,41 @@ export function planEdit(input: PlanInput): EditPlan {
   if (settings.rules?.length) {
     const priorities: Record<RuleWhen, number> = { section: 0, beat: 1, cut: 2, accent: 3, drop: 4 };
     const proposals: { overlay: PlanOverlay; rule: RuleOpt; lane: number }[] = [];
-    const addRule = (rule: RuleOpt, lane: number, b0: number, b1: number, trigger?: PlanTrigger) => {
-      b0 = Math.ceil(b0);
-      b1 = Math.floor(b1);
+    const push = (rule: RuleOpt, lane: number, b0: number, b1: number, trigger?: PlanTrigger) => {
       if (b1 - b0 < 1) return;
       proposals.push({ rule, lane, overlay: { b0, b1, moduleId: rule.moduleId,
         ...(rule.params ? { params: rule.params } : {}), ...(rule.drive ? { drive: rule.drive } : {}), ...(trigger ? { trigger } : {}), lane } });
+    };
+    const scaled = [...zones].filter((z) => z.fxRate !== undefined && z.fxRate !== 1).sort((a, b) => a.b0 - b.b0);
+    const addRule = (rule: RuleOpt, lane: number, b0: number, b1: number, trigger?: PlanTrigger) => {
+      b0 = Math.ceil(Math.max(b0, rule.span?.[0] ?? -Infinity));
+      b1 = Math.floor(Math.min(b1, rule.span?.[1] ?? Infinity));
+      if (b1 - b0 < 1) return;
+      // 分段自己的特效層、氛圍類（暗角、顆粒、微弱頻閃…常駐的）不受分段的特效量影響
+      if (rule.span || rule.group === 'ambient') return push(rule, lane, b0, b1, trigger);
+      // 分段的特效量：分段內外切開，分段裡的機率乘上倍數（觸發型改觸發機率；其他的照倍數抽要不要留）
+      let cur = b0;
+      for (const z of scaled) {
+        if (z.b1 <= cur || z.b0 >= b1) continue;
+        if (z.b0 > cur) push(rule, lane, cur, z.b0, trigger);
+        const p0 = Math.max(cur, z.b0), p1 = Math.min(b1, z.b1), rate = z.fxRate!;
+        cur = p1;
+        if (rate <= 0) continue;
+        if (trigger) {
+          const chance = Math.min(1, (trigger.chance ?? 1) * rate);
+          const { chance: _c, ...rest } = trigger;
+          push(rule, lane, p0, p1, (chance < 1 ? { ...rest, chance } : rest) as PlanTrigger);
+        } else if (rate >= 1 || ruleHash(seed, `${rule.id}:zone`, p0) / 4294967296 < rate) push(rule, lane, p0, p1);
+      }
+      if (cur < b1) push(rule, lane, cur, b1, trigger);
     };
     // 變速：衝進剪接點這幾種的落點（下一個鏡頭的第一拍）當重音；變速期間不疊縮放類
     const LANDING = new Set<SpeedVariant>(['hitRamp', 'whooshRamp', 'tapeStop', 'rewindToCut']);
     const ramps = plan.shots.filter((shot) => shot.speed && LANDING.has(shot.speed.variant));
     const landings = ramps.map((shot) => shot.b1).filter((b) => b >= start && b < end);
     const inRamp = (b: number) => ramps.some((shot) => b >= shot.b0 && b < shot.b1);
-    for (const [lane, rule] of settings.rules.entries()) {
+    for (const [index, rule] of settings.rules.entries()) {
+      const lane = rule.lane ?? index;
       if (rule.chance <= 0) continue;
       const ruleSeed = ruleHash(seed, rule.id);
       const draw = (beat: number) => ruleHash(seed, rule.id, beat) / 4294967296;
@@ -778,11 +844,12 @@ export function planEdit(input: PlanInput): EditPlan {
         pieceStart = -1;
       };
       for (let b = overlay.b0; b < overlay.b1; b++) {
-        const allowed = (ambient || !groupBeats.has(b) && (counts.get(b) ?? 0) < 4) &&
-          (ambient || rule.when === 'drop' || !breath.has(b)) &&
+        const allowed = !lockedFx.some(([x0, x1]) => b >= x0 && b < x1) &&
+          (ambient || !groupBeats.has(b) && (counts.get(b) ?? 0) < 4) &&
+          (ambient || rule.when === 'drop' || rule.when === 'cut' && rule.group === 'shake' || !breath.has(b)) &&
           // 變速期間不疊一直在動的縮放（每拍 / 整段）；剪接點、重音、drop 這種打一下的照樣打（落點正好是變速衝進去的那一拍）
           (rule.group !== 'zoom' || (rule.when !== 'beat' && rule.when !== 'section') || !inRamp(b)) &&
-          (ambient || rule.group === 'flash' || rule.group === 'color' ||
+          (ambient || rule.group === 'flash' || rule.group === 'color' || rule.when === 'cut' && rule.group === 'shake' ||
             !plan.pops.some((p) => b >= p.b0 && b < p.b1 + 1));
         if (allowed) {
           if (pieceStart < 0) pieceStart = b;

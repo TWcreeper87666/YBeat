@@ -3,15 +3,18 @@ import { audioSignal, fromKey, randomSignal, type AudioSignal } from './audioRea
 import { holdScrub, scrubFrameAt } from './scrubCache';
 import { previewUrl } from './proxy';
 import { ensureReverseFrames, reverseFrameAt } from './reverseCache';
-import { fxLevel, type BlendMode, type TransitionRef, type AudioClip, type AudioDrive, type AudioFrom, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
+import { fxLevel, makeClip, type AnimItem, type BlendMode, type TransitionRef, type AudioClip, type AudioDrive, type AudioFrom, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
+import { animLayers, type AnimDrawLayer } from './animation';
+import { traceMatte } from './subjectPop';
 import { maskAt, type Mask } from './mask';
 import { FIELD_RANGE, getShapeField, maskFieldKey, type ShapeField } from './maskShapes';
 import { CLIP_MASK_ID } from '../modules/extra';
-import { renderText, textKey } from './text';
+import { DEFAULT_TEXT, renderText, textKey } from './text';
 import { fitScale, hexToRgb, isHitFx, isNumeric, paramAt, parseDuration, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
 import { clipSource, plainSpeed } from './remap';
 import { MATTE_SIZE, matteAt, requestMatte } from './matte';
 import { clipTransformAt } from './transform';
+import { cropView } from './transform';
 import { evalKeys, type Keyframe } from './keyframes';
 import { fitOf, followOf, subjectRectInFrame, tracking, withOffset, type Follow, type FollowMap } from './follow';
 import { animFrameAt, animImage, animImageReady } from './animImage';
@@ -22,11 +25,39 @@ export interface RenderCtx {
   audios: AudioClip[];
   videoTracks: Clip[][]; // 依軌道分組、依開始時間排序
   effects: FxItem[];
+  anims: AnimItem[];
   tracks: Tracks;
   modules: Map<string, Module>;
   media: Map<string, Media>;
   /** 有連結音訊的連結 id（這些影片片段本身不出聲） */
   linked: Set<string>;
+}
+
+export type ExportFrameSource = (clip: Clip, media: Media, sourceTime: number) => Promise<VideoFrame | null>;
+
+const animBeatTime = (item: AnimItem) => {
+  const beats = triggerBeats(1);
+  const i = beats.findIndex((b) => b >= item.start);
+  return i >= 0 && i + 1 < beats.length ? beats[i + 1] - beats[i] : item.duration / 4;
+};
+
+function animClip(item: AnimItem, draw: AnimDrawLayer, media?: Media, frameAspect?: number): Clip {
+  const s = draw.slot;
+  const crop = s.crop && media && frameAspect ? cropView(s.crop, media.width / media.height, frameAspect) : null;
+  const secAt = (beat: number) => item.beatTimes?.[beat] ?? beat * item.duration / 4;
+  const effects = draw.layer.effects?.map((fx) => {
+    if (!fx.beatEvery) return fx;
+    const hits = [];
+    for (let b = draw.layer.fromBeat; b < draw.layer.toBeat; b += fx.beatEvery)
+      hits.push({ t: secAt(b), d: Math.min((fx.hitBeats ?? 0.8) * animBeatTime(item), secAt(b + fx.beatEvery) - secAt(b)) });
+    return { ...fx, timing: { kind: 'hits' as const, hits } };
+  });
+  return makeClip({ id: `anim:${item.id}:${s.id}:${draw.id}`, mediaId: s.mediaId!, track: item.track,
+    start: item.start, duration: item.duration, in: s.sourceTime, rate: 0,
+    aiMatte: s.cutout?.mode === 'auto', blend: draw.layer.blend,
+    transform: { x: draw.x + (crop?.x ?? 0) * draw.scaleX, y: draw.y + (crop?.y ?? 0) * draw.scaleY,
+      scaleX: draw.scaleX * (crop?.s ?? 1), scaleY: draw.scaleY * (crop?.s ?? 1), rotation: draw.rotation, opacity: draw.opacity },
+    effects, ...(draw.layer.text ? { text: { ...DEFAULT_TEXT, text: draw.layer.text }, fit: 'contain' as const } : {}) });
 }
 
 export type FrameInfo =
@@ -285,7 +316,17 @@ void main() {
     vec4 s = texture(u_tex, vec2(uv.x, 1.0 - uv.y));
     // 文字有透明度（premultiplied）；一般素材當作不透明
     col = (u_fit == 3 ? vec4(s.rgb * s.a, s.a) : vec4(s.rgb, 1.0)) * inside;
-    if (u_useMatte > 0.5) col *= texture(u_matte, uv).r;
+    if (u_useMatte > 0.5) {
+      // The matte is inferred at 320px. Tighten its soft edge slightly so
+      // source-background colors do not form a visible halo at export size.
+      vec2 d = 0.5 / vec2(textureSize(u_matte, 0));
+      float a = texture(u_matte, uv).r;
+      float inner = min(min(texture(u_matte, uv + vec2(d.x, 0.0)).r,
+                            texture(u_matte, uv - vec2(d.x, 0.0)).r),
+                        min(texture(u_matte, uv + vec2(0.0, d.y)).r,
+                            texture(u_matte, uv - vec2(0.0, d.y)).r));
+      col *= smoothstep(0.08, 0.92, mix(a, inner, 0.5));
+    }
   }
   if (u_fit == 2 && u_useMatte < 0.5) {
     vec2 bu = (v_uv - 0.5) * vec2(ASPECT, 1.0) / fitSize(true) + 0.5;
@@ -936,6 +977,15 @@ export class Renderer {
     else if (media?.kind === 'video') {
       const { src, rate } = clipSource(clip, local, media, ctx.modules);
       matteSrc = src;
+      const exportFrame = mode === 'export' ? this.exportFrames.get(clip.id) : undefined;
+      if (exportFrame) {
+        const key = 'export:' + clip.id;
+        tex = this.exportUploaded.has(key) ? this.textures.get(key)! : this.upload(key, exportFrame.frame, clip.fit === 'blur');
+        this.exportUploaded.add(key);
+        this.drawTex(target, clip, local, tex, media, blend, undefined,
+          clip.aiMatte ? this.matteTex(clip, media, exportFrame.pts, ctx) : null);
+        return;
+      }
       const v = this.videoFor(clip, media, mode === 'preview');
       // 變速曲線的倒播 / 極慢 / 跳格段：用預先解好的影格（<video> 往回 seek 太慢），<video> 先 seek 到這段結束的位置等著
       const cs = mode === 'preview' ? curveSpans(clip, media, ctx) : null;
@@ -1207,6 +1257,35 @@ export class Renderer {
     });
   }
 
+  private animOutlines = new Map<string, string>();
+  private animMask(item: AnimItem, draw: AnimDrawLayer, t: number, ctx: RenderCtx): Mask | null {
+    const maskLayer = item.layers.find((l) => l.id === draw.mask?.layerId);
+    const ref = item.slots.find((s) => s.id === (maskLayer?.slotId ?? draw.mask?.slotId));
+    const media = ref?.mediaId && ctx.media.get(ref.mediaId);
+    if (!ref || !media || media.missing) return null;
+    let path = ref.cutout?.outline;
+    if (!path) {
+      const matte = matteAt(media, ref.sourceTime);
+      if (!matte) {
+        requestMatte(animClip(item, { ...draw, slot: ref }), media, ctx.modules);
+        return null;
+      }
+      const key = `${media.id}:${matte.idx}`;
+      path = this.animOutlines.get(key);
+      if (path === undefined) {
+        path = traceMatte(matte.data, MATTE_SIZE);
+        this.animOutlines.set(key, path);
+      }
+    }
+    if (!path) return null;
+    const beat = (t - item.start) / animBeatTime(item);
+    const scale = draw.mask?.scale?.length ? evalKeys(draw.mask.scale, beat) : 1;
+    const guide = animLayers(item, t, animBeatTime(item)).find((l) => l.layer.id === maskLayer?.id);
+    return { shape: 'path', path, invert: draw.mask?.mode === 'hole',
+      x: guide?.x ?? 0, y: guide?.y ?? 0, w: Math.abs((guide?.scaleX ?? 1) * scale), h: Math.abs((guide?.scaleY ?? 1) * scale),
+      rotation: guide?.rotation ?? 0, feather: 0 };
+  }
+
   render(ctx: RenderCtx, t: number, mode: 'preview' | 'export', playing = false, extra?: { module: Module; progress: number; duration: number }) {
     this.updateChains(ctx);
     const [TA, TB, P0, P1] = this.targets;
@@ -1309,6 +1388,24 @@ export class Renderer {
           this.pass(P0, this.blit, (p) => this.bindTex(p, 'u_tex', fr.progress < 0.5 ? TA.tex : TB.tex, 0), trBlend);
         }
       }
+      for (const item of ctx.anims) {
+        if (item.track !== ti) continue;
+        for (const draw of animLayers(item, t, animBeatTime(item))) {
+          const media = ctx.media.get(draw.slot.mediaId!);
+          if (!draw.layer.text && (!media || media.missing)) continue;
+          const clip = animClip(item, draw, media, this.w / this.h);
+          active.add(clip.id);
+          if (draw.mask) {
+            const mask = this.animMask(item, draw, t, ctx);
+            if (!mask) continue;
+            this.clear(TA, true);
+            this.drawClip(TA, clip, t, ctx, mode, playing, false);
+            const out = cur === this.targets[2] ? this.targets[3] : this.targets[2];
+            this.maskPass(out, cur, TA, mask);
+            cur = out;
+          } else this.drawClip(cur, clip, t, ctx, mode, playing, clip.blend ?? true);
+        }
+      }
     });
 
     // 最上層的特效（在所有影片軌上方）
@@ -1358,8 +1455,9 @@ export class Renderer {
       if (tex) this.gl.deleteTexture(tex);
       this.textures.delete(key);
     }
-    const roots = new Set(ctx.clips.map((c) => this.rootOf(c.id)));
     const activeRoots = new Set([...active].map((id) => this.rootOf(id)));
+    // 動畫的圖層不是時間軸上的片段：這一格畫到的也要留著（不然每格建了又刪，影片永遠載不出來）
+    const roots = new Set([...ctx.clips.map((c) => this.rootOf(c.id)), ...activeRoots]);
     // 每串（共用同一個 <video> 的片段）最後結束的時間
     const chainEnd = new Map<string, number>();
     for (const c of ctx.clips) {
@@ -1448,13 +1546,23 @@ export class Renderer {
   }
 
   /** 匯出用：精準 seek 到每個需要的影格，確定畫面就緒後才回傳 */
-  async prepareExact(ctx: RenderCtx, t: number) {
+  private exportFrames = new Map<string, { frame: VideoFrame; pts: number }>();
+  private exportUploaded = new Set<string>();
+
+  clearExportFrames() { this.exportFrames.clear(); this.exportUploaded.clear(); }
+
+  async prepareExact(ctx: RenderCtx, t: number, frameFor?: ExportFrameSource) {
+    this.clearExportFrames();
     this.updateChains(ctx);
     const list: [Clip, number][] = [];
     for (const clips of ctx.videoTracks) {
       const fr = computeFrame(clips, t);
       if (fr.kind === 'clip') list.push([fr.clip, t - fr.clip.start]);
       else if (fr.kind === 'transition') for (const c of [fr.A, fr.B]) if (c) list.push([c, t - c.start]);
+    }
+    for (const item of ctx.anims) for (const draw of animLayers(item, t, animBeatTime(item))) {
+      if (draw.layer.text || !ctx.media.has(draw.slot.mediaId!)) continue;
+      list.push([animClip(item, draw), t - item.start]);
     }
     for (const [c, local] of list) {
       const media = ctx.media.get(c.mediaId);
@@ -1466,6 +1574,14 @@ export class Renderer {
         continue;
       }
       if (media.kind !== 'video') continue;
+      if (frameFor) {
+        const { src } = clipSource(c, local, media, ctx.modules);
+        const frame = await frameFor(c, media, src);
+        if (frame) {
+          this.exportFrames.set(c.id, { frame, pts: frame.timestamp / 1e6 });
+          continue;
+        }
+      }
       const v = this.videoFor(c, media, false);
       v.pause();
       if (v.readyState < 1) await waitEvent(v, 'loadedmetadata');
@@ -1473,21 +1589,41 @@ export class Renderer {
       if (Math.abs(v.currentTime - src) > 1e-4 || v.readyState < 2) {
         const done = waitEvent(v, 'seeked');
         v.currentTime = src;
-        await done;
+        if (await done) continue;
+        // 跳轉逾時（解碼器卡住了）：換一個新的 <video> 再試一次，不然之後每一格都要等逾時
+        this.dropVideo(c);
+        const w = this.videoFor(c, media, false);
+        if (w.readyState < 1) await waitEvent(w, 'loadedmetadata');
+        const again = waitEvent(w, 'seeked');
+        w.currentTime = src;
+        await again;
       }
     }
   }
+
+  /** 丟掉這個片段用的 <video>（下次 videoFor 會建新的）；馬上放掉解碼器 */
+  private dropVideo(clip: Clip) {
+    const key = this.rootOf(clip.id);
+    const v = this.videos.get(key);
+    if (!v) return;
+    this.videos.delete(key);
+    v.pause();
+    v.removeAttribute('src');
+    v.load();
+  }
 }
 
+/** 等事件；true = 等到了、false = 逾時 */
 function waitEvent(el: HTMLElement, ev: string, timeout = 4000) {
-  return new Promise<void>((resolve) => {
-    const finish = () => {
-      el.removeEventListener(ev, finish);
+  return new Promise<boolean>((resolve) => {
+    const finish = (ok: boolean) => {
+      el.removeEventListener(ev, hit);
       clearTimeout(timer);
-      resolve();
+      resolve(ok);
     };
-    const timer = setTimeout(finish, timeout);
-    el.addEventListener(ev, finish);
+    const hit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeout);
+    el.addEventListener(ev, hit);
   });
 }
 
@@ -1512,8 +1648,8 @@ export function applyTransitionBlocks(clips: Clip[], track: number, blocks: FxIt
   });
 }
 
-export function makeCtx(s: { clips: Clip[]; effects: FxItem[]; modules: Module[]; media: Media[]; tracks: Tracks; audios?: AudioClip[] }): RenderCtx {
-  const key = [s.clips, s.effects, s.modules, s.media, s.tracks, s.audios];
+export function makeCtx(s: { clips: Clip[]; effects: FxItem[]; modules: Module[]; media: Media[]; tracks: Tracks; audios?: AudioClip[]; anims?: AnimItem[] }): RenderCtx {
+  const key = [s.clips, s.effects, s.modules, s.media, s.tracks, s.audios, s.anims];
   if (ctxCache.ctx && key.every((k, i) => k === ctxCache.key[i])) return ctxCache.ctx;
   ctxCache.key = key;
   const modules = new Map(s.modules.map((m) => [m.id, m]));
@@ -1525,6 +1661,7 @@ export function makeCtx(s: { clips: Clip[]; effects: FxItem[]; modules: Module[]
     audios: s.audios ?? [],
     videoTracks,
     effects: blocks.length ? s.effects.filter((e) => !blocks.includes(e)) : s.effects,
+    anims: s.anims ?? [],
     tracks: s.tracks,
     modules,
     media: new Map(s.media.map((m) => [m.id, m])),

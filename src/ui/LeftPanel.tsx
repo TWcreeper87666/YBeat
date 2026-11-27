@@ -50,6 +50,7 @@ import { closeSource, openSource, useSource } from './SourcePanel';
 import { useDock } from './Dock';
 import { aspectOf, formatBitrate, formatBytes, formatFps, probeMedia, type MediaProbe } from '../engine/mediaInfo';
 import { confirmDialog, openMenu, promptDialog, revealSelection, stopPreviewFx, toast, useColorPick, useLayout, useLibFocus, usePreviewFx, type MenuItem } from './uiStore';
+import { AnimInspector } from './AnimPanel';
 import { DragNumber } from './DragNumber';
 import { ModuleCode } from './ModuleCode';
 import { newModule, openModuleEditor } from './CodePanel';
@@ -485,6 +486,13 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
   const sortable = cat === 'fav' && !q.trim() && !onPick;
   const sortOpts = (id: string) => (sortable ? favSortOpts(gridRef.current, id, modules.map((m) => m.id), kind) : undefined);
   const setCat = (c: string) => useLayout.getState().set({ modCat: { ...useLayout.getState().modCat, [kind]: c } });
+  const focus = useLibFocus();
+  useEffect(() => {
+    if (!focus.id || !ofKind.some((m) => m.id === focus.id)) return;
+    setQ('');
+    if (cat !== 'all') setCat('all');
+    requestAnimationFrame(() => gridRef.current?.querySelector(`[data-module-id="${CSS.escape(focus.id!)}"]`)?.scrollIntoView({ block: 'nearest' }));
+  }, [focus.n]); // eslint-disable-line react-hooks/exhaustive-deps
   const toggleFav = (id: string) => useFavorites.getState().toggle(kind, id);
   const cats = [
     { id: 'all', label: $t('全部') },
@@ -628,8 +636,9 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
           {modules.map((m) => (
             <div
               key={m.id}
+              data-module-id={m.id}
               data-sort-key={sortable ? m.id : undefined}
-              className={`lib-item mod mk-${kind} ${!onPick && previewing === m.id ? 'previewing' : ''} ${current === m.id ? 'current' : ''}`}
+              className={`lib-item mod mk-${kind} ${!onPick && previewing === m.id ? 'previewing' : ''} ${!onPick && focus.id === m.id && previewing === m.id ? 'selected' : ''} ${current === m.id ? 'current' : ''}`}
               onPointerDown={(e) => !onPick && startLibraryDrag(e, { kind: 'module', id: m.id, moduleKind: kind }, displayName(m.name), undefined, sortOpts(m.id))}
               onClick={(e) => (onPick ? onPick(m.id) : togglePreview(m.id, e.altKey && kind !== 'remap'))}
               onContextMenu={(e) => (onPick ? e.preventDefault() : itemMenu(e, m))}
@@ -701,13 +710,14 @@ export function InspectorPanel() {
       {sel?.type === 'transition' && <TransitionInspector key={sel.id} selId={sel.id} />}
       {sel?.type === 'effect' && <EffectInspector id={sel.id} />}
       {sel?.type === 'audio' && <AudioInspector id={sel.id} />}
+      {sel?.type === 'anim' && <AnimInspector id={sel.id} />}
     </div>
   );
 }
 
 /** 屬性面板標題：種類 + 名稱（可以重新命名，太長會變成 …） */
 /** tag：種類標籤後面的小標籤（例如特效方塊疊加了幾個特效） */
-function Title({ kind, label, name, onRename, tag }: { kind: string; label: string; name: string; onRename?: (n: string) => void; tag?: React.ReactNode }) {
+export function Title({ kind, label, name, onRename, tag }: { kind: string; label: string; name: string; onRename?: (n: string) => void; tag?: React.ReactNode }) {
   const [edit, setEdit] = useState(false);
   const finish = (v: string | null) => {
     setEdit(false);
@@ -1174,11 +1184,11 @@ function ClipInspector({ id }: { id: string }) {
       rows: [
         { label: $t('模式'), node: <RemapPick clip={clip} /> },
         ...paramRows(defs, clip.remap.params, onRemapParams),
-        ...(clip.remap.moduleId !== 'remap-speed'
+        ...(clip.remap.moduleId !== 'remap-speed' && clip.remap.moduleId !== 'remap-none'
           ? [{ label: $t('整體速率'), node: <DragNumber variant="text" value={clip.rate ?? 1} min={0.05} max={16} step={0.01} def={1} suffix="×" onChange={(v) => updateClip(clip.id, { rate: v })} /> }]
           : []),
       ],
-      footer: <ModuleCode module={remapMod} onFork={(nid) => updateClip(clip.id, { remap: { ...clip.remap, moduleId: nid } })} />,
+      footer: clip.remap.moduleId === 'remap-none' ? undefined : <ModuleCode module={remapMod} onFork={(nid) => updateClip(clip.id, { remap: { ...clip.remap, moduleId: nid } })} />,
     });
   }
   const la = linkedAudio;

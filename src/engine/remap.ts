@@ -53,13 +53,13 @@ export function getRemapFn(m: Module): RemapFn | null {
   return e.fn;
 }
 
-/** 若片段使用內建「變速」且非倒放，回傳速度（用於原音播放 / 混音）；否則 null */
+/** 一般播放與內建變速的速度（用於原音播放 / 混音）；其他模式回傳 null */
 export function plainSpeed(clip: Clip, modules: Map<string, Module>): number | null {
+  if (clip.remap.moduleId === 'remap-none') return clip.rate ?? 1;
   if (clip.remap.moduleId !== 'remap-speed') return null;
   const m = modules.get('remap-speed');
   if (!m) return 1;
   const p = resolveParams(parseParams(m.code), clip.remap.params);
-  if (p.reverse) return null;
   return (Number(p.speed) || 1) * (clip.rate ?? 1);
 }
 

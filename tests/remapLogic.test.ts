@@ -27,12 +27,13 @@ describe('remap 純邏輯', () => {
   });
 
   it('一般速度、反向與片段 rate', () => {
-    const speed = moduleOf('remap-speed', '// @param speed: float = 1 (0.1..10)\n// @param reverse: bool = false\nfunction remap(t, p) { return t * p.speed; }');
+    const speed = moduleOf('remap-speed', '// @param speed: float = 1 (0.1..10)\nfunction remap(t, p) { return t * p.speed; }');
     const modules = new Map([['remap-speed', speed]]);
     assert.equal(plainSpeed(clip({ remap: { moduleId: 'none', params: {} } }), modules), null);
     assert.equal(plainSpeed(clip({ remap: { moduleId: 'remap-speed', params: {} } }), new Map()), 1);
     assert.equal(plainSpeed(clip({ rate: 1.5, remap: { moduleId: 'remap-speed', params: { speed: 2 } } }), modules), 3);
-    assert.equal(plainSpeed(clip({ remap: { moduleId: 'remap-speed', params: { reverse: true } } }), modules), null);
+    assert.equal(plainSpeed(clip({ rate: 1.5, remap: { moduleId: 'remap-none', params: {} } }), modules), 1.5);
+    assert.equal(plainSpeed(clip({ remap: { moduleId: 'remap-reverse', params: {} } }), modules), null);
   });
 
   it('來源時間受 in、rate 與素材尾端限制', () => {

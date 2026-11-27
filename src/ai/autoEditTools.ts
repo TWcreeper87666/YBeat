@@ -11,7 +11,7 @@ import { categoryOf } from '../modules/categories';
 import { BUILTIN_COMBOS } from '../modules/combos';
 import { RECIPES, type FxRule, type Recipe, type RecipeId, type RuleWhen } from '../engine/autoEdit';
 import { transitionOpt } from '../engine/autoEditPools';
-import { aeSong, footage, lastTake, myStyleSettings, songKey, songMedia, styleSettings, useAutoEdit, wholeSeg, type AutoEditSettings } from '../engine/autoEditSettings';
+import { aeSong, footage, lastTake, myStyleSettings, songKey, songMedia, styleSettings, trWeight, useAutoEdit, wholeSeg, type AeSong, type AeZone, type AutoEditSettings } from '../engine/autoEditSettings';
 import { STYLE_IDS } from '../engine/autoEditStyles';
 import type { BeatEvery } from '../engine/trigger';
 import { FLAT_SHAPE, shapeMusic, type EnergyShape } from '../engine/energyShape';
@@ -44,7 +44,7 @@ export const AUTO_EDIT_DECLS = [
     parameters: {
       type: 'object',
       properties: {
-        style: { type: 'string', description: `preset (${STYLE_IDS.join(', ')}; velocity = speed ramps + zoom / shake every beat) or the name of one of the user's saved styles (get_auto_edit.my_styles); resets the numbers, fx layers and transition weights before the overrides below` },
+        style: { type: 'string', description: `preset (${STYLE_IDS.join(', ')}; energetic styles cut every beat in high-energy sections, shake on cuts and keep vignette / flicker throughout; velocity adds speed ramps) or the name of one of the user's saved styles (get_auto_edit.my_styles); resets the numbers, fx layers and transition weights before the overrides below` },
         density: num('0..2, multiplies the chance of every fx layer (1 = as set)'),
         intensity: num('0..1, strength of the effects in the fx layers (0.5 = normal)'),
         fx_layers: {
@@ -73,6 +73,26 @@ export const AUTO_EDIT_DECLS = [
         music: { type: 'string', description: 'media id of the song to cut to (an audio / video file in the library with beats); the take is placed after the end of the timeline' },
         music_range: { type: 'array', items: { type: 'number' }, description: '[start, end] seconds inside the song; omit for the whole song' },
         chorus: { type: 'array', items: { type: 'number' }, description: 'chorus starts, seconds inside the song (subject pops go only there); empty array = detect automatically' },
+        zones_auto: { type: 'boolean', description: 'true = drop the zones set by the user and go back to automatic zones' },
+        zones: {
+          type: 'array',
+          description: "Replace the zones: time ranges of the song (seconds inside the song, snapped to beats, no overlap) whose settings override the style there. Keep each zone's prompt (the user's instruction for that zone, from get_auto_edit.music.selected.zones) unless asked. transitions_mode: style = the style's transitions, none = hard cuts only, only = just the ids in transitions; transition_rate 0..1 = cut transition chance there; style_fx_rate 0..2 multiplies the chance of the style's fx layers there (0 = off); fx_layers: extra layers only in this zone (same format as fx_layers, levels ignored); beats_per_shot: fixed shot length there (1..32); subject_pop / speed_ramps: false = none in this zone. Empty array = no zones. When the song has no zones of its own, automatic zones are used (calm opening section: longer shots, fewer transitions; climax sections: tighter and busier); get_auto_edit shows them with zones_auto = true, and setting zones replaces them.",
+          items: {
+            type: 'object',
+            properties: {
+              from_sec: num(''), to_sec: num(''), prompt: { type: 'string' },
+              transitions_mode: { type: 'string', enum: ['style', 'none', 'only'] },
+              transitions: { type: 'array', items: { type: 'string' } },
+              transition_rate: num(''), style_fx_rate: num(''),
+              fx_layers: { type: 'array', items: { type: 'object', properties: {
+                effect: { type: 'string' }, when: { type: 'string', enum: ['beat', 'cut', 'accent', 'drop', 'section'] },
+                every: num(''), chance: num(''), beats: num(''), on: { type: 'boolean' },
+              }, required: ['effect', 'when'] } },
+              beats_per_shot: num(''), subject_pop: { type: 'boolean' }, speed_ramps: { type: 'boolean' },
+            },
+            required: ['from_sec', 'to_sec'],
+          },
+        },
         order: { type: 'string', enum: ['library', 'shuffle', 'bag'], description: 'library = list order; shuffle = random, picks what fits each section; bag = every media once per round in a shuffled order, segments of the same video kept apart' },
         ken_burns: { type: 'boolean', description: 'slow push in / pull out on images; shots with a detected face (videos too) push in on the face' },
         analyze: { type: 'boolean', description: 'pick video segments by motion / quality / avoiding cuts already inside the source video' },
@@ -116,6 +136,44 @@ export const AUTO_EDIT_DECLS = [
 
 const r2 = (x: number) => Math.round(x * 100) / 100;
 
+const layerOut = (r: FxRule) => ({ effect: r.moduleId, when: r.when, ...(r.every ? { every: r.every } : {}), levels: r.levels, chance: r.chance, ...(r.beats ? { beats: r.beats } : {}), on: r.on });
+const zoneOut = (z: AeZone) => ({
+  from_sec: r2(z.t0), to_sec: r2(z.t1), ...(z.prompt ? { prompt: z.prompt } : {}),
+  transitions_mode: z.tr === undefined ? 'style' : z.tr === null ? 'none' : 'only', ...(z.tr ? { transitions: z.tr } : {}),
+  ...(z.trRate !== undefined ? { transition_rate: z.trRate } : {}), ...(z.fxRate !== undefined ? { style_fx_rate: z.fxRate } : {}),
+  ...(z.rules?.length ? { fx_layers: z.rules.map(layerOut) } : {}), ...(z.beatsPerShot ? { beats_per_shot: z.beatsPerShot } : {}),
+  ...(z.noPop ? { subject_pop: false } : {}), ...(z.noSpeed ? { speed_ramps: false } : {}),
+});
+
+/** 歌的秒數 → 最近的一拍（歌的範圍外 = 範圍的頭 / 尾） */
+function snapToBeat(s: S, song: AeSong, t: number): number {
+  if (t <= song.a + 0.05) return song.a;
+  if (t >= song.b - 0.05) return song.b;
+  const beats = (mediaBeats(s.media.find((m) => m.id === song.mediaId))?.beats ?? []).filter((b) => b.t >= song.a && b.t < song.b);
+  let best = t, d = Infinity;
+  for (const b of beats) if (Math.abs(b.t - t) < d) { d = Math.abs(b.t - t); best = b.t; }
+  return best;
+}
+
+/** fx_layers（全域或分段的）→ 特效層；zone = 分段的（不看能量） */
+function parseLayers(raw: unknown, path: string, effects: { id: string }[], fail: (m: string) => never, zone = false): FxRule[] {
+  if (!Array.isArray(raw)) fail(`${path} must be an array`);
+  const WHEN: RuleWhen[] = ['beat', 'cut', 'accent', 'drop', 'section'];
+  return (raw as Record<string, unknown>[]).map((x, i): FxRule => {
+    const effect = String(x.effect);
+    if (!effects.some((e) => e.id === effect)) fail(`${path}[${i}].effect: unknown id ${effect}`);
+    const when = String(x.when) as RuleWhen;
+    if (!WHEN.includes(when)) fail(`${path}[${i}].when must be one of ${WHEN.join(', ')}`);
+    const every = ([0.5, 1, 2, 4] as BeatEvery[]).includes(x.every as BeatEvery) ? (x.every as BeatEvery) : 1;
+    const levels = zone ? [0, 1, 2] as (0 | 1 | 2)[] : Array.isArray(x.levels)
+      ? [...new Set(x.levels.map(Number).filter((l) => l === 0 || l === 1 || l === 2))] as (0 | 1 | 2)[]
+      : [1, 2] as (0 | 1 | 2)[];
+    const chance = typeof x.chance === 'number' && Number.isFinite(x.chance) ? Math.min(1, Math.max(0, x.chance)) : 1;
+    const beats = typeof x.beats === 'number' && x.beats > 0 ? Math.min(16, x.beats) : undefined;
+    return { id: uid(), moduleId: effect, on: x.on !== false, when, ...(when === 'beat' ? { every } : {}), levels, chance, ...(beats ? { beats } : {}) };
+  });
+}
+
 /** 候選清單：id、名稱、分類（給 AI 看、也拿來解析 category:） */
 function pools(s: S) {
   const combos = usePrefs.getState().fxCombos;
@@ -138,10 +196,11 @@ export function readAutoEdit(s: S): Record<string, unknown> {
   const info = raw && shapeMusic(raw, st.shape);
   const p = st.params;
   const P = pools(s);
+  const zonesNow = lastTake.zones();
   const trStrength = new Map(s.modules.filter((m) => m.kind === 'transition').map((m) => [m.id, transitionOpt(m).strength]));
   return {
     music: {
-      selected: song ? { id: song.mediaId, range: [r2(song.a), r2(song.b)], chorus: song.chorus ?? [] } : null,
+      selected: song ? { id: song.mediaId, range: [r2(song.a), r2(song.b)], chorus: song.chorus ?? [], zones_auto: zonesNow.auto, zones: zonesNow.list.map(zoneOut) } : null,
       options: music.map((m) => ({ id: m.id, name: m.name, duration: r2(m.duration) })),
       ...(bpm ? { bpm: r2(bpm) } : {}),
       ...(info ? {
@@ -159,7 +218,7 @@ export function readAutoEdit(s: S): Record<string, unknown> {
     variation: p.jitter, min_shot_sec: p.minShotSec, max_shot_sec: p.maxShotSec,
     transition_rate: p.transitionRate, section_transition_rate: p.sectionTransitionRate, transition_beats: p.transitionBeats,
     density: st.density, intensity: st.intensity,
-    fx_layers: st.rules.map((r) => ({ effect: r.moduleId, when: r.when, ...(r.every ? { every: r.every } : {}), levels: r.levels, chance: r.chance, ...(r.beats ? { beats: r.beats } : {}), on: r.on })),
+    fx_layers: st.rules.map(layerOut),
     order: st.order, ken_burns: st.kenBurns,
     energy: { gain: st.shape.gain, contrast: st.shape.contrast, points: st.shape.points.map((p) => ({ at: r2(p.x), offset: r2(p.y) })) },
     subject_pop: { on: st.popOn, variants: st.popVariants, per_32: st.popsPer32, text: st.popText },
@@ -169,7 +228,7 @@ export function readAutoEdit(s: S): Record<string, unknown> {
     media: P.media.map((m) => ({ ...m, on: st.pick !== 'list' || st.segs.some((g) => g.mediaId === m.id) })),
     // 使用者在面板指定的片段（影片的範圍）；關掉素材 = 拿掉它的片段、打開 = 整段加入
     ...(st.pick === 'list' ? { segments: st.segs.map((g) => ({ media: g.mediaId, from_sec: r2(g.a), to_sec: r2(g.b), ...(g.name ? { name: g.name } : {}) })) } : {}),
-    transitions: P.transitions.map((m) => ({ ...m, strength: trStrength.get(m.id), weight: st.trWeights[m.id] ?? 1 })),
+    transitions: P.transitions.map((m) => ({ ...m, strength: trStrength.get(m.id), weight: trWeight(st.trWeights, m.id) })),
     effects: P.effects,
   };
 }
@@ -278,7 +337,9 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
       if (!c.every((t) => Number.isFinite(t) && t >= 0)) fail('chorus must be an array of seconds');
       chorus = c.length ? [...new Set(c)].sort((x, y) => x - y) : undefined;
     }
-    patch.song = { mediaId: m!.id, a: ab[0], b: ab[1], ...(chorus?.length ? { chorus } : {}) };
+    // 同一首歌：分段留著（範圍外的下面夾掉）
+    const zones = same ? cur?.zones?.filter((z) => z.t1 > ab[0] && z.t0 < ab[1]).map((z) => ({ ...z, t0: Math.max(ab[0], z.t0), t1: Math.min(ab[1], z.t1) })) : undefined;
+    patch.song = { mediaId: m!.id, a: ab[0], b: ab[1], ...(chorus?.length ? { chorus } : {}), ...(zones?.length ? { zones } : {}) };
     changed++;
   }
   if (a.order !== undefined) {
@@ -368,25 +429,44 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
   }
   const P = pools(s);
   if (a.fx_layers !== undefined) {
-    if (!Array.isArray(a.fx_layers)) fail('fx_layers must be an array');
-    const WHEN: RuleWhen[] = ['beat', 'cut', 'accent', 'drop', 'section'];
-    patch.rules = (a.fx_layers as Record<string, unknown>[]).map((x, i): FxRule => {
-      const effect = String(x.effect);
-      if (!P.effects.some((e) => e.id === effect)) fail(`fx_layers[${i}].effect: unknown id ${effect}`);
-      const when = String(x.when) as RuleWhen;
-      if (!WHEN.includes(when)) fail(`fx_layers[${i}].when must be one of ${WHEN.join(', ')}`);
-      const every = ([0.5, 1, 2, 4] as BeatEvery[]).includes(x.every as BeatEvery) ? (x.every as BeatEvery) : 1;
-      const levels = Array.isArray(x.levels)
-        ? [...new Set(x.levels.map(Number).filter((l) => l === 0 || l === 1 || l === 2))] as (0 | 1 | 2)[]
-        : [1, 2] as (0 | 1 | 2)[];
-      const chance = typeof x.chance === 'number' && Number.isFinite(x.chance) ? Math.min(1, Math.max(0, x.chance)) : 1;
-      const beats = typeof x.beats === 'number' && x.beats > 0 ? Math.min(16, x.beats) : undefined;
-      return { id: uid(), moduleId: effect, on: x.on !== false, when, ...(when === 'beat' ? { every } : {}), levels, chance, ...(beats ? { beats } : {}) };
-    });
+    patch.rules = parseLayers(a.fx_layers, 'fx_layers', P.effects, fail);
     patch.recipe = 'custom';
     changed++;
   }
-  const trPick = pick(a.transitions, P.transitions, P.transitions.filter((m) => (trWeights[m.id] ?? 1) <= 0).map((m) => m.id), fail, 'transitions');
+  if (a.zones !== undefined) {
+    if (!Array.isArray(a.zones)) fail('zones must be an array');
+    const song = patch.song ?? aeSong(s, useAutoEdit.getState());
+    if (!song) fail('zones: no music selected');
+    const list: AeZone[] = [];
+    for (const [i, x] of (a.zones as Record<string, unknown>[]).entries()) {
+      const t0 = Number(x.from_sec), t1 = Number(x.to_sec);
+      if (!Number.isFinite(t0) || !Number.isFinite(t1) || t1 <= t0) fail(`zones[${i}]: from_sec / to_sec must be seconds, to > from`);
+      const mode = x.transitions_mode ?? (x.transitions !== undefined ? 'only' : 'style');
+      if (mode !== 'style' && mode !== 'none' && mode !== 'only') fail(`zones[${i}].transitions_mode must be style, none or only`);
+      const tr = mode === 'only' ? (Array.isArray(x.transitions) ? x.transitions.map(String) : []) : undefined;
+      for (const id of tr ?? []) if (!P.transitions.some((m) => m.id === id)) fail(`zones[${i}].transitions: unknown id ${id}`);
+      const rate = typeof x.transition_rate === 'number' && Number.isFinite(x.transition_rate) ? Math.min(1, Math.max(0, x.transition_rate)) : undefined;
+      const bps = typeof x.beats_per_shot === 'number' && x.beats_per_shot >= 1 ? Math.min(32, Math.round(x.beats_per_shot)) : undefined;
+      const rules = x.fx_layers !== undefined ? parseLayers(x.fx_layers, `zones[${i}].fx_layers`, P.effects, fail, true) : [];
+      list.push({
+        id: uid(), t0: snapToBeat(s, song!, t0), t1: snapToBeat(s, song!, t1),
+        ...(mode === 'none' ? { tr: null } : tr ? { tr } : {}), ...(rate !== undefined ? { trRate: rate } : {}),
+        ...(typeof x.style_fx_rate === 'number' && Number.isFinite(x.style_fx_rate) && x.style_fx_rate !== 1 ? { fxRate: Math.min(2, Math.max(0, x.style_fx_rate)) } : {}), ...(rules.length ? { rules } : {}),
+        ...(bps ? { beatsPerShot: bps } : {}), ...(x.subject_pop === false ? { noPop: true as const } : {}),
+        ...(x.speed_ramps === false ? { noSpeed: true as const } : {}),
+        ...(typeof x.prompt === 'string' && x.prompt.trim() ? { prompt: x.prompt.trim().slice(0, 300) } : {}),
+      });
+    }
+    const zones = list.filter((z) => z.t1 - z.t0 > 0.05).sort((p, q) => p.t0 - q.t0);
+    for (let i = 1; i < zones.length; i++) if (zones[i].t0 < zones[i - 1].t1 - 1e-3) fail('zones must not overlap');
+    patch.song = { ...song!, zones };
+    changed++;
+  } else if (a.zones_auto) {
+    const song = patch.song ?? aeSong(s, useAutoEdit.getState());
+    if (song) { const { zones: _z, ...rest } = song; patch.song = rest; }
+    changed++;
+  }
+  const trPick = pick(a.transitions, P.transitions, P.transitions.filter((m) => trWeight(trWeights, m.id) <= 0).map((m) => m.id), fail, 'transitions');
   // [{ id, weight }]（Gemini 的 schema 不支援 id → 數字的對照表）；舊的物件寫法也收
   const raw = a.transition_weights;
   const tw: Record<string, unknown> | undefined = Array.isArray(raw)
@@ -394,7 +474,7 @@ export function proposeAutoEdit(a: Record<string, unknown>, s: S, fail: (m: stri
     : raw && typeof raw === 'object' ? raw as Record<string, unknown> : undefined;
   if (trPick || tw) {
     const next = { ...trWeights };
-    if (trPick) for (const m of P.transitions) next[m.id] = trPick.includes(m.id) ? 0 : Math.max(1, next[m.id] ?? 1);
+    if (trPick) for (const m of P.transitions) next[m.id] = trPick.includes(m.id) ? 0 : Math.max(1, trWeight(next, m.id));
     for (const [id, v] of Object.entries(tw ?? {})) {
       if (!P.transitions.some((m) => m.id === id)) fail(`transition_weights: unknown id ${id}`);
       if (typeof v !== 'number' || !Number.isFinite(v)) fail(`transition_weights.${id} must be a number`);
