@@ -4,12 +4,12 @@ import { holdScrub, scrubFrameAt } from './scrubCache';
 import { previewUrl } from './proxy';
 import { ensureReverseFrames, reverseFrameAt } from './reverseCache';
 import { fxLevel, makeClip, type AnimItem, type BlendMode, type TransitionRef, type AudioClip, type AudioDrive, type AudioFrom, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
-import { animLayers, type AnimDrawLayer } from './animation';
+import { animBeatAtTime, animBeatLen, animLayers, animSecAt, type AnimDrawLayer } from './animation';
 import { traceMatte } from './subjectPop';
 import { maskAt, type Mask } from './mask';
 import { FIELD_RANGE, getShapeField, maskFieldKey, type ShapeField } from './maskShapes';
 import { CLIP_MASK_ID } from '../modules/extra';
-import { DEFAULT_TEXT, renderText, textKey } from './text';
+import { DEFAULT_TEXT, renderText, TEXT_PRESETS, textKey } from './text';
 import { fitScale, hexToRgb, isHitFx, isNumeric, paramAt, parseDuration, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
 import { clipSource, plainSpeed } from './remap';
 import { MATTE_SIZE, matteAt, requestMatte } from './matte';
@@ -41,15 +41,18 @@ const animBeatTime = (item: AnimItem) => {
   return i >= 0 && i + 1 < beats.length ? beats[i + 1] - beats[i] : item.duration / 4;
 };
 
+/** 動畫的文字層（文字在主體後面）：大字描邊，比主體寬，左右才露得出來 */
+const ANIM_TEXT = { ...(TEXT_PRESETS.find((p) => p.id === 'outline')?.style ?? {}), size: 380 };
+
 function animClip(item: AnimItem, draw: AnimDrawLayer, media?: Media, frameAspect?: number): Clip {
   const s = draw.slot;
   const crop = s.crop && media && frameAspect ? cropView(s.crop, media.width / media.height, frameAspect) : null;
-  const secAt = (beat: number) => item.beatTimes?.[beat] ?? beat * item.duration / 4;
+  const secAt = (beat: number) => animSecAt(item, beat);
   const effects = draw.layer.effects?.map((fx) => {
     if (!fx.beatEvery) return fx;
     const hits = [];
     for (let b = draw.layer.fromBeat; b < draw.layer.toBeat; b += fx.beatEvery)
-      hits.push({ t: secAt(b), d: Math.min((fx.hitBeats ?? 0.8) * animBeatTime(item), secAt(b + fx.beatEvery) - secAt(b)) });
+      hits.push({ t: secAt(b), d: Math.min((fx.hitBeats ?? 0.8) * animBeatLen(item), secAt(b + fx.beatEvery) - secAt(b)) });
     return { ...fx, timing: { kind: 'hits' as const, hits } };
   });
   return makeClip({ id: `anim:${item.id}:${s.id}:${draw.id}`, mediaId: s.mediaId!, track: item.track,
@@ -57,7 +60,7 @@ function animClip(item: AnimItem, draw: AnimDrawLayer, media?: Media, frameAspec
     aiMatte: s.cutout?.mode === 'auto', blend: draw.layer.blend,
     transform: { x: draw.x + (crop?.x ?? 0) * draw.scaleX, y: draw.y + (crop?.y ?? 0) * draw.scaleY,
       scaleX: draw.scaleX * (crop?.s ?? 1), scaleY: draw.scaleY * (crop?.s ?? 1), rotation: draw.rotation, opacity: draw.opacity },
-    effects, ...(draw.layer.text ? { text: { ...DEFAULT_TEXT, text: draw.layer.text }, fit: 'contain' as const } : {}) });
+    effects, ...(draw.layer.text ? { text: { ...DEFAULT_TEXT, ...ANIM_TEXT, text: draw.layer.text }, fit: 'contain' as const } : {}) });
 }
 
 export type FrameInfo =
@@ -1278,7 +1281,7 @@ export class Renderer {
       }
     }
     if (!path) return null;
-    const beat = (t - item.start) / animBeatTime(item);
+    const beat = animBeatAtTime(item, t, animBeatTime(item));
     const scale = draw.mask?.scale?.length ? evalKeys(draw.mask.scale, beat) : 1;
     const guide = animLayers(item, t, animBeatTime(item)).find((l) => l.layer.id === maskLayer?.id);
     return { shape: 'path', path, invert: draw.mask?.mode === 'hole',

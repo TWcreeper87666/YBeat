@@ -1,4 +1,5 @@
 import { snapFrame } from '../engine/rulerTicks';
+import { snapActive } from './snapKey';
 import { animDropDur, placeAnim, setAnimSlot } from '../engine/animPlace';
 import { stopLibraryPreview } from './SourcePanel';
 import { $t, displayName } from '../i18n';
@@ -9,7 +10,8 @@ import { showPendingPlacement } from './Timeline';
 import { parseDuration } from '../engine/params';
 import { addMediaBlob, addMediaFiles, colorMedia } from '../engine/media';
 import { fitInGap, fitStart } from '../engine/overlap';
-import { laneSnapPoints } from '../engine/snap';
+import { snapSpan } from '../engine/snap';
+import { beatSnapPoints } from './beatGrid';
 import { fxCombo, stillDur, userTextStyle } from '../prefs';
 import { applyMediaBatch, planMediaBatch } from '../engine/mediaBatch';
 import { TEXT_PRESETS } from '../engine/text';
@@ -60,7 +62,7 @@ function laneDuration(payload: DragPayload): { dur: number; label: string; accep
     return { dur: stillDur(), label: p?.name ?? '', accepts: (k) => k === 'video' };
   }
   if (payload.kind === 'files') return { dur: stillDur(), label: $t('{0} 個檔案', payload.count), accepts: (k) => k !== 'fx' };
-  if (payload.kind === 'anim') return { dur: animDropDur(), label: $t('動畫'), accepts: (k) => k === 'video' };
+  if (payload.kind === 'anim') return { dur: animDropDur(payload.id), label: $t('動畫'), accepts: (k) => k === 'video' };
   return null;
 }
 
@@ -86,11 +88,12 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
     if (onSong) return null;
     return ids.some((id) => { const m = s.media.find((x) => x.id === id); return mediaUsable(m) && m.kind !== 'audio'; }) ? { kind: 'autoEdit', whole: alt } : null;
   }
-  // 素材拖到動畫的圖片位置（屬性面板裡的那一列）：換那一張
-  if (payload.kind === 'media') {
+  // 素材 / 色板拖到動畫的圖片位置（屬性面板裡的那一列）：換那一張
+  if (payload.kind === 'media' || payload.kind === 'color') {
     const slotEl = els.find((e) => e.dataset.animSlot);
     if (slotEl) {
       const [animId, slotId] = slotEl.dataset.animSlot!.split('|');
+      if (payload.kind === 'color') return { kind: 'animSlot', animId, slotId };
       const m = s.media.find((x) => x.id === payload.id);
       return mediaUsable(m) && m.kind !== 'audio' ? { kind: 'animSlot', animId, slotId } : null;
     }
@@ -203,30 +206,25 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
   const info = laneDuration(payload);
   if (!info || !info.accepts(lane)) return null;
 
-  // Ghost placement snaps to visible timeline items across every track.
+  // 吸附（跟在時間軸上拖片段一樣）：開頭或結尾吸到播放頭、節拍、標記、所有軌道的片段 / 特效 / 動畫頭尾
   const pps = s.pps;
   // 時間軸最小單位是一格（1/60 秒）
   let time = Math.max(0, snapFrame((x - laneEl.getBoundingClientRect().left) / pps));
+  let snapped: number | null = null;
+  if (snapActive()) {
+    const attached = attachedAudioIds(s);
+    const pts = [0, s.time, ...beatSnapPoints(), ...s.markers.map((m) => m.t)];
+    for (const it of [...s.clips, ...s.effects, ...s.anims, ...s.audios.filter((a) => !attached.has(a.id))]) pts.push(it.start, it.start + it.duration);
+    const r = snapSpan(time, info.dur, pts, SNAP_PX / pps);
+    time = r.start;
+    snapped = r.line;
+  }
+  useSnapLine.setState({ t: snapped });
   if (payload.kind === 'mediaBatch') {
     const items = planMediaBatch(payload.ids, time, { kind: lane, track: idx });
     if (!items?.length) return null;
     return { kind: 'lane', lane, idx, time: items[0].start, duration: info.dur, label: info.label, items };
   }
-  const attached = attachedAudioIds(s);
-  const snapItems = [
-    ...s.clips,
-    ...s.effects,
-    ...s.audios.filter((a) => !attached.has(a.id)),
-  ];
-  const pts = laneSnapPoints(snapItems, s.time, info.dur);
-  let best = SNAP_PX / pps;
-  let snapped: number | null = null;
-  if (s.snap) {
-    for (const p of pts) {
-      if (p >= 0 && Math.abs(p - time) < best) { best = Math.abs(p - time); time = p; snapped = p; }
-    }
-  }
-  useSnapLine.setState({ t: snapped });
   // 素材 / 色板：放在游標位置；跟其他片段重疊時，放開後再選覆蓋、取代、插入…
   if (payload.kind === 'media' || payload.kind === 'color') {
     const lk = `${lane}:${idx}`;
@@ -276,6 +274,10 @@ export async function applyDrop(payload: DragPayload, target: DropTarget, files?
   }
   if (target.kind === 'animSlot') {
     if (payload.kind === 'media') setAnimSlot(target.animId, target.slotId, payload.id);
+    else if (payload.kind === 'color') {
+      const m = await colorMedia(payload.color);
+      if (m) setAnimSlot(target.animId, target.slotId, m.id);
+    }
     return;
   }
   if (payload.kind === 'anim') {

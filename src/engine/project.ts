@@ -1,7 +1,7 @@
 import { $t } from '../i18n';
 import { afterRelease, pointerHeld } from './pointerHold';
 import { create } from 'zustand';
-import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, mergeModules, makeClip, useStore, type AudioClip, type Clip, type FxItem, type AnimItem, type Marker, type Media, type Tracks } from '../store';
+import { DEFAULT_FORMAT, DEFAULT_TRACKS, type Format, makeAudio, mergeModules, makeClip, usedMediaIds, useStore, type AudioClip, type Clip, type FxItem, type AnimItem, type Marker, type Media, type Tracks } from '../store';
 import type { Module } from '../modules/builtin';
 import { historyPath, resetHistory, settleHistory } from './history';
 import { clearDetachedMedia } from './detachedMedia';
@@ -187,7 +187,7 @@ async function loadProject() {
         await pruneCaches(keep);
       } catch (e) { console.warn($t('素材清理失敗'), e); }
       const media: Media[] = [];
-      const referenced = new Set([...(data.clips ?? []), ...(data.audios ?? [])].map((c) => c.mediaId));
+      const referenced = usedMediaIds({ clips: data.clips ?? [], audios: data.audios ?? [], anims: data.anims ?? [] });
       for (const m of data.media) {
         const color = m.color;
         // 色板：時間軸沒用到就不載入；資料不見就重新產生（不會變成遺失）

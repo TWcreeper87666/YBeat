@@ -1,4 +1,4 @@
-import { axisAligned, laneSnapPoints, rotatedHalf, snapMoveAxis, snapScaleAxis, snapTargetIfApplied } from '../src/engine/snap';
+import { axisAligned, rotatedHalf, snapSpan, snapMoveAxis, snapScaleAxis, snapTargetIfApplied } from '../src/engine/snap';
 
 let fails = 0;
 const ok = (cond: boolean, msg: string) => {
@@ -50,8 +50,12 @@ ok(snapTargetIfApplied({ v: 10, d: 2 }, 10) === 10, '實際吸附到素材尾端
   ok(Math.abs(h.hx - 20) < 1e-9 && Math.abs(h.hy - 50) < 1e-9, '旋轉 90° 半寬半高對調');
 }
 {
-  const points = laneSnapPoints([{ start: 5, duration: 2 }], 8, 3);
-  ok(points.includes(5) && points.includes(7) && points.includes(2), 'Ghost 對齊其他軌道片段的頭尾與接續位置');
+  ok(snapSpan(4.9, 3, [5, 20], 0.2).start === 5, '開頭吸到點');
+  const e = snapSpan(1.9, 3, [5, 20], 0.2);
+  ok(e.start === 2 && e.line === 5, '結尾吸到點（開頭跟著移）');
+  ok(snapSpan(4.85, 3, [5, 7.9], 0.2).start === 4.9, '開頭、結尾都能吸時取最近的');
+  ok(snapSpan(10, 3, [5, 20], 0.2).line === null, '太遠不吸');
+  ok(snapSpan(0.1, 3, [2.95], 0.2).line === null, '結尾吸過去會讓開頭變負的 → 不吸');
 }
 
 console.log(fails ? `\n${fails} 項失敗` : '\n全部通過');

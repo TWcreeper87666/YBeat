@@ -3,7 +3,7 @@
  * 預覽 / 匯出時直接拿最接近的那一格。推論在 matteWorker.ts 裡跑。
  */
 import { create } from 'zustand';
-import { useStore, type Clip, type Media, type Module } from '../store';
+import { useStore, type AnimItem, type Clip, type Media, type Module } from '../store';
 import { clipSource } from './remap';
 import type { MatteReq, MatteRes } from './matteWorker';
 import { hasKeyIn, insertKey, pickFrame, snapFps, toKey } from './matteIndex';
@@ -122,6 +122,15 @@ async function persist(mediaId: string) {
   const idx = [...e.frames.keys()].sort((a, b) => a - b);
   const data = new Blob(idx.map((i) => e.frames.get(i)! as BlobPart));
   await idb('readwrite', (os) => os.put({ v: STORE_VERSION, fps: e.fps, off: e.off, step: e.step, idx, data }, mediaId)).catch((err) => console.warn('matte save failed', err));
+}
+
+/** 示範圖（素材庫試看用，不在專案裡）：直接給遮罩，不跑模型、不存檔 */
+export function seedMatte(mediaId: string, data: Uint8Array) {
+  const e = entry(mediaId);
+  if (e.frames.has(0)) return;
+  e.frames.set(0, data);
+  insertKey(e.keys, 0);
+  bump();
 }
 
 /** 素材被刪除 / 替換時清掉快取 */
@@ -475,6 +484,19 @@ export async function prepareMattes(clips: Clip[], media: Map<string, Media>, mo
     const m = media.get(c.mediaId);
     if (!m || m.missing || (m.kind !== 'video' && m.kind !== 'image')) continue;
     await ensureMatte(m, matteFrames(c, m, modules));
+  }
+}
+
+/** 匯出前：動畫要用到的那幾格（去背的圖片位置、拿來當遮罩輪廓的）先算好遮罩 */
+export async function prepareAnimMattes(anims: AnimItem[], media: Map<string, Media>) {
+  for (const a of anims) {
+    const masks = new Set(a.layers.flatMap((l) => (l.mask ? [l.mask.slotId] : [])));
+    for (const s of a.slots) {
+      if (!s.mediaId || (s.cutout?.mode !== 'auto' && !masks.has(s.id))) continue;
+      const m = media.get(s.mediaId);
+      if (!m || m.missing || (m.kind !== 'video' && m.kind !== 'image')) continue;
+      await ensureMatte(m, [m.kind === 'image' ? 0 : +s.sourceTime.toFixed(4)]);
+    }
   }
 }
 

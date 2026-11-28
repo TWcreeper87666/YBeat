@@ -3,7 +3,7 @@
  * 修改不會馬上執行：先驗證、收集成操作清單，聊天裡按「套用」才一次執行（一步復原）。
  */
 import { $t, displayName } from '../i18n';
-import { defaultTiming, parseKey, remapFor, srcAvail, uid, useStore, type AudioClip, type Clip, type FxItem, type Module, type ModuleKind, type TrSide } from '../store';
+import { defaultTiming, parseKey, remapFor, srcAvail, uid, useStore, type AnimItem, type AudioClip, type Clip, type FxItem, type Module, type ModuleKind, type TrSide } from '../store';
 import { parseParams, parsePointCh, type ParamValue, type ParamValues } from '../engine/params';
 import { newKey, sortKeys, type Keyframe } from '../engine/keyframes';
 import { normalizeHits, type FxTiming } from '../engine/trigger';
@@ -88,6 +88,18 @@ export const PROJECT_TOOL_DECLS: ToolDecl[] = [
         duration: num('seconds'),
         params: PARAMS,
       },
+    },
+  },
+  {
+    name: 'set_anim_slots',
+    description: 'Propose replacing images of an animation (get_timeline.animations): each item sets one image slot (subject, background, reveal, copy:N…) to a library media id (image or video; at_sec = which frame of a video, default 0), or media null to empty it. Other slots stay as they are.',
+    parameters: {
+      type: 'object',
+      properties: {
+        anim_id: str('animation id'),
+        items: { type: 'array', items: { type: 'object', properties: { slot: str('slot id'), media: str('media id, or empty to clear'), at_sec: { type: 'number' } }, required: ['slot'] } },
+      },
+      required: ['anim_id', 'items'],
     },
   },
   {
@@ -230,10 +242,12 @@ export type Op =
   /** 改「自動剪輯」面板的設定（不動專案）；generate = 套用後產生一版 */
   | { op: 'auto_edit'; patch: AutoEditPatch; generate: boolean; replaceLast: boolean }
   /**
-   * 一批新片段 / 特效方塊 / 音樂（自動剪輯）：clip.track = 第幾層（0 = 基本層，1 以上疊在上面）。
+   * 一批新片段 / 特效方塊 / 音樂 / 動畫（自動剪輯）：clip.track、anim.track = 第幾層（0 = 基本層，1 以上疊在上面）。
    * 每層放一條這段時間空著的影片軌（比這段時間有東西的軌道都高，沒有就新增）；effect.track = 第幾層特效，放在影片軌上方空著的特效軌；音樂放第一條空著的音訊軌
    */
-  | { op: 'add_items'; clips: Clip[]; effects: FxItem[]; audios?: AudioClip[] };
+  | { op: 'add_items'; clips: Clip[]; effects: FxItem[]; audios?: AudioClip[]; anims?: AnimItem[] }
+  /** 換動畫的圖片（每一項 = 一個圖片位置；media null = 清空；at = 影片用哪一秒那一格） */
+  | { op: 'set_anim_slots'; animId: string; items: { slotId: string; mediaId: string | null; at: number }[] };
 
 /** 提議的修改（顯示用的摘要 + 實際操作） */
 export interface Proposal { summary: string; op: Op }
@@ -397,6 +411,23 @@ function propose(name: string, a: Record<string, unknown>, s: S): { p: Proposal;
     return name === 'set_remap'
       ? { p: { summary: $t('變速 {0} ×{1}', modName(m), ids.length), op: { op: 'set_remap', moduleId: m.id, clipIds: ids, params } }, warn }
       : { p: { summary: $t('片段特效 {0} ×{1}', modName(m), ids.length), op: { op: 'add_clip_effects', moduleId: m.id, clipIds: ids, params } }, warn };
+  }
+
+  if (name === 'set_anim_slots') {
+    const an = s.anims.find((x) => x.id === String(a.anim_id));
+    if (!an) fail(`unknown animation ${String(a.anim_id)} (use get_timeline.animations)`);
+    const items = arr(a.items).map((x, i) => {
+      const o = x as { slot?: unknown; media?: unknown; at_sec?: unknown };
+      const slot = an!.slots.find((sl) => sl.id === String(o.slot));
+      if (!slot) fail(`items[${i}].slot: unknown slot ${String(o.slot)}; slots: ${an!.slots.map((sl) => sl.id).join(', ')}`);
+      const mid = o.media ? String(o.media) : null;
+      const m = mid ? s.media.find((x) => x.id === mid) : undefined;
+      if (mid && (!m || m.missing || m.kind === 'audio')) fail(`items[${i}].media: ${mid} is not a usable image / video`);
+      const at = isNum(o.at_sec) && m?.kind === 'video' ? Math.max(0, Math.min(m.duration - 0.05, o.at_sec)) : 0;
+      return { slotId: slot!.id, mediaId: mid, at };
+    });
+    if (!items.length) fail('items is empty');
+    return { p: { summary: $t('換動畫的圖片 ×{0}', items.length), op: { op: 'set_anim_slots', animId: an!.id, items } }, warn };
   }
 
   if (name === 'update_params') {
@@ -601,6 +632,7 @@ function readTimeline(s: S, a: Record<string, unknown>) {
   const clips = s.clips.filter((c) => inRange(c.start, c.duration, from, to)).sort((x, y) => x.track - y.track || x.start - y.start);
   const effects = s.effects.filter((e) => inRange(e.start, e.duration, from, to)).sort((x, y) => x.track - y.track || x.start - y.start);
   const audios = s.audios.filter((c) => inRange(c.start, c.duration, from, to)).sort((x, y) => x.track - y.track || x.start - y.start);
+  const anims = s.anims.filter((x) => inRange(x.start, x.duration, from, to)).sort((x, y) => x.start - y.start);
   const end = Math.max(0, ...[...s.clips, ...s.effects, ...s.audios].map((x) => x.start + x.duration));
   const cut = <T,>(l: T[]) => l.slice(0, MAX_ITEMS);
   return {
@@ -630,6 +662,11 @@ function readTimeline(s: S, a: Record<string, unknown>) {
       ...pv(e.params),
     })),
     audios: cut(audios).map((c) => ({ id: c.id, track: c.track, start: r3(c.start), end: r3(c.start + c.duration), name: c.name ?? media.get(c.mediaId)?.name })),
+    // 動畫：多張圖組成的現成動畫（主體跳出）；圖片用 set_anim_slots 換
+    ...(anims.length ? { animations: cut(anims).map((x) => ({
+      id: x.id, track: x.track, start: r3(x.start), end: r3(x.start + x.duration), template: x.presetId, ...(x.name ? { name: x.name } : {}), ...(x.locked ? { locked: true } : {}),
+      slots: x.slots.filter((sl) => sl.role !== 'other').map((sl) => ({ id: sl.id, role: sl.role, media: sl.mediaId, ...(sl.mediaId ? { name: media.get(sl.mediaId)?.name, at_sec: r3(sl.sourceTime) } : {}) })),
+    })) } : {}),
     ...(clips.length > MAX_ITEMS || effects.length > MAX_ITEMS || audios.length > MAX_ITEMS ? { note: `truncated to ${MAX_ITEMS} per list; use from/to` } : {}),
   };
 }
@@ -851,19 +888,21 @@ function applyOp(op: Op, hooks: ApplyHooks = {}): number {
       const clips = op.clips.filter((c) => !!c.text || st.media.some((m) => m.id === c.mediaId && !m.missing));
       const effects = op.effects.filter((e) => ok(e.moduleId));
       const audios = (op.audios ?? []).filter((a) => st.media.some((m) => m.id === a.mediaId && !m.missing));
-      if (!clips.length && !effects.length && !audios.length) return 0;
+      const anims = op.anims ?? [];
+      if (!clips.length && !effects.length && !audios.length && !anims.length) return 0;
       // 這批東西佔的時間：軌道在這段時間沒東西 = 空著
-      const all = [...clips, ...effects, ...audios];
+      const all = [...clips, ...effects, ...audios, ...anims];
       const t0 = Math.min(...all.map((x) => x.start)), t1 = Math.max(...all.map((x) => x.start + x.duration));
-      const busy = (items: { track: number; start: number; duration: number }[], i: number) => items.some((x) => x.track === i && x.start < t1 - 1e-6 && x.start + x.duration > t0 + 1e-6);
+      // 差不到 1 毫秒不算重疊（接在時間軸最後面時，開頭對齊格線會比最後一個片段的結尾早一點點）
+      const busy = (items: { track: number; start: number; duration: number }[], i: number) => items.some((x) => x.track === i && x.start < t1 - 1e-3 && x.start + x.duration > t0 + 1e-3);
       // 影片軌：每一層一條；用比這段時間有東西的軌道都高的空軌（層的上下順序不變），不夠再新增
       let s = useStore.getState();
-      const layerOf = (c: Clip) => Math.max(0, Math.round(c.track));
-      const layers = clips.length ? Math.max(...clips.map(layerOf)) + 1 : 0;
+      const layerOf = (c: { track: number }) => Math.max(0, Math.round(c.track));
+      const layers = clips.length || anims.length ? Math.max(...[...clips, ...anims].map(layerOf)) + 1 : 0;
       const vts: number[] = [];
       if (layers) {
         let floor = -1;
-        s.tracks.video.forEach((t, i) => { if (t.locked || busy(s.clips, i)) floor = i; });
+        s.tracks.video.forEach((t, i) => { if (t.locked || busy(s.clips, i) || busy(s.anims, i)) floor = i; });
         for (let i = floor + 1; i < s.tracks.video.length && vts.length < layers; i++) vts.push(i);
         while (vts.length < layers) {
           st.addTrack('video', useStore.getState().tracks.video.length);
@@ -899,8 +938,9 @@ function applyOp(op: Op, hooks: ApplyHooks = {}): number {
         clips: [...x.clips, ...clips.map((c) => ({ ...c, track: vts[layerOf(c)] }))],
         effects: [...x.effects, ...effects.map((e) => ({ ...e, track: fts[layerIdx.indexOf(Math.max(0, Math.round(e.track)))] }))],
         ...(audios.length ? { audios: [...x.audios, ...audios.map((a) => ({ ...a, track: at }))] } : {}),
+        ...(anims.length ? { anims: [...x.anims, ...anims.map((a) => ({ ...a, track: vts[layerOf(a)] }))] } : {}),
       }));
-      return clips.length + effects.length + audios.length;
+      return clips.length + effects.length + audios.length + anims.length;
     }
     case 'add_effects': {
       if (!st.modules.some((m) => m.id === op.moduleId)) return 0;
@@ -932,6 +972,13 @@ function applyOp(op: Op, hooks: ApplyHooks = {}): number {
         n++;
       }
       return n;
+    case 'set_anim_slots': {
+      const an = st.anims.find((x) => x.id === op.animId);
+      if (!an) return 0;
+      const by = new Map(op.items.map((x) => [x.slotId, x]));
+      st.updateAnim(an.id, { slots: an.slots.map((sl) => { const x = by.get(sl.id); return x ? { ...sl, mediaId: x.mediaId, sourceTime: x.at } : sl; }) });
+      return op.items.length;
+    }
     case 'set_remap':
       for (const id of op.clipIds) {
         if (!has(id)) continue;
@@ -1127,7 +1174,7 @@ export function applyProposals(list: Proposal[], hooks: ApplyHooks = {}): { done
   try {
     for (const p of list) {
       const o = p.op;
-      const want = o.op === 'auto_edit' ? 1 : o.op === 'add_items' ? o.clips.length + o.effects.length + (o.audios?.length ?? 0) : o.op === 'add_effects' ? o.blocks.length : o.op === 'set_transitions' ? o.at.length : 'clipIds' in o ? o.clipIds.length : 'items' in o ? o.items.length : o.targets.length;
+      const want = o.op === 'auto_edit' ? 1 : o.op === 'add_items' ? o.clips.length + o.effects.length + (o.audios?.length ?? 0) + (o.anims?.length ?? 0) : o.op === 'add_effects' ? o.blocks.length : o.op === 'set_transitions' ? o.at.length : 'clipIds' in o ? o.clipIds.length : 'items' in o ? o.items.length : o.targets.length;
       const n = applyOp(p.op, hooks);
       done += n;
       skipped += Math.max(0, want - n);

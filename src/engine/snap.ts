@@ -48,11 +48,20 @@ export function snapTargetIfApplied(snap: { v: number; d: number }, actual: numb
   return Number.isFinite(snap.d) && Math.abs(snap.v - actual) <= 1e-6 ? snap.v : null;
 }
 
-/** Timeline placement snap targets for another item's start, end, or end-to-start alignment. */
-export function laneSnapPoints(items: { start: number; duration: number }[], time: number, duration: number) {
-  const points = [0, time];
-  for (const item of items) points.push(item.start, item.start + item.duration, item.start - duration);
-  return points;
+/**
+ * 一段時間（start ~ start + duration）的吸附：開頭或結尾都可以吸到任何一個點，取最近的（tol 秒以內）。
+ * line = 吸到的那個點（畫參考線用）；沒吸到 = null。
+ */
+export function snapSpan(start: number, duration: number, points: number[], tol: number): { start: number; line: number | null } {
+  let best: { start: number; line: number; dist: number } | null = null;
+  for (const p of points) {
+    if (p < 0) continue;
+    for (const off of duration > 0 ? [0, duration] : [0]) {
+      const dist = Math.abs(start + off - p);
+      if (dist <= tol && p - off >= 0 && (!best || dist < best.dist)) best = { start: p - off, line: p, dist };
+    }
+  }
+  return best ? { start: best.start, line: best.line } : { start, line: null };
 }
 
 /** Marker targets shared by timeline snapping and marker dragging. */

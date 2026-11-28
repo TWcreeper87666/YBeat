@@ -5,7 +5,7 @@ import { useAutoEdit } from './autoEditSettings';
 import { dropBoxTracks } from './boxTrack';
 import { colorBlob } from './colorBlob';
 import { $t } from '../i18n';
-import { uid, useStore, type Media } from '../store';
+import { uid, usedMediaIds, useStore, type Media } from '../store';
 import { PEAKS_PER_SEC, computePeaks, getAudioBuffer } from './audio';
 import { deleteMediaBlob, saveMediaBlob } from './project';
 import { detachedMedia, detachedMediaOrder } from './detachedMedia';
@@ -190,7 +190,7 @@ export function removeMedia(id: string, quiet = false) {
   const s = useStore.getState();
   const m = s.media.find((x) => x.id === id);
   if (!m) return;
-  const used = s.clips.some((c) => c.mediaId === id) || s.audios.some((a) => a.mediaId === id);
+  const used = usedMediaIds(s).has(id);
   if (m.url) URL.revokeObjectURL(m.url);
   deleteMediaBlob(id);
   dropMatte(id);
@@ -228,9 +228,9 @@ export function removeMediaEverywhere(ids: string[]): boolean {
 
 /** 時間軸最後一個引用消失時，自動移除來源遺失的素材與色板（色板隨時可以重新產生）；復原時重新顯示。 */
 useStore.subscribe((s, prev) => {
-  if (s.clips === prev.clips && s.audios === prev.audios) return;
-  const before = new Set([...prev.clips.map((c) => c.mediaId), ...prev.audios.map((a) => a.mediaId)]);
-  const after = new Set([...s.clips.map((c) => c.mediaId), ...s.audios.map((a) => a.mediaId)]);
+  if (s.clips === prev.clips && s.audios === prev.audios && s.anims === prev.anims) return;
+  const before = usedMediaIds(prev);
+  const after = usedMediaIds(s);
   const gone = s.media.filter((m) => (m.missing || m.color) && before.has(m.id) && !after.has(m.id));
   const back = [...after].filter((id) => !s.media.some((m) => m.id === id) && detachedMedia.has(id)).map((id) => detachedMedia.get(id)!);
   if (!gone.length && !back.length) return;

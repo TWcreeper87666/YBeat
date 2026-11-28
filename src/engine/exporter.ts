@@ -1,5 +1,5 @@
 import { ensureShapes } from './maskShapes';
-import { prepareMattes } from './matte';
+import { prepareAnimMattes, prepareMattes } from './matte';
 import { prepareSubjects } from './follow';
 import { $t } from '../i18n';
 import { Muxer, ArrayBufferTarget } from 'mp4-muxer';
@@ -64,6 +64,7 @@ export async function exportMp4(fps: number, range?: { a: number; b: number }, b
     stopIfCancelled();
     // AI 去背：遮罩要先全部算好
     await prepareMattes(st0.clips, ctx.media, ctx.modules);
+    await prepareAnimMattes(st0.anims ?? [], ctx.media);
     stopIfCancelled();
     await prepareSubjects(st0.clips, ctx.media, ctx.modules);
     stopIfCancelled();

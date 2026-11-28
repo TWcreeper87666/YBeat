@@ -811,6 +811,9 @@ body.drag-no, body.drag-no * { cursor: grabbing !important; }
 .lib-list .lib-item:hover { background: var(--tint-1); }
 .lib-thumb { position: relative; aspect-ratio: 1; background: #000 center/cover; border-radius: 5px; border: 1px solid var(--line); overflow: hidden; }
 .lib-thumb.mod { background-color: var(--sunken); }
+.lib-thumb .thumb-live { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.lib-thumb .thumb-sweep { position: absolute; top: 0; bottom: 0; left: 5%; width: 2px; background: var(--accent); box-shadow: 0 0 6px var(--accent); pointer-events: none; animation: thumb-sweep 1.4s linear infinite; }
+@keyframes thumb-sweep { from { left: 5%; } to { left: 95%; } }
 .lib-list .lib-thumb { width: var(--lib-row, 30px); flex: none; }
 .lib-thumb.audio { background: linear-gradient(135deg, #12463d, #0b2420); display: flex; align-items: center; justify-content: center; }
 .lib-thumb .note { font-size: 26px; color: #6ee7c8; }
@@ -1899,13 +1902,12 @@ input[type=color]::-moz-color-swatch { border: none; border-radius: 3px; box-sha
 /* 主體跳出的示意動畫（滑過種類按鈕時的卡片裡；一直播） */
 .pp-demo { display: block; border-radius: 4px; overflow: hidden; background: var(--sunken); }
 .pp-demo * { animation-duration: 2s; animation-iteration-count: infinite; }
-.pp-bg.a { fill: #3d6f8f; }
-.pp-bg.b { fill: #b8653f; }
-.pp-bg.gray { fill: #6b6b6b; }
-.pp-bg.dark { fill: #1b252d; }
-.pp-bg.soft { fill: #3d6f8f; filter: blur(2px); }
-.pp-p { fill: #f3e4d2; stroke: #0005; stroke-width: .6; transform-box: fill-box; transform-origin: 50% 100%; translate: var(--dx, 0) var(--dy, 0); rotate: var(--r, 0deg); scale: var(--s, 1); }
-.pp-text { fill: #ffffffcc; font: 900 15px sans-serif; text-anchor: middle; letter-spacing: 1px; }
+.pp-bg.gray { filter: grayscale(1) brightness(.8); }
+.pp-bg.dark { filter: brightness(.35) saturate(.6); }
+.pp-bg.soft { filter: blur(1.6px); }
+.pp-letter { fill: #fff; font: 900 26px system-ui, sans-serif; text-anchor: middle; dominant-baseline: middle; opacity: .9; }
+.pp-p { fill: #fff; filter: drop-shadow(0 .8px 1.2px #0008); transform-box: fill-box; transform-origin: 50% 100%; translate: var(--dx, 0) var(--dy, 0); rotate: var(--r, 0deg); scale: var(--s, 1); }
+.pp-text { fill: #ffffffd9; font: 900 15px system-ui, sans-serif; text-anchor: middle; letter-spacing: 1px; }
 .pp-p.step { animation-name: pp-step; animation-timing-function: steps(1); }
 .pp-p.grow { animation-name: pp-grow; animation-timing-function: ease-out; }
 .pp-p.fly { animation-name: pp-fly; animation-timing-function: cubic-bezier(.2, .8, .3, 1); }
@@ -1914,7 +1916,7 @@ input[type=color]::-moz-color-swatch { border: none; border-radius: 3px; box-sha
 .pp-p.echo { opacity: .35; animation-name: pp-step; animation-timing-function: steps(1); }
 .pp-p.echo.e1 { animation-delay: -1.8s; }
 .pp-p.echo.e2 { animation-delay: -.3s; opacity: .2; }
-.pp-p.halo { fill: none; stroke: var(--accent2); stroke-width: 2.5; animation-name: pp-step, pp-pulse; animation-duration: 2s, .5s; animation-timing-function: steps(1), ease-out; }
+.pp-p.halo { fill: none; stroke: #29d3c2; stroke-width: 2.5; filter: drop-shadow(0 0 2px #29d3c2); animation-name: pp-step, pp-pulse; animation-duration: 2s, .5s; animation-timing-function: steps(1), ease-out; }
 .pp-p.twin { animation-name: pp-appear; }
 .pp-p.twin.r { animation-delay: -.8s; }
 .pp-p.quad { animation-name: pp-appear; }
@@ -1922,7 +1924,8 @@ input[type=color]::-moz-color-swatch { border: none; border-radius: 3px; box-sha
 .pp-p.quad.q2 { animation-delay: -.3s; }
 .pp-p.quad.q3 { animation-delay: -.8s; }
 .pp-p.vanish { animation-name: pp-step, pp-vanish; animation-timing-function: steps(1), steps(1); }
-.pp-p.win { stroke: none; animation-name: pp-win; animation-timing-function: ease-in; }
+.pp-p.win.hole { fill: #000; }
+.pp-p.win { filter: none; animation-name: pp-win; animation-timing-function: ease-in; }
 @keyframes pp-step { 0% { scale: 1; } 25% { scale: 1.12; } 50% { scale: 1.24; } 75% { scale: 1.36; } }
 @keyframes pp-grow { 0% { scale: .92; } 85%, 100% { scale: 1.3; } }
 @keyframes pp-fly { 0% { translate: -44px 0; } 60%, 100% { translate: 0 0; } }
@@ -1932,15 +1935,65 @@ input[type=color]::-moz-color-swatch { border: none; border-radius: 3px; box-sha
 @keyframes pp-appear { 0%, 20% { opacity: 0; } 30%, 100% { opacity: 1; } }
 @keyframes pp-vanish { 0% { opacity: 1; } 85%, 100% { opacity: 0; } }
 @keyframes pp-win { 0% { scale: .6; } 100% { scale: 3.2; } }
+/* 組合範本 */
+.pp-p.c2 { fill: #ffd2a1; }
+.pp-p.c3 { fill: #cfe9ff; }
+.pp-p.shadow { fill: #1b1030; opacity: .55; filter: none; }
+.pp-p.slide { animation-timing-function: cubic-bezier(.16, 1, .3, 1); }
+.pp-p.slide.s0 { animation-name: pp-slide0; }
+.pp-p.slide.s1 { animation-name: pp-slide1; }
+.pp-p.slide.s2 { animation-name: pp-slide2; }
+.pp-p.clash { animation-timing-function: cubic-bezier(.16, 1, .3, 1); }
+.pp-p.clash.l { animation-name: pp-clash-l; }
+.pp-p.clash.r { animation-name: pp-clash-r; }
+.pp-hit { fill: #fff; opacity: 0; animation-name: pp-hit; }
+.pp-p.relay { animation-timing-function: cubic-bezier(.16, 1, .3, 1); }
+.pp-p.relay.r1, .pp-p.relay.r2 { translate: 70px 0; }
+.pp-p.relay.r1 { animation-name: pp-relay1; }
+.pp-p.relay.r2 { animation-name: pp-relay2; }
+.pp-p.relay.r3 { animation-name: pp-relay3; }
+.pp-p.rise { animation-name: pp-rise; animation-timing-function: cubic-bezier(.34, 1.56, .64, 1); }
+.pp-p.launch { animation-name: pp-launch; animation-timing-function: cubic-bezier(.34, 1.56, .64, 1); }
+.pp-p.diag { animation-name: pp-diag; animation-timing-function: cubic-bezier(.16, 1, .3, 1); }
+.pp-p.zecho { fill: none; stroke: #fff; stroke-width: 1.2; opacity: .5; animation-timing-function: ease-out; }
+.pp-p.zecho.z1 { animation-name: pp-zecho1; }
+.pp-p.zecho.z2 { animation-name: pp-zecho2; }
+.pp-p.zpop { animation-name: pp-zpop; animation-timing-function: cubic-bezier(.34, 1.56, .64, 1); }
+.pp-whip { animation-timing-function: cubic-bezier(.16, 1, .3, 1); }
+.pp-whip.out { animation-name: pp-whip-out; }
+.pp-whip.in { animation-name: pp-whip-in; translate: 34px 0; }
+.pp-p.portal { filter: none; scale: 1.6; animation-name: pp-portal; animation-timing-function: ease-in; }
+@keyframes pp-slide0 { 0% { translate: -70px var(--dy); } 15%, 100% { translate: var(--dx) var(--dy); } }
+@keyframes pp-slide1 { 0%, 25% { translate: -70px var(--dy); } 40%, 100% { translate: var(--dx) var(--dy); } }
+@keyframes pp-slide2 { 0%, 50% { translate: -70px var(--dy); } 65%, 100% { translate: var(--dx) var(--dy); } }
+@keyframes pp-clash-l { 0% { translate: -60px 0; } 40%, 100% { translate: var(--dx) 0; } }
+@keyframes pp-clash-r { 0% { translate: 60px 0; } 40%, 100% { translate: var(--dx) 0; } }
+@keyframes pp-hit { 0%, 39% { opacity: 0; } 40% { opacity: .8; } 55%, 100% { opacity: 0; } }
+@keyframes pp-relay1 { 0%, 25% { translate: 0 0; } 35%, 100% { translate: 70px 0; } }
+@keyframes pp-relay2 { 0%, 25% { translate: -70px 0; } 35%, 50% { translate: 0 0; } 60%, 100% { translate: 70px 0; } }
+@keyframes pp-relay3 { 0%, 50% { translate: -70px 0; } 60%, 100% { translate: 0 0; } }
+@keyframes pp-rise { 0% { translate: 0 45px; } 18%, 100% { translate: 0 0; } }
+@keyframes pp-launch { 0% { translate: 0 45px; rotate: -10deg; scale: .7; } 38%, 100% { translate: 0 0; rotate: 0deg; scale: 1; } }
+@keyframes pp-diag { 0% { translate: -60px -40px; rotate: -18deg; scale: .75; } 32%, 100% { translate: 0 0; rotate: 0deg; scale: 1; } }
+@keyframes pp-zecho1 { 0% { scale: 1.45; opacity: .7; } 30%, 100% { scale: 1; opacity: 0; } }
+@keyframes pp-zecho2 { 0%, 10% { scale: 1.25; opacity: 0; } 11% { opacity: .7; } 40%, 100% { scale: 1; opacity: 0; } }
+@keyframes pp-zpop { 0% { scale: .8; } 35%, 100% { scale: 1; } }
+@keyframes pp-whip-out { 0%, 35% { translate: 0 0; } 58%, 100% { translate: -64px 0; } }
+@keyframes pp-whip-in { 0%, 35% { translate: 64px 0; } 58%, 100% { translate: 0 0; } }
+@keyframes pp-portal { 0%, 25% { scale: .2; } 50% { scale: 1.2; } 75%, 100% { scale: 4; } }
 
 /* 動畫：素材庫的示意動畫卡片、屬性面板的圖片位置 */
 .kind.k-anim { background: #ff8a3d; color: #000; }
-.anim-thumb { background: var(--sunken); }
+.anim-thumb { background: var(--sunken); border-bottom: 2px solid #ff8a3d; }
+/* 素材庫卡片：平常是靜態的一格，滑過 / 試看中才動 */
+.anim-item:not(:hover):not(.previewing) .pp-demo * { animation-name: none !important; }
 .anim-thumb .pp-demo { width: 100%; height: 100%; border-radius: 0; }
 .anim-slots { display: flex; flex-direction: column; gap: 4px; width: 100%; }
 .anim-slot { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 4px; border: 1px dashed transparent; border-radius: 6px; }
 .anim-slot:hover { background: var(--tint-1); }
 .anim-slot.drop-here { border-color: var(--accent2); background: var(--accent2-tint); }
+.anim-slot-pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 0; background: none; border: 0; color: inherit; text-align: left; cursor: pointer; }
+.anim-slot-pick:hover .anim-slot-thumb { border-color: var(--accent2); }
 .anim-slot-thumb { flex: none; width: 48px; height: 30px; border-radius: 4px; background: var(--sunken) center / cover; border: 1px solid var(--line); }
 .anim-slot.missing .anim-slot-thumb { border-style: dashed; border-color: var(--err); }
 .anim-slot-text { flex: 1; min-width: 0; display: flex; flex-direction: column; line-height: 1.25; }

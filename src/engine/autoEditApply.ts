@@ -2,7 +2,8 @@
  * 自動剪輯的套用端：選的歌（放在時間軸最後面）→ 分析 → planEdit → 換成秒數 → Proposal（add_items，一步復原）。
  * 計畫本身（拍號）由 autoEdit.ts 產生；這裡只負責拍號 ↔ 時間軸秒數、片段 / 特效方塊的細節。
  */
-import { attachedAudioIds, makeClip, projectDuration, makeTextClip, uid, useStore, type AudioClip, type Clip, type ClipFx, type FxItem, type Media } from '../store';
+import { animTemplate, type AnimItem } from './animation';
+import { attachedAudioIds, makeClip, projectDuration, uid, useStore, type AudioClip, type Clip, type ClipFx, type FxItem, type Media } from '../store';
 import { beatSource, mediaBeats, type Beat } from './beats';
 import { getAudioBuffer } from './audio';
 import { analyzeMusic, bandEnvelopes, type Bands, type MusicInfo } from './musicAnalysis';
@@ -13,12 +14,11 @@ import { $t, displayName } from '../i18n';
 import { create } from 'zustand';
 import { sampleAll, type Sampled } from './mediaSampler';
 import { shapeMusic } from './energyShape';
-import { expandPop, keepFace, LOOSE_MAX, LOOSE_MIN, popFraming, scoreMatte, traceMatte, type PlanPop, type PopLayer, type PopVariant } from './subjectPop';
-import { DEFAULT_MASK, maskKey, PATH_SHAPE } from './mask';
+import { keepFace, LOOSE_MAX, LOOSE_MIN, popFraming, scoreMatte, traceMatte, type PopVariant } from './subjectPop';
+import { DEFAULT_MASK } from './mask';
 import { CLIP_MASK_ID } from '../modules/extra';
 import { beatTimeF } from './speedRamp';
 import { ensureMatte, matteAt, MATTE_SIZE } from './matte';
-import type { Keyframe } from './keyframes';
 import { directMedia, directorShots } from '../ai/director';
 import { countdown } from '../ai/gemini';
 import { bestFace, freeRoom, peopleScore, type FaceBox } from './mediaAnalysis';
@@ -262,7 +262,7 @@ export function beatRange(src: MusicSource, a: number, b: number): [number, numb
 }
 
 /** 計畫 → 片段與特效方塊（時間軸秒數） */
-export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[] = []): { clips: Clip[]; effects: FxItem[] } {
+export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[] = []): { clips: Clip[]; effects: FxItem[]; anims: AnimItem[] } {
   const T = src.time;
   // 指定片段是虛擬素材（見 aeFootage）：長度 = 片段長度，放上時間軸時換回原素材、入點加上片段起點
   const mediaOf = new Map<string, Footage>([...s.media.map((m) => [m.id, m] as const), ...feet.map((m) => [m.id, m] as const)]);
@@ -340,16 +340,27 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
     };
     c.transitionIn = null;
   }
-  // 每次主體跳出（去背的那幾層 + 底下的鏡頭 + 揭露的那一個鏡頭）是一個群組：一起選、一起鎖住
-  const base = [...clips];
+  // 每次主體跳出 = 一個動畫（放在鏡頭上面一層）；動畫 + 底下的鏡頭 + 揭露的那一個鏡頭是一個群組：一起選、一起鎖住
+  const anims: AnimItem[] = [];
+  /** 自動剪輯用的素材（指定片段 / 影片的一格）→ 真正的素材 + 那一格的秒數 */
+  const real = (id: string | undefined) => {
+    const m = id ? mediaOf.get(id) : undefined;
+    return m ? { mediaId: m.srcId ?? m.id, sourceTime: m.kind === 'video' ? m.from ?? 0 : 0 } : null;
+  };
   for (const p of plan.pops ?? []) {
     const group = uid();
     const t0 = T(p.b0), t1 = T(p.b1);
-    for (const c of base) if (!c.group && c.start < t1 + 1e-6 && c.start + c.duration > t0 + 1e-6) c.group = group;
-    for (const l of expandPop(p, T)) {
-      const c = popClip(l, s, p, mediaOf);
-      if (c) clips.push({ ...c, group });
-    }
+    for (const c of clips) if (!c.group && c.start < t1 + 1e-6 && c.start + c.duration > t0 + 1e-6) c.group = group;
+    const subj = real(p.mediaId), rev = real(p.revealMediaId);
+    if (!subj) continue;
+    const beats = p.b1 - p.b0;
+    const a = animTemplate(p.variant, { id: uid(), start: t0, duration: t1 - t0, track: 1, subject: subj.mediaId, reveal: rev?.mediaId ?? null,
+      cx: p.cx, cy: p.cy, side: p.side, text: p.text, outline: p.path, beats });
+    anims.push({
+      ...a, group,
+      beatTimes: Array.from({ length: beats + 1 }, (_, i) => T(p.b0 + i) - t0),
+      slots: a.slots.map((sl) => (sl.role === 'reveal' ? (rev ? { ...sl, sourceTime: rev.sourceTime } : sl) : sl.mediaId ? { ...sl, sourceTime: subj.sourceTime } : sl)),
+    });
   }
   const effects: FxItem[] = [];
   // 特效軌：舊的點綴一層、特效層每層一條（層號小的先套用）
@@ -383,7 +394,7 @@ export function planItems(plan: EditPlan, src: MusicSource, s: S, feet: Footage[
       : { ...d, ...(src.audio && !d.from ? { from: { audio: [src.audio.track] } } : {}) }])) : undefined;
     effects.push({ id: uid(), moduleId: o.moduleId, params: { ...(o.params ?? {}) }, start, duration, track, ...(trigger ? { trigger } : {}), ...(audio ? { audio } : {}) });
   }
-  return { clips, effects: mergeStacked(effects, s.modules) };
+  return { clips, effects: mergeStacked(effects, s.modules), anims };
 }
 
 /**
@@ -467,55 +478,6 @@ export function facePush(f: { x: number; y: number; h: number }, m: { width: num
     scaleX: [newKey(0, a.k, lin), newKey(duration, b.k, lin)], scaleY: [newKey(0, a.k, lin), newKey(duration, b.k, lin)],
     x: [newKey(0, a.x, lin), newKey(duration, b.x, lin)], y: [newKey(0, a.y, lin), newKey(duration, b.y, lin)],
   };
-}
-
-const POP_EASE: Record<string, Keyframe['ease']> = { hold: 'hold', linear: [0, 0, 1, 1], out: [0, 0, 0.58, 1], back: [0.34, 1.56, 0.64, 1] };
-/** 主體跳出的一層 → 片段（track = 第幾層，add_items 會換成真正的軌道） */
-function popClip(l: PopLayer, s: S, pop: PlanPop, mediaOf: Map<string, Footage>): Clip | null {
-  const duration = l.t1 - l.t0;
-  if (duration < 1 / 60) return null;
-  let c: Clip;
-  if (l.text) {
-    // 文字層（文字在主體後面）：大字描邊樣式，放在畫面偏上（主體的頭附近）
-    c = makeTextClip('outline', s.modules, { start: l.t0, duration, track: l.layer });
-    // 字要比主體寬，左右才露得出來（主體擋住中間）
-    c.text = { ...c.text!, text: l.text, size: 380 };
-    c.transform = { ...c.transform, y: -0.12 };
-  } else {
-    const m = mediaOf.get(l.mediaId);
-    if (!m) return null;
-    c = makeClip({ mediaId: m.srcId ?? m.id, start: l.t0, duration, track: l.layer, volume: 0, in: m.kind === 'video' ? m.from ?? 0 : 0, ...(l.matte ? { aiMatte: true } : {}) });
-    // 影片的一格：整段停在那一格（揭露那一拍影片從這格接著播）
-    if (m.kind === 'video') c.remap = { moduleId: 'remap-curve', params: {}, keys: [newKey(0, 0, 'hold'), newKey(duration, 0, 'hold')] };
-  }
-  if (l.blend && l.blend !== 'normal') c.blend = l.blend;
-  c.keys = Object.fromEntries(Object.entries(l.keys ?? {}).map(([k, list]) => [k, list!.map((x) => newKey(Math.min(duration, Math.max(0, x.t)), x.v, POP_EASE[x.ease] ?? 'hold'))]));
-  const fx: ClipFx[] = (l.effects ?? []).filter((e) => s.modules.some((x) => x.id === e.moduleId)).map((e) => ({
-    id: uid(), moduleId: e.moduleId, params: { ...e.params },
-    ...(e.beatEvery ? { timing: { kind: 'beat' as const, every: e.beatEvery, d: e.hitSec ?? 0.18 } } : {}),
-  }));
-  // 片段自己的遮罩（剪影窗 / 主體挖洞）：A 的輪廓路徑，框 = 圖片 cover 進畫面後的大小，以主體中心縮放
-  const subject = mediaOf.get(pop.mediaId);
-  if (l.mask && subject) {
-    const { w, h } = coverBox(subject, s.format);
-    const keyed = (f: (sc: number) => number) => l.mask!.scale.map((k) => newKey(Math.min(duration, Math.max(0, k.t)), f(k.v), POP_EASE[k.ease] ?? 'hold'));
-    fx.push({
-      id: uid(), moduleId: CLIP_MASK_ID, params: {}, base: true,
-      mask: { ...DEFAULT_MASK, shape: PATH_SHAPE, path: l.mask.path, invert: l.mask.invert, x: 0, y: 0, w, h, feather: 0.004, rotation: 0 },
-      keys: {
-        [maskKey('w')]: keyed((sc) => w * sc), [maskKey('h')]: keyed((sc) => h * sc),
-        [maskKey('x')]: keyed((sc) => pop.cx * (1 - sc)), [maskKey('y')]: keyed((sc) => pop.cy * (1 - sc)),
-      },
-    });
-  }
-  if (fx.length) c.effects = fx;
-  return c;
-}
-
-/** 圖片用 cover 放進畫面後的大小（以畫面寬 / 高為 1） */
-function coverBox(m: Media, f: { w: number; h: number }) {
-  const k = Math.max(f.w / (m.width || f.w), f.h / (m.height || f.h));
-  return { w: ((m.width || f.w) * k) / f.w, h: ((m.height || f.h) * k) / f.h };
 }
 
 type PopStats = NonNullable<EditPlan['popStats']> & { why: Partial<Record<PopWhy, number>> };
@@ -662,31 +624,31 @@ export function planOptions(st: AutoEditSettings, s: S = useStore.getState()): P
   return { transitions: tr, accents: [], dropHit: null, rules, kenBurns: st.kenBurns, order: st.order, pops, speed };
 }
 
-/** 時間軸上標著這一版編號的片段、特效、音樂 */
-export function takeItems(s: Pick<S, 'clips' | 'effects' | 'audios'>, id: string) {
-  return { clips: s.clips.filter((x) => x.take === id), effects: s.effects.filter((x) => x.take === id), audios: s.audios.filter((x) => x.take === id) };
+/** 時間軸上標著這一版編號的片段、特效、音樂、動畫 */
+export function takeItems(s: Pick<S, 'clips' | 'effects' | 'audios'> & { anims?: AnimItem[] }, id: string) {
+  return { clips: s.clips.filter((x) => x.take === id), effects: s.effects.filter((x) => x.take === id), audios: s.audios.filter((x) => x.take === id), anims: (s.anims ?? []).filter((x) => x.take === id) };
 }
 /** 這一版的內容摘要：件數 + 雜湊（手動改過任何一個 = 不一樣） */
-export function takeSig(s: Pick<S, 'clips' | 'effects' | 'audios'>, id: string): string {
+export function takeSig(s: Pick<S, 'clips' | 'effects' | 'audios'> & { anims?: AnimItem[] }, id: string): string {
   const t = takeItems(s, id);
   // 鎖住 / 解鎖不算改過（鎖住之後照樣可以「再一版」）
   const plain = <T extends { locked?: true }>(l: T[]) => l.map(({ locked: _l, ...x }) => x);
-  const text = JSON.stringify([plain(t.clips), plain(t.effects), plain(t.audios)]);
+  const text = JSON.stringify([plain(t.clips), plain(t.effects), plain(t.audios), ...(t.anims.length ? [plain(t.anims)] : [])]);
   let h = 0x811c9dc5;
   for (let i = 0; i < text.length; i++) h = Math.imul(h ^ text.charCodeAt(i), 0x01000193);
-  return `${t.clips.length + t.effects.length + t.audios.length}:${(h >>> 0).toString(36)}`;
+  return `${t.clips.length + t.effects.length + t.audios.length + t.anims.length}:${(h >>> 0).toString(36)}`;
 }
-let sigMemo: { clips: unknown; effects: unknown; audios: unknown; take: unknown; ok: boolean } | null = null;
+let sigMemo: { clips: unknown; effects: unknown; audios: unknown; anims: unknown; take: unknown; ok: boolean } | null = null;
 /** 上一版還在時間軸上、沒被手動改過（「再一版」會先拿掉上一版）；編號存在專案裡，重新整理後照樣可以 */
 export function canReplaceLast(): boolean {
   const take = useAutoEdit.getState().lastTake;
   if (!take) return false;
   const s = useStore.getState();
   const m = sigMemo;
-  if (m && m.clips === s.clips && m.effects === s.effects && m.audios === s.audios && m.take === take) return m.ok;
+  if (m && m.clips === s.clips && m.effects === s.effects && m.audios === s.audios && m.anims === s.anims && m.take === take) return m.ok;
   const sig = takeSig(s, take.id);
   const ok = !sig.startsWith('0:') && sig === take.sig;
-  sigMemo = { clips: s.clips, effects: s.effects, audios: s.audios, take, ok };
+  sigMemo = { clips: s.clips, effects: s.effects, audios: s.audios, anims: s.anims, take, ok };
   return ok;
 }
 lastTake.replaceable = canReplaceLast;
@@ -873,12 +835,12 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
     // 再一版：放在上一版的位置；新的一版：接在時間軸最後面（原本有什麼都不管）
     let at = snapFrame(projectDuration(useStore.getState()));
     // 上一版鎖住的東西：先拿下來（新的一版才會放在同樣的軌道上），剪完原封不動放回去
-    let kept: { clips: Clip[]; effects: FxItem[]; audios: AudioClip[] } = { clips: [], effects: [], audios: [] };
+    let kept: { clips: Clip[]; effects: FxItem[]; audios: AudioClip[]; anims: AnimItem[] } = { clips: [], effects: [], audios: [], anims: [] };
     if (replace) {
       const old = takeItems(useStore.getState(), replace);
-      at = Math.min(...[...old.clips, ...old.effects, ...old.audios].map((x) => x.start));
-      kept = { clips: old.clips.filter((x) => x.locked), effects: old.effects.filter((x) => x.locked), audios: old.audios.filter((x) => x.locked) };
-      useStore.setState((x) => ({ clips: x.clips.filter((c) => c.take !== replace), effects: x.effects.filter((e) => e.take !== replace), audios: x.audios.filter((a) => a.take !== replace) }));
+      at = Math.min(...[...old.clips, ...old.effects, ...old.audios, ...old.anims].map((x) => x.start));
+      kept = { clips: old.clips.filter((x) => x.locked), effects: old.effects.filter((x) => x.locked), audios: old.audios.filter((x) => x.locked), anims: old.anims.filter((x) => x.locked) };
+      useStore.setState((x) => ({ clips: x.clips.filter((c) => c.take !== replace), effects: x.effects.filter((e) => e.take !== replace), audios: x.audios.filter((a) => a.take !== replace), anims: x.anims.filter((a) => a.take !== replace) }));
     }
     s = useStore.getState();
     const take = uid();
@@ -893,7 +855,8 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
     if (zo.rules.length) opts.rules = [...(opts.rules ?? []), ...zo.rules];
     // 鎖住的範圍（拍號）：鏡頭、跳出、變速不排進去；鎖住的特效那幾拍不再疊特效
     const spans = (l: { start: number; duration: number }[]) => l.map((x) => lockedBeats(src, x.start, x.start + x.duration));
-    if (kept.clips.length || kept.effects.length) opts.locked = { shots: spans(kept.clips), fx: spans(kept.effects) };
+    // 鎖住的動畫也算：它的範圍不再放鏡頭、跳出（揭露那一格要跟底下的鏡頭對得上）
+    if (kept.clips.length || kept.effects.length || kept.anims.length) opts.locked = { shots: spans([...kept.clips, ...kept.anims]), fx: spans(kept.effects) };
     // 使用者標的副歌：主體跳出只放在這些地方
     const chorus = chorusBeats(song.chorus, src.beats);
     if (opts.pops && chorus.length) opts.pops = { ...opts.pops, at: chorus };
@@ -907,18 +870,18 @@ export async function runAutoEdit(replaceLast = false, onProgress: (p: AutoEditP
       const f = frames.find((m) => m.id === id);
       return f ? [{ src: f.srcId ?? f.id, t: f.from ?? 0 }] : [];
     })].slice(-RECENT_POPS);
-    const { clips, effects } = planItems(plan, src, s, [...media, ...frames]);
+    const { clips, effects, anims } = planItems(plan, src, s, [...media, ...frames]);
     if (!clips.length) return { error: 'empty' };
     plannedPops = plan.pops?.length ?? 0;
     masks = plan.pops.filter((x) => x.variant === 'silhouetteWindow' || x.variant === 'subjectHole').length;
     popStats = st.popOn && st.popVariants.length && plan.popStats ? { ...plan.popStats, why: popWhy } : undefined;
     // 歌鎖住了：用鎖住的那一段，不再放一次
-    const p: Proposal = { summary: 'auto edit', op: { op: 'add_items', clips: clips.map((c) => ({ ...c, take })), effects: effects.map((e) => ({ ...e, take })), audios: kept.audios.length ? [] : [audio] } };
+    const p: Proposal = { summary: 'auto edit', op: { op: 'add_items', clips: clips.map((c) => ({ ...c, take })), effects: effects.map((e) => ({ ...e, take })), audios: kept.audios.length ? [] : [audio], anims: anims.map((a) => ({ ...a, take })) } };
     applyProposals([p]);
     // 鎖住的放回原位（換成這一版的編號，下次「再一版」照樣保留）
-    if (kept.clips.length || kept.effects.length || kept.audios.length) {
+    if (kept.clips.length || kept.effects.length || kept.audios.length || kept.anims.length) {
       const tag = <T extends { take?: string }>(l: T[]) => l.map((x) => ({ ...x, take }));
-      useStore.setState((x) => ({ clips: [...x.clips, ...tag(kept.clips)], effects: [...x.effects, ...tag(kept.effects)], audios: [...x.audios, ...tag(kept.audios)] }));
+      useStore.setState((x) => ({ clips: [...x.clips, ...tag(kept.clips)], effects: [...x.effects, ...tag(kept.effects)], audios: [...x.audios, ...tag(kept.audios)], anims: [...x.anims, ...tag(kept.anims)] }));
     }
     useAutoEdit.getState().set({ lastTake: { id: take, sig: takeSig(useStore.getState(), take) } });
     ok = true;

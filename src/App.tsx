@@ -681,10 +681,11 @@ function SaveIndicator() {
 
 // ───────────── 快捷鍵 ─────────────
 
+/** ↑ / ↓ 停的點：所有軌道上每個項目（影片 / 圖片 / 文字片段、音訊、特效方塊、動畫）的頭尾 */
 function editPoints() {
   const s = useStore.getState();
   const pts = new Set<number>([0]);
-  for (const c of [...s.clips, ...s.audios]) {
+  for (const c of [...s.clips, ...s.audios, ...s.effects, ...s.anims]) {
     pts.add(+c.start.toFixed(4));
     pts.add(+(c.start + c.duration).toFixed(4));
   }

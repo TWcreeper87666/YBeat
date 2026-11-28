@@ -1,6 +1,7 @@
 import { matteCoverage, requestMatte, useMatte } from '../engine/matte';
-import { animName } from './PopPicker';
-import { POP_VARIANTS, type PopVariant } from '../engine/subjectPop';
+import { snapActive } from './snapKey';
+import { templateName } from './PopPicker';
+import { imageMenu } from './animImageMenu';
 import { openEditorWindow } from './EditorWindow';
 import { clickTransition, copyTransition, hasTransitionClipboard, pasteTransition, removeTransitions, useTrSel } from './trSelect';
 import { $t, displayName } from '../i18n';
@@ -131,7 +132,7 @@ function selectTrackItems(kind: TrackKind, idx: number, from?: number) {
 }
 
 function nearest(v: number, pts: number[], _pps?: number) {
-  if (!useStore.getState().snap) return { v, d: Infinity };
+  if (!snapActive()) return { v, d: Infinity };
   let best = v, bd = SNAP_PX / livePps();
   for (const p of pts) {
     const d = Math.abs(p - v);
@@ -899,6 +900,11 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
   if (type === 'clip' && (media?.kind === 'video' || media?.kind === 'image')) {
     items.push({ label: $t('指定主角'), action: () => startLeadPick(it.id) });
   }
+  // 動畫：複製 / 貼上圖片列表（多選 = 貼到所有選取的動畫）
+  if (type === 'anim') {
+    const ids = useStore.getState().selected.filter((k) => k.startsWith('anim:')).map((k) => k.slice(5));
+    items.push({ separator: true }, ...imageMenu(ids.length ? ids : [it.id]));
+  }
   items.push(
     { separator: true },
     { label: $t('刪除'), shortcut: 'Del', action: () => S.removeSelection() },
@@ -1326,7 +1332,7 @@ const FxView = React.memo(function FxView({ f, pps, sel, name, drop, masked, mar
 });
 
 /** 動畫方塊的名稱：自己取的 → 範本的名稱 → 「動畫」 */
-const animLabel = (a: AnimItem) => a.name ?? (a.presetId && (POP_VARIANTS as string[]).includes(a.presetId) ? animName(a.presetId as PopVariant) : $t('動畫'));
+const animLabel = (a: AnimItem) => a.name ?? templateName(a.presetId) ?? $t('動畫');
 
 const AnimView = React.memo(function AnimView({ a, pps, sel, missing }: { a: AnimItem; pps: number; sel: boolean; missing: boolean }) {
   const key = keyOf('anim', a.id);

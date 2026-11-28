@@ -28,6 +28,7 @@ import { leadFromBox } from '../engine/leadPick';
 import { sampledNow } from '../engine/mediaSampler';
 import { useAutoEdit } from '../engine/autoEditSettings';
 import { sampleCtx } from './previewSample';
+import { animTrialCtx } from './animTrial';
 
 const frameAspect = () => useStore.getState().format.w / useStore.getState().format.h;
 
@@ -118,6 +119,13 @@ export function Preview() {
           const clip = { ...c, track: ctx.videoTracks.length, start: t - Math.min(el, c.duration - 1e-3) };
           ctx = { ...ctx, clips: [...ctx.clips, clip], videoTracks: [...ctx.videoTracks, [clip]] };
         } else trialText = null;
+        // 動畫分頁點選的範本：示範畫面（Alt+點擊 = 疊在時間軸畫面上）循環播放
+        const at = usePreviewFx.getState().anim;
+        let animT: number | null = null;
+        if (at && !st.playing) {
+          const tr = animTrialCtx(ctx, at, t, now);
+          if (tr) { ctx = tr.ctx; animT = tr.t; }
+        }
         // 特效 / 轉場試看：預設換成示範的 A / B 畫面（右鍵「用時間軸畫面試看」才用目前的畫面）；變速一定要用時間軸上的影片
         const fx0 = usePreviewFx.getState().fx;
         const sample = fx0 && !fx0.timeline && !st.playing && ctx.modules.get(fx0.moduleId)?.kind !== 'remap' ? sampleCtx(ctx, st.format) : null;
@@ -135,8 +143,8 @@ export function Preview() {
         // 素材庫點選的特效 / 轉場：循環預覽
         let extra;
         // 修剪片段時：預覽暫時顯示邊緣那一格（播放頭不動）
-        const trimT = st.playing || sample ? null : useTrimView.getState().t;
-        let rt = trimT ?? ft, rPlaying = st.playing;
+        const trimT = st.playing || sample || animT !== null ? null : useTrimView.getState().t;
+        let rt = animT ?? trimT ?? ft, rPlaying = st.playing;
         const fx = usePreviewFx.getState().fx;
         const m = fx && ctx.modules.get(fx.moduleId);
         const trial = !fx || !m || st.playing
@@ -321,14 +329,15 @@ function trialRemap(st: ReturnType<typeof useStore.getState>, ctx: ReturnType<ty
 function FxPreviewLabel() {
   const fx = usePreviewFx((s) => s.fx);
   const text = usePreviewFx((s) => s.text?.name);
+  const anim = usePreviewFx((s) => s.anim);
   const name = useStore((s) => (fx ? s.modules.find((m) => m.id === fx.moduleId)?.name : null));
   usePrefs((s) => s.fxCombos); // 改名後更新
   const combo = fx ? fxCombo(fx.moduleId)?.name : undefined;
-  const label = name ? displayName(name) : combo ? displayName(combo) : text;
+  const label = name ? displayName(name) : combo ? displayName(combo) : text ?? anim?.name;
   if (!label) return null;
   return (
     <div className="fx-preview-label">
-      {$t('預覽：')}{label}{fx?.timeline ? ` · ${$t('時間軸畫面')}` : ''}
+      {$t('預覽：')}{label}{fx?.timeline || anim?.timeline ? ` · ${$t('時間軸畫面')}` : ''}
       <button onClick={stopPreviewFx} title={$t('結束預覽 (Esc)')}><X size={12} /></button>
     </div>
   );

@@ -1,4 +1,5 @@
 import { EasePresetsMini } from './CurveEdit';
+import { snapActive } from './snapKey';
 import { $t } from '../i18n';
 import { flushSync } from 'react-dom';
 import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -170,7 +171,7 @@ export function fxHost(fxId: string): Host | null {
 }
 
 /** 特效的固定值：一般參數存在 params，遮罩（mask.x…）存在 mask，point 的一軸（center.x）存在陣列裡 */
-function fxBasePatch<T extends { moduleId: string; params: FxItem['params']; mask?: FxItem['mask'] }>(f: T, ch: string, v: number): Partial<T> {
+export function fxBasePatch<T extends { moduleId: string; params: FxItem['params']; mask?: FxItem['mask'] }>(f: T, ch: string, v: number): Partial<T> {
   if (ch.startsWith('mask.')) return { mask: { ...DEFAULT_MASK, ...f.mask, [ch.slice(5)]: v } } as Partial<T>;
   const pc = parsePointCh(ch);
   if (pc) {
@@ -194,9 +195,18 @@ export function maskChannels(f: FxItem, local: number): Channel[] {
   });
 }
 
+/** 片段 / 特效以外的屬性面板（動畫）：自己提供 host、關鍵影格（片段內秒數）、全部的關鍵影格 */
+export interface HostKind {
+  host(id: string): Host | null;
+  keys(id: string, ch: string): Keyframe[];
+  all(id: string): KeyRef[];
+}
+const hostKinds: Record<string, HostKind> = {};
+export const registerHostKind = (type: string, kind: HostKind) => { hostKinds[type] = kind; };
+
 function hostFor(owner: string) {
   const [type, id] = [owner.slice(0, owner.indexOf(':')), owner.slice(owner.indexOf(':') + 1)];
-  return type === 'clip' ? clipHost(id) : type === 'effect' ? fxHost(id) : null;
+  return type === 'clip' ? clipHost(id) : type === 'effect' ? fxHost(id) : hostKinds[type]?.host(id) ?? null;
 }
 
 /** 片段特效的 channel id：`cfx:<特效 id>:<參數 / mask.x>` */
@@ -222,6 +232,7 @@ function currentKeys(owner: string, ch: string): Keyframe[] {
     if (cf) return c?.effects?.find((f) => f.id === cf.fxId)?.keys?.[cf.ch] ?? [];
     return c?.keys[ch as AnimProp] ?? [];
   }
+  if (hostKinds[type]) return hostKinds[type].keys(id, ch);
   const fx = s.effects.find((f) => f.id === id);
   const cf = parseCfx(ch);
   if (cf) return fx?.stack?.find((f) => f.id === cf.fxId)?.keys?.[cf.ch] ?? [];
@@ -341,7 +352,7 @@ const sameKey = (a: KeyRef, b: KeyRef) => a.ch === b.ch && a.id === b.id;
 function currentHost(): Host | null {
   const s = useStore.getState().selection;
   if (!s) return null;
-  return s.type === 'clip' ? clipHost(s.id) : s.type === 'effect' ? fxHost(s.id) : null;
+  return hostFor(`${s.type}:${s.id}`);
 }
 
 /** 快捷鍵要不要作用在關鍵影格上 */
@@ -447,6 +458,8 @@ export function selectAllKeys(): boolean {
     const c = s.clips.find((x) => x.id === sel.id);
     for (const [ch, l] of Object.entries(c?.keys ?? {})) for (const k of l ?? []) keys.push({ ch, id: k.id });
     for (const f of c?.effects ?? []) for (const [ch, l] of Object.entries(f.keys ?? {})) for (const k of l) keys.push({ ch: cfxCh(f.id, ch), id: k.id });
+  } else if (hostKinds[sel.type]) {
+    keys.push(...hostKinds[sel.type].all(sel.id));
   } else {
     const f = s.effects.find((x) => x.id === sel.id);
     for (const [ch, l] of Object.entries(f?.keys ?? {})) for (const k of l) keys.push({ ch, id: k.id });
@@ -1533,7 +1546,7 @@ function TimingRow({ tm, dur, lc, view, localAt, seek }: { tm: TimingLane; dur: 
     const pts = [useStore.getState().time - tm.start, 0, tm.len, lo, hi, ...beatSnapPoints().map((b) => b - tm.start)];
     const snap = (t: number) => {
       const q = qLocal(tm, t);
-      if (!useStore.getState().snap) return q;
+      if (!snapActive()) return q;
       let best = q, bd = 6 / pxPerSec;
       for (const p of pts) if (Math.abs(p - t) < bd) { bd = Math.abs(p - t); best = p; }
       return best;

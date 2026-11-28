@@ -89,6 +89,35 @@ function remapThumb(m: Module): string {
   return c.toDataURL('image/png');
 }
 
+function ensureRenderer() {
+  if (!renderer) {
+    canvas = document.createElement('canvas');
+    renderer = new Renderer(canvas, { w: THUMB_W, h: THUMB_H });
+    samples = [card('#ff3d6e', '#6a2c70', 'A'), card('#29d3c2', '#3a0ca3', 'B')];
+  }
+  return renderer;
+}
+
+/** 滑過卡片時的動態縮圖：畫第 progress（0..1）那一格到 out；畫不出來 = false */
+export function drawThumbFrame(m: Module, progress: number, out: HTMLCanvasElement): boolean {
+  if (m.kind === 'remap') return false;
+  try {
+    const r = ensureRenderer();
+    const dur = m.kind === 'transition' ? 0.8 : parseDuration(m.code, 0.5);
+    if (!r.thumb(m, progress, samples![0], samples![1], dur)) return false;
+    // WebGL 畫完同一個 task 內讀得到畫面
+    const g = out.getContext('2d')!;
+    g.clearRect(0, 0, out.width, out.height);
+    g.drawImage(canvas!, 0, 0, out.width, out.height);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** 動態縮圖一圈：播放長度 + 停一下（秒） */
+export const thumbLoop = (m: Module) => (m.kind === 'transition' ? 0.8 : parseDuration(m.code, 0.5));
+
 function process() {
   scheduled = false;
   const first = queue.entries().next();
@@ -99,14 +128,10 @@ function process() {
   try {
     if (m.kind === 'remap') url = remapThumb(m);
     else {
-      if (!renderer) {
-        canvas = document.createElement('canvas');
-        renderer = new Renderer(canvas, { w: THUMB_W, h: THUMB_H });
-        samples = [card('#ff3d6e', '#6a2c70', 'A'), card('#29d3c2', '#3a0ca3', 'B')];
-      }
+      const r = ensureRenderer();
       const dur = m.kind === 'transition' ? 0.8 : parseDuration(m.code, 0.5);
       const prog = m.kind === 'transition' ? 0.42 : 0.18;
-      if (renderer.thumb(m, prog, samples![0], samples![1], dur)) url = canvas!.toDataURL('image/jpeg', 0.85);
+      if (r.thumb(m, prog, samples![0], samples![1], dur)) url = canvas!.toDataURL('image/jpeg', 0.85);
     }
   } catch (e) {
     console.warn($t('縮圖失敗'), m.name, e);

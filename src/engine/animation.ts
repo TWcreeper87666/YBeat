@@ -42,6 +42,8 @@ export interface AnimItem {
   layers: AnimLayer[];
   beatTimes?: number[];
   presetId?: string;
+  /** 所有圖片位置用同一張（換一張 = 全部一起換） */
+  sameMedia?: true;
 }
 
 export interface AnimDrawLayer {
@@ -58,6 +60,8 @@ export interface AnimDrawLayer {
 }
 
 const value = (keys: Keyframe[] | undefined, beat: number, fallback: number) => keys?.length ? evalKeys(keys, beat) : fallback;
+/** 時間軸時間 t → 項目內的拍（照項目自己的拍點；拍點外用 beatTime 外插） */
+export const animBeatAtTime = (item: AnimItem, t: number, beatTime: number) => beatAt(item, t, beatTime);
 const beatAt = (item: AnimItem, t: number, beatTime: number) => {
   const local = t - item.start;
   const grid = item.beatTimes;
@@ -111,10 +115,11 @@ export function snapAnimBeats(item: AnimItem, grid: number[]): AnimItem {
 const ease = (name: string): Keyframe['ease'] => name === 'hold' ? 'hold'
   : name === 'back' ? [0.34, 1.56, 0.64, 1] : name === 'out' ? [0, 0, 0.58, 1] : [0, 0, 1, 1];
 
-/** 舊模板以四拍展開；淡出仍依最後半拍計算。 */
-export function animTemplate(variant: PopVariant, opts: { id: string; start: number; duration: number; track?: number; subject?: string | null; reveal?: string | null; cx?: number; cy?: number; side?: -1 | 1; text?: string; outline?: string }): AnimItem {
+/** 舊模板以四拍展開（beats = 其他拍數，例如飛入 2 拍）；淡出仍依最後半拍計算。 */
+export function animTemplate(variant: PopVariant, opts: { id: string; start: number; duration: number; track?: number; subject?: string | null; reveal?: string | null; cx?: number; cy?: number; side?: -1 | 1; text?: string; outline?: string; beats?: number }): AnimItem {
   const subject = opts.subject ?? null, reveal = opts.reveal ?? null;
-  const source = expandPop({ b0: 0, b1: 4, variant, mediaId: 'subject', revealMediaId: 'reveal', cx: opts.cx ?? 0, cy: opts.cy ?? 0, side: opts.side, text: opts.text, path: opts.outline }, (b) => b);
+  const nb = Math.max(1, Math.round(opts.beats ?? 4));
+  const source = expandPop({ b0: 0, b1: nb, variant, mediaId: 'subject', revealMediaId: 'reveal', cx: opts.cx ?? 0, cy: opts.cy ?? 0, side: opts.side, text: opts.text, path: opts.outline }, (b) => b);
   const slots: AnimSlot[] = [
     { id: 'subject', role: 'subject', label: 'Subject', mediaId: subject, sourceTime: 0, cutout: { mode: 'auto', outline: opts.outline } },
     { id: 'background', role: 'background', label: 'Background', mediaId: subject, sourceTime: 0 },
@@ -138,13 +143,14 @@ export function animTemplate(variant: PopVariant, opts: { id: string; start: num
       scale: l.mask.scale.map((k, j) => ({ id: `${i}-mask-${j}`, t: k.t + l.t0, v: k.v, ease: ease(k.ease) })) } : undefined;
     return { id: `layer-${i}`, slotId, fromBeat: l.t0, toBeat: l.t1, keys, blend: l.blend, mask,
       text: variant === 'textBehind' && i === 1 ? opts.text : undefined,
+      // 文字放在畫面偏上（主體的頭附近）
+      ...(variant === 'textBehind' && i === 1 && !keys.y ? { base: { y: -0.12 } } : {}),
       effects: l.effects?.map((fx, j) => ({ id: `fx-${i}-${j}`, moduleId: fx.moduleId, params: fx.params,
         beatEvery: fx.beatEvery, hitBeats: fx.hitSec })) };
   });
-  // 文字層採用字幕預設樣式，與舊版套用的字幕樣式可能不同。
   return { id: opts.id, track: opts.track ?? 0, start: opts.start, duration: opts.duration,
     slots, layers: layers.filter((_, i) => variant !== 'textBehind' || i !== 1 || !!opts.text),
-    beatTimes: [0, 1, 2, 3, 4].map((b) => b * opts.duration / 4), presetId: variant };
+    beatTimes: Array.from({ length: nb + 1 }, (_, b) => b * opts.duration / nb), presetId: variant };
 }
 
 export const ANIM_TEMPLATES = Object.fromEntries(POP_VARIANTS.map((variant) =>

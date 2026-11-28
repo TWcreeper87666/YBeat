@@ -40,7 +40,7 @@ const BLENDS = (): Record<BlendMode, string> => ({
   subtract: $t('相減'),
   lighten: $t('變亮'),
 });
-import { useModuleThumb } from '../engine/thumbs';
+import { drawThumbFrame, THUMB_H, THUMB_W, thumbLoop, useModuleThumb } from '../engine/thumbs';
 import { startLibraryDrag } from './dnd';
 import { useProxy } from '../engine/proxy';
 import { itemName } from './names';
@@ -84,7 +84,8 @@ export function MediaPanel() {
 
   // 色板素材不顯示在這裡（在「色板」分頁）
   const library = useMemo(() => media.filter((m) => !m.color), [media]);
-  const uses = (id: string) => clips.filter((c) => c.mediaId === id).length + audios.filter((a) => a.mediaId === id).length;
+  const anims = useStore((s) => s.anims);
+  const uses = (id: string) => clips.filter((c) => c.mediaId === id).length + audios.filter((a) => a.mediaId === id).length + anims.filter((a) => a.slots.some((sl) => sl.mediaId === id)).length;
   const list = useMemo(() => {
     const l = library.filter((m) => (filter === 'all' || m.kind === filter) && match(m.name, q));
     if (sort === 'name') l.sort((a, b) => a.name.localeCompare(b.name));
@@ -336,7 +337,7 @@ export function TextPanel() {
   const previewing = usePreviewFx((s) => s.text?.preset);
   const togglePreview = (id: string, name: string) => {
     useStore.getState().setPlaying(false);
-    usePreviewFx.setState({ fx: null, text: previewing === id ? null : { preset: id, name, t0: performance.now() } });
+    usePreviewFx.setState({ fx: null, anim: null, text: previewing === id ? null : { preset: id, name, t0: performance.now() } });
   };
   return (
     <div className="lib" onContextMenu={(e) => e.preventDefault()}>
@@ -417,10 +418,33 @@ function captionApplyMenu(e: React.MouseEvent, clipId: string) {
 
 // ───────────────────────── 轉場 / 特效 / 變速 ─────────────────────────
 
+/** 滑過卡片：特效 / 轉場用示範畫面即時播（停一下再重播）；變速曲線上有一條跑過去的播放頭 */
+function HoverPlay({ m }: { m: Module }) {
+  const ref = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const cv = ref.current;
+    if (!cv || m.kind === 'remap') return;
+    const dur = Math.max(0.05, thumbLoop(m));
+    const t0 = performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      const el = ((now - t0) / 1000) % (dur + 0.5);
+      if (!drawThumbFrame(m, Math.min(1, el / dur), cv)) return;
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [m]);
+  return m.kind === 'remap' ? <span className="thumb-sweep" /> : <canvas ref={ref} className="thumb-live" width={THUMB_W} height={THUMB_H} />;
+}
+
 function ModuleThumb({ m }: { m: Module }) {
   const url = useModuleThumb(m);
+  const [hover, setHover] = useState(false);
   return (
-    <div className="lib-thumb mod" style={url ? { backgroundImage: `url(${url})` } : undefined}>
+    <div className="lib-thumb mod" style={url ? { backgroundImage: `url(${url})` } : undefined}
+      onPointerEnter={() => setHover(true)} onPointerLeave={() => setHover(false)}>
+      {hover && url && <HoverPlay m={m} />}
       {!url && <span className="loading" />}
       {isHitFx(m) && <span className="fx-short" title={$t('衝擊特效')}><Zap size={10} fill="currentColor" /></span>}
       {canFollow(m) && <span className="fx-face" title={$t('跟隨目標')}><Crosshair size={10} /></span>}
@@ -531,7 +555,7 @@ export function ModuleLibrary({ kind, onPick, current }: { kind: ModuleKind; onP
     useStore.getState().setPlaying(false);
     const cur = usePreviewFx.getState().fx;
     const same = kind === 'remap' && cur?.moduleId === id && !!cur.timeline === timeline;
-    usePreviewFx.setState({ fx: same ? null : { moduleId: id, t0: performance.now(), ...(timeline ? { timeline } : {}) }, text: null });
+    usePreviewFx.setState({ fx: same ? null : { moduleId: id, t0: performance.now(), ...(timeline ? { timeline } : {}) }, text: null, anim: null });
   };
 
   const itemMenu = (e: React.MouseEvent, m: Module) => {
@@ -1323,7 +1347,7 @@ function maskBlock(
  * 一個特效的屬性區塊：參數（含音訊反應）、遮罩。特效軌的特效與片段特效共用。
  * compact：遮罩併進參數區塊（片段特效用，比較不佔空間）
  */
-function effectSections(
+export function effectSections(
   f: FxLike,
   mod: Module | undefined,
   local: number,

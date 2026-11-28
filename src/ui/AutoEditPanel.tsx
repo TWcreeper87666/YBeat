@@ -522,7 +522,7 @@ export function AutoEditPanel() {
     useDock.getState().activatePanel('transition');
     useDock.getState().activatePanel('preview');
     focusLibrary([id]);
-    usePreviewFx.setState({ fx: { moduleId: id, t0: performance.now() }, text: null });
+    usePreviewFx.setState({ fx: { moduleId: id, t0: performance.now() }, text: null, anim: null });
   };
   const fxMods = modules.filter((m) => m.kind === 'effect');
   const groupsOf = (kind: 'transition' | 'effect', list: typeof modules) => [

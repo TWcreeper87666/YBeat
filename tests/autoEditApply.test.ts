@@ -87,12 +87,17 @@ const popPlan: EditPlan = {
   pops: [{ b0: 4, b1: 8, variant: 'shake', mediaId: 'i', cx: 0.2, cy: -0.1 }],
 };
 const pp = planItems(popPlan, src, S());
-const layer = pp.clips.find((c) => c.track === 1)!;
+// 主體跳出 = 一個動畫（不再是一堆片段）
+const anim = pp.anims[0];
+const subjLayer = anim?.layers.find((l) => anim.slots.find((x) => x.id === l.slotId)?.role === 'subject')!;
 const revealClip = pp.clips.find((c) => c.track === 0 && c.start === 4)!;
-ok(!!layer && layer.aiMatte === true && layer.start === 2 && layer.start + layer.duration === 4 && layer.volume === 0, '主體層：去背、在揭露拍前 4 拍、剛好結束在揭露拍');
-ok(layer.keys.scaleX!.map((k) => k.v).join() === '0.55,0.7,0.85,1,1' && layer.keys.scaleX![0].ease === 'hold', '每拍放大一級（停住型關鍵影格），最後 = 1');
-ok(Math.abs(layer.keys.x![0].v - 0.09) < 1e-9 && layer.keys.x!.at(-1)!.v === 0, '縮放時位移補償，主體留在原位；最後位移 0 跟完整圖對齊');
-ok(layer.effects?.length === 2 && layer.effects.every((f) => f.timing?.kind === 'beat'), '震閃：兩個每拍觸發的片段特效');
+ok(pp.anims.length === 1 && pp.clips.every((c) => c.track === 0), '主體跳出變成一個動畫，鏡頭只在底下那層');
+ok(anim.start === 2 && anim.start + anim.duration === 4 && anim.track === 1 && anim.presetId === 'shake', '動畫：在揭露拍前 4 拍、剛好結束在揭露拍、上面一層');
+ok(anim.slots.find((x) => x.role === 'subject')!.mediaId === 'i' && anim.slots.find((x) => x.role === 'subject')!.cutout?.mode === 'auto', '主體：那張圖、去背');
+ok(subjLayer.keys.scaleX!.map((k) => k.v).join() === '0.55,0.7,0.85,1,1' && subjLayer.keys.scaleX![0].ease === 'hold', '每拍放大一級（停住型關鍵影格），最後 = 1');
+ok(Math.abs(subjLayer.keys.x![0].v - 0.09) < 1e-9 && subjLayer.keys.x!.at(-1)!.v === 0, '縮放時位移補償，主體留在原位；最後位移 0 跟完整圖對齊');
+ok(subjLayer.effects?.length === 2 && subjLayer.effects.every((f) => f.beatEvery), '震閃：兩個每拍觸發的特效');
+ok(!!anim.group && revealClip.group === anim.group && pp.clips.filter((c) => c.group === anim.group).length === 2, '動畫、底下的鏡頭、揭露的鏡頭同一組（一起鎖住）');
 ok(!revealClip.transitionIn && revealClip.keys.scaleX![0].v === 1 && revealClip.keys.x![0].v === 0, '揭露拍：硬切、完整圖從原尺寸開始（拉遠改成推近）');
 
 // 主體跳出（影片的一格）：主體層停在那一格、揭露拍從那一格接著播
@@ -106,10 +111,9 @@ ok(!revealClip.transitionIn && revealClip.keys.scaleX![0].v === 1 && revealClip.
     overlays: [], pops: [{ b0: 4, b1: 8, variant: 'step', mediaId: 'v@3.00', cx: 0, cy: 0 }],
   };
   const r = planItems(plan, src, S(), [v, frame]);
-  const sub = r.clips.find((c) => c.track === 1)!;
+  const sub = r.anims[0]?.slots.find((x) => x.role === 'subject');
   const rev = r.clips.find((c) => c.track === 0 && c.start === 4)!;
-  ok(!!sub && sub.mediaId === 'v' && sub.in === 3 && sub.aiMatte === true, '主體層：原影片、從那一格開始、去背');
-  ok(sub.remap?.moduleId === 'remap-curve' && sub.remap.keys.every((k) => k.v === 0), '主體層：停在那一格');
+  ok(!!sub && sub.mediaId === 'v' && sub.sourceTime === 3 && sub.cutout?.mode === 'auto', '動畫的主體：原影片的那一格（3 秒）、去背');
   ok(!!rev && rev.mediaId === 'v' && rev.in === 3 && rev.remap?.moduleId !== 'remap-curve', '揭露拍：同一支影片從那一格接著播（正常速度）');
 }
 

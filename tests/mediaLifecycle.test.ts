@@ -79,3 +79,17 @@ console.log('PASS media follows timeline references and restores on undo');
   assert.deepEqual(useStore.getState().media.map((m) => m.id), ['col', 'b']);
   console.log('PASS 色板跟著時間軸移除 / 復原');
 }
+
+// 色板 / 素材還有動畫的圖片位置在用：刪掉最後一個片段也不能移除；動畫也拿掉才移除
+{
+  const col = { id: 'col2', name: '色板 #29d3c2', kind: 'image' as const, url: 'blob:col2', width: 108, height: 192, duration: 0, thumb: 'blob:col2', hasAudio: false, color: '#29d3c2' };
+  const cc = makeClip({ id: 'cc2', mediaId: col.id, start: 0, duration: 2 });
+  const anim = { id: 'an', track: 1, start: 0, duration: 2, layers: [{ id: 'l', slotId: 's', fromBeat: 0, toBeat: 4, keys: {} }],
+    slots: [{ id: 's', role: 'subject' as const, label: 'S', mediaId: col.id, sourceTime: 0 }] };
+  useStore.setState({ media: [col, b], clips: [cc], anims: [anim], audios: [], effects: [], tracks: { video: [{}, {}], fx: [], audio: [{}] } });
+  useStore.setState({ clips: [] });
+  assert.deepEqual(useStore.getState().media.map((m) => m.id), ['col2', 'b'], 'used by an animation slot');
+  useStore.setState({ anims: [] });
+  assert.deepEqual(useStore.getState().media.map((m) => m.id), ['b']);
+  console.log('PASS 動畫用到的色板不會被自動移除');
+}

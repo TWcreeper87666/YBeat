@@ -229,6 +229,25 @@ ok(names('how do I add keyframes?') === '', '沒提到就不附');
 }
 
 // ── 請求次數：只有修改、而且成功 → 只送一次 ──
+// 動畫：get_timeline 列出動畫和圖片位置；set_anim_slots 只換指定的那一張
+{
+  reset();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  useStore.setState({ media: [...media, { ...media[0], id: 'm2', name: 'w.mp4' }] as any, anims: [{ id: 'an1', track: 1, start: 1, duration: 2, presetId: 'crossShot',
+    slots: [{ id: 'subject', role: 'subject', label: '', mediaId: 'm1', sourceTime: 1 }, { id: 'reveal', role: 'reveal', label: '', mediaId: 'm1', sourceTime: 0 }],
+    layers: [{ id: 'l', slotId: 'subject', fromBeat: 0, toBeat: 4, keys: {} }] }] });
+  const tl = runProjectTool('get_timeline', {}, []) as { animations?: { id: string; slots: { id: string; media: string | null }[] }[] };
+  ok(tl.animations?.[0]?.id === 'an1' && tl.animations[0].slots.length === 2, 'get_timeline 列出動畫和圖片位置');
+  const props: Proposal[] = [];
+  runProjectTool('set_anim_slots', { anim_id: 'an1', items: [{ slot: 'reveal', media: 'm2', at_sec: 4 }] }, props);
+  applyProposals(props);
+  const an = useStore.getState().anims[0];
+  ok(an.slots.find((x) => x.id === 'reveal')!.mediaId === 'm2' && an.slots.find((x) => x.id === 'reveal')!.sourceTime === 4 && an.slots.find((x) => x.id === 'subject')!.mediaId === 'm1', 'set_anim_slots 只換指定的那一張');
+  const bad = runProjectTool('set_anim_slots', { anim_id: 'an1', items: [{ slot: 'nope', media: 'm2' }] }, []);
+  ok(typeof bad.error === 'string', 'set_anim_slots 不存在的位置回錯誤');
+  useStore.setState({ anims: [] });
+}
+
 (async () => {
   const bodies: any[] = [];
   let reply: (n: number) => unknown[] = () => [];

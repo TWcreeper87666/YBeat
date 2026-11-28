@@ -473,7 +473,13 @@ const trackEnd = (items: { start: number; duration: number; track: number }[], t
  */
 export function stretchPatch(type: ItemType, it: AnyItem, anchor: number, s: number): Partial<AnyItem> {
   const base = { start: anchor + (it.start - anchor) * s, duration: it.duration * s };
-  if (type === 'anim') return base;
+  // 動畫的關鍵影格以拍為單位：拍點跟著拉長 = 關鍵影格一起縮放
+  if (type === 'anim') {
+    const a = it as AnimItem;
+    // 圖層特效的關鍵影格是秒數：一起縮放
+    const layers = a.layers.some((l) => l.effects?.some((f) => f.keys)) ? a.layers.map((l) => (l.effects ? { ...l, effects: l.effects.map((f) => (f.keys ? { ...f, keys: scaleKeyMap(f.keys, s) as Record<string, Keyframe[]> } : f)) } : l)) : undefined;
+    return { ...base, beatTimes: a.beatTimes?.map((b) => b * s), ...(layers ? { layers } : {}) } as Partial<AnimItem>;
+  }
   if (type === 'clip') {
     const c = it as Clip;
     const patch: Partial<Clip> = { ...base, keys: scaleKeyMap(c.keys, s) };
@@ -543,6 +549,15 @@ export function itemSpeed(type: ItemType, it: AnyItem): number | null {
 
 /** 素材是否可用（存在且沒遺失） */
 export const mediaUsable = (m: Media | undefined): m is Media => !!m && !m.missing;
+
+/** 專案裡用到的素材：片段、音訊、動畫的圖片位置（色板、遺失素材的自動清理、「未使用」都看這個） */
+export function usedMediaIds(s: { clips: { mediaId: string }[]; audios: { mediaId: string }[]; anims?: AnimItem[] }): Set<string> {
+  const out = new Set<string>();
+  for (const c of s.clips) out.add(c.mediaId);
+  for (const a of s.audios) out.add(a.mediaId);
+  for (const a of s.anims ?? []) for (const sl of a.slots) if (sl.mediaId) out.add(sl.mediaId);
+  return out;
+}
 
 export const isTextClip = (c: Clip | undefined): c is Clip & { text: TextStyle } => !!c?.text;
 
@@ -921,7 +936,8 @@ export const useStore = create<State>()(
         updateAnim: (id, patch) => set((s) => ({ anims: s.anims.map((a) => {
           if (a.id !== id || trackLocked(s, 'anim', a.track) || trackLocked(s, 'anim', patch.track ?? a.track)) return a;
           const next = { ...a, ...(a.locked ? unGeo(patch) : patch) };
-          return patch.start !== undefined || patch.duration !== undefined ? snapAnimBeats(next, triggerBeats(1)) : next;
+          // 直接給拍點（Ctrl+拖曳變速）= 照給的，不再吸附
+          return (patch.start !== undefined || patch.duration !== undefined) && !patch.beatTimes ? snapAnimBeats(next, triggerBeats(1)) : next;
         }) })),
 
         patchItems: (patches) =>
@@ -934,7 +950,7 @@ export const useStore = create<State>()(
             return { clips: apply('clip', s.clips), effects: apply('effect', s.effects), audios: apply('audio', s.audios),
               anims: apply('anim', s.anims).map((a) => {
                 const p = patches[keyOf('anim', a.id)];
-                return p?.start !== undefined || p?.duration !== undefined ? snapAnimBeats(a as AnimItem, triggerBeats(1)) : a;
+                return (p?.start !== undefined || p?.duration !== undefined) && !(p as Partial<AnimItem>).beatTimes ? snapAnimBeats(a as AnimItem, triggerBeats(1)) : a;
               }) };
           }),
 

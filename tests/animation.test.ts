@@ -6,8 +6,9 @@ import { expandPop, POP_VARIANTS } from '../src/engine/subjectPop';
 import { setBeatSource } from '../src/engine/trigger';
 import { settleHistory, undo, resetHistory } from '../src/engine/history';
 import { packProject, projectAnims } from '../src/engine/project';
-import { makeClip, useStore } from '../src/store';
-import { placeAnim, setAnimSlot } from '../src/engine/animPlace';
+import { makeClip, stretchPatch, useStore } from '../src/store';
+import { copySlots, pasteAnimImages, copyAnimImages, pasteSlots, patchAnimSlot, placeAnim, setAnimSameMedia, setAnimSlot, usedImageSlots } from '../src/engine/animPlace';
+import { COMBO_IDS, comboBeats, comboItem } from '../src/engine/animCombos';
 import { usePrefs } from '../src/prefs';
 
 const path = 'M40 40L160 40L160 160L40 160Z';
@@ -124,4 +125,104 @@ console.log('PASS animation store operations and undo');
   assert.equal(mine.presetId, 'crossShot');
   setBeatSource(() => []);
   console.log('PASS empty placement and my animation with missing media');
+}
+
+// 組合範本：圖層 / 遮罩指到存在的位置，關鍵影格照拍排好；放到時間軸照自己的拍數、填底下 / 下一個鏡頭
+{
+  for (const combo of COMBO_IDS) {
+    const item = comboItem(combo, { id: combo, start: 0, duration: 4, track: 0, under: { mediaId: 'one', sourceTime: 2 }, next: { mediaId: 'two', sourceTime: 0 } });
+    const slots = new Set(item.slots.map((s) => s.id));
+    const layers = new Set(item.layers.map((l) => l.id));
+    assert.equal(layers.size, item.layers.length, `${combo} unique layer ids`);
+    assert.equal(item.beatTimes!.length, comboBeats(combo) + 1);
+    for (const l of item.layers) {
+      assert.ok(slots.has(l.slotId), `${combo} ${l.id} slot`);
+      assert.ok(l.fromBeat < l.toBeat && l.toBeat <= comboBeats(combo) + 1e-9, `${combo} ${l.id} range`);
+      if (l.mask) { assert.ok(slots.has(l.mask.slotId)); assert.ok(!l.mask.layerId || layers.has(l.mask.layerId)); }
+      for (const list of Object.values(l.keys)) for (let i = 1; i < (list?.length ?? 0); i++) assert.ok(list![i].t >= list![i - 1].t, `${combo} ${l.id} sorted`);
+    }
+    for (const s of item.slots) assert.equal(s.mediaId, s.role === 'reveal' ? 'two' : 'one', `${combo} ${s.id} filled`);
+    assert.ok(animLayers(item, 3.99, 1).length > 0, `${combo} draws at the end`);
+  }
+  console.log(`PASS ${COMBO_IDS.length} combo templates`);
+}
+
+// 全用同一張：打開 = 其他位置換成同一張；換一個位置 = 全部一起換；關掉 = 只換那一個
+{
+  const item = comboItem('tripleSlide', { id: 'same', start: 0, duration: 2, track: 0, under: { mediaId: 'a', sourceTime: 1 } });
+  useStore.setState({ anims: [item], clips: [], tracks: { video: [{}], fx: [], audio: [] } });
+  patchAnimSlot('same', 'p2', { mediaId: 'b', sourceTime: 3 });
+  const get = () => useStore.getState().anims[0];
+  assert.deepEqual(get().slots.map((s) => s.mediaId), ['a', 'a', 'b', 'a']);
+  setAnimSameMedia('same', true, 'p2');
+  assert.ok(get().sameMedia);
+  assert.deepEqual(get().slots.map((s) => [s.mediaId, s.sourceTime]), [['b', 3], ['b', 3], ['b', 3], ['b', 3]]);
+  setAnimSlot('same', 'p3', 'c');
+  assert.deepEqual(get().slots.map((s) => s.mediaId), ['c', 'c', 'c', 'c']);
+  patchAnimSlot('same', 'p1', { cutout: { mode: 'off' } });
+  assert.equal(get().slots.filter((s) => s.cutout?.mode === 'off').length, 1, 'cut-out stays per slot');
+  setAnimSameMedia('same', false);
+  setAnimSlot('same', 'p1', 'd');
+  assert.deepEqual(get().slots.map((s) => s.mediaId), ['c', 'd', 'c', 'c']);
+  console.log('PASS same image for all slots');
+}
+
+// Ctrl+拖曳變速：拍點跟著縮放（關鍵影格一起拉長），不再吸附回專案拍點
+{
+  setBeatSource(() => [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5]);
+  const item = { ...animTemplate('fly', { id: 'st', start: 1, duration: 2, subject: 'm' }), track: 0 };
+  useStore.setState({ anims: [item], clips: [], tracks: { video: [{}], fx: [], audio: [] } });
+  const p = stretchPatch('anim', item, 1, 0.6) as Partial<typeof item>;
+  assert.deepEqual(p.beatTimes!.map((b) => +b.toFixed(6)), item.beatTimes!.map((b) => +(b * 0.6).toFixed(6)));
+  useStore.getState().patchItems({ 'anim:st': p });
+  const after = useStore.getState().anims[0];
+  assert.ok(Math.abs(after.duration - 1.2) < 1e-9);
+  assert.deepEqual(after.beatTimes!.map((b) => +b.toFixed(6)), p.beatTimes!.map((b) => +b.toFixed(6)));
+  // 同一拍的位置：拉短後在新時間的同一個比例
+  const x0 = animLayers(item, 1 + 0.25, 0.5)[0].x;
+  const x1 = animLayers(after, 1 + 0.25 * 0.6, 0.5)[0].x;
+  assert.ok(Math.abs(x0 - x1) < 1e-9, 'keyframes stretch with the item');
+  setBeatSource(() => []);
+  console.log('PASS anim stretch scales the beat grid');
+}
+
+// 複製 / 貼上圖片：主體依序（少了輪流）、背景 / 揭露同種、分身跟主體、對不到的保留、全用同一張、多個動畫依序分配
+{
+  const usable = (id: string) => id !== 'gone';
+  const ids = (a: { slots: { id: string; mediaId: string | null }[] }) => Object.fromEntries(a.slots.map((s) => [s.id, s.mediaId]));
+  const triple = comboItem('tripleSlide', { id: 't', start: 0, duration: 2, track: 0, under: { mediaId: 'old', sourceTime: 0 } });
+  const fly = animTemplate('fly', { id: 'f', start: 0, duration: 2, subject: 'old', reveal: 'oldR' });
+  const echo = comboItem('zoomEcho', { id: 'z', start: 0, duration: 2, track: 0, under: { mediaId: 'old', sourceTime: 0 } });
+  const src3 = copySlots(usedImageSlots({ ...triple, slots: triple.slots.map((s, i) => ({ ...s, mediaId: ['bg', 'A', 'B', 'C'][i] })) }));
+  // 一個人 → 三人：三個都是他；背景來源沒有 → 保留
+  const one = copySlots(usedImageSlots({ ...fly, slots: fly.slots.map((s) => (s.role === 'subject' ? { ...s, mediaId: 'P' } : s)) }));
+  assert.deepEqual(ids({ slots: pasteSlots(triple, one, { usable }).slots }), { background: 'old', p1: 'P', p2: 'P', p3: 'P' });
+  // 三人 → 一個主體：用第一個
+  assert.equal(pasteSlots(fly, src3, { usable }).slots.find((s) => s.role === 'subject')!.mediaId, 'A');
+  // 分身沒有對應的：跟著主體
+  assert.deepEqual(ids({ slots: pasteSlots(echo, src3, { usable }).slots }), { background: 'bg', echo1: 'A', echo2: 'A', subject: 'A' });
+  // 遺失的素材略過
+  const lost = { slots: [{ role: 'subject' as const, image: { mediaId: 'gone', sourceTime: 0 } }, { role: 'subject' as const, image: { mediaId: 'Q', sourceTime: 1 } }] };
+  assert.deepEqual(ids({ slots: pasteSlots(triple, lost, { usable }).slots }), { background: 'old', p1: 'Q', p2: 'Q', p3: 'Q' });
+  // 全用同一張：全部第一個主體
+  assert.ok(pasteSlots({ ...triple, sameMedia: true }, src3, { usable }).slots.every((s) => s.mediaId === 'A'));
+  // 多個動畫：依序分配（6 人 → 前三、後三），一次就好
+  const six = { slots: ['1', '2', '3', '4', '5', '6'].map((m) => ({ role: 'subject' as const, image: { mediaId: m, sourceTime: 0 } })) };
+  const r1 = pasteSlots(triple, six, { usable });
+  const r2 = pasteSlots(triple, six, { usable, offset: r1.used });
+  assert.deepEqual([r1, r2].map((r) => r.slots.filter((s) => s.role === 'subject').map((s) => s.mediaId)), [['1', '2', '3'], ['4', '5', '6']]);
+  // 透過 store：複製 → 貼到兩個動畫
+  const media = ['bg', 'A', 'B', 'C', 'old'].map((id) => ({ id, name: id, kind: 'image', url: '', thumb: '', duration: 1, width: 10, height: 10 })) as any;
+  const t2 = { ...triple, id: 't2', start: 3 };
+  const src = { ...triple, id: 'src', start: 6, slots: triple.slots.map((s, i) => ({ ...s, mediaId: ['bg', 'A', 'B', 'C'][i] })) };
+  useStore.setState({ media, anims: [triple, t2, src], clips: [], tracks: { video: [{}], fx: [], audio: [] } });
+  assert.ok(copyAnimImages('src'));
+  assert.equal(pasteAnimImages(['t2', 't']), 2);
+  const got = useStore.getState().anims.find((a) => a.id === 't2')!;
+  assert.deepEqual(ids(got), { background: 'bg', p1: 'A', p2: 'B', p3: 'C' });
+  // 單一列
+  assert.ok(copyAnimImages('src', 'p3'));
+  pasteAnimImages(['t'], 'p1');
+  assert.equal(useStore.getState().anims.find((a) => a.id === 't')!.slots.find((s) => s.id === 'p1')!.mediaId, 'C');
+  console.log('PASS copy / paste animation images');
 }
