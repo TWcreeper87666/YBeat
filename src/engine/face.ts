@@ -8,6 +8,8 @@ import { decodeRange } from './matteDecode';
 import { animFrameAt, animImage, animImageReady, type AnimImage } from './animImage';
 import { bridgeTrack, findGaps, padBox, pickTrack, smoothTrack, trackAt, type Face, type FaceSample, type Gap, type TrackPoint } from './faceTrack';
 import type { FaceReq, FaceRes } from './faceWorker';
+import { ensureModel, modelGeneration } from './models';
+import { $t } from '../i18n';
 import { similarity, SFACE_DST } from './faceLead';
 import { Need, clipStill, sourceRange } from './jobNeed';
 import { TRACK_FPS, ensureBoxTrack, runPoints, trackKey, useBoxTracks } from './boxTrack';
@@ -110,22 +112,34 @@ export function dropFaces(mediaId: string) {
 // ───────────── Worker ─────────────
 
 let worker: Worker | null = null;
+const sentModels = new Set<string>();
 let seq = 0;
 const waiting = new Map<number, { res: (r: FaceRes) => void; rej: (e: Error) => void }>();
-function ask(req: FaceReq): Promise<FaceRes> {
+const modelData = new Map<string, { generation: number; promise: Promise<ArrayBuffer> }>();
+function modelBytes(id: string, url: string) {
+  const generation = modelGeneration(id);
+  let p = modelData.get(id)?.generation === generation ? modelData.get(id)!.promise : undefined;
+  if (!p) { p = ensureModel(id).then((m) => m.get(url)!).catch(() => { throw new Error($t('模型無法下載')); }); modelData.set(id, { generation, promise: p }); p.catch(() => modelData.delete(id)); }
+  return p;
+}
+async function ask(req: FaceReq): Promise<FaceRes> {
+  const id = req.embed ? 'sface' : 'yunet';
+  const bytes = await modelBytes(id, req.modelUrl);
   if (!worker) {
     worker = new Worker(new URL('./faceWorker.ts', import.meta.url), { type: 'module' });
     worker.onmessage = (e: MessageEvent<FaceRes>) => {
       const w = waiting.get(e.data.id);
       if (!w) return;
       waiting.delete(e.data.id);
-      if ('error' in e.data) w.rej(new Error(e.data.error));
+      if ('error' in e.data) { sentModels.clear(); w.rej(new Error(e.data.error)); }
       else w.res(e.data);
     };
   }
   return new Promise((res, rej) => {
     waiting.set(req.id, { res, rej });
-    worker!.postMessage(req, [req.rgba.buffer]);
+    const first = !sentModels.has(req.modelUrl);
+    sentModels.add(req.modelUrl);
+    worker!.postMessage({ ...req, ...(first ? { modelBytes: bytes } : {}) }, [req.rgba.buffer]);
   });
 }
 async function infer(rgba: Uint8ClampedArray, inW: number, inH: number, imgW: number, imgH: number): Promise<Face[]> {

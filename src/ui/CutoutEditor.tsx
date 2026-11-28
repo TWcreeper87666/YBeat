@@ -138,6 +138,15 @@ function CutoutEditor({ media, time, init, onCommit, onClose }: { media: Media; 
     return [round(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))), round(Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)))];
   };
 
+  /** 這一筆有沒有改到遮罩（差不到一點點的抗鋸齒邊緣不算） */
+  const maskChanged = (a: CutoutFix[], b: CutoutFix[]) => {
+    if (!ai || a === b) return false;
+    const base = { data: ai.data, size: MATTE_SIZE };
+    const x = editedMatte(base, a, aspect), y = editedMatte(base, b, aspect);
+    for (let i = 0; i < x.length; i++) if (Math.abs(x[i] - y[i]) > 8) return true;
+    return false;
+  };
+
   /** 在畫面上畫：筆刷 = 邊拖邊塗；套索 = 圍起來的區域，放開時套用。Alt = 反過來（補上 ↔ 擦掉） */
   const draw = (e: React.PointerEvent) => {
     if (e.button !== 0 || !ai) return;
@@ -145,8 +154,7 @@ function CutoutEditor({ media, time, init, onCommit, onClose }: { media: Media; 
     const o: CutoutFix['op'] = e.altKey ? (op === 'add' ? 'erase' : 'add') : op;
     const pts: Pt[] = [norm(e)];
     const before = fixRef.current;
-    remember();
-    const push = () => (tool === 'brush' ? setFix([...before, { op: o, pts: [...pts], brush }]) : setLasso({ op: o, pts: [...pts] }));
+    const push =() => (tool === 'brush' ? setFix([...before, { op: o, pts: [...pts], brush }]) : setLasso({ op: o, pts: [...pts] }));
     push();
     const move = (ev: PointerEvent) => {
       const p = norm(ev);
@@ -158,10 +166,13 @@ function CutoutEditor({ media, time, init, onCommit, onClose }: { media: Media; 
     const up = () => {
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', up);
-      if (tool !== 'lasso') return;
+      const after: CutoutFix[] = tool === 'brush' ? [...before, { op: o, pts, brush }] : pts.length > 2 ? [...before, { op: o, pts }] : before;
       setLasso(null);
-      if (pts.length > 2) setFix([...before, { op: o, pts }]);
-      else setUndo((u) => u.slice(0, -1));
+      // 紅色區域完全沒變（例如在已經去掉的地方擦）：這一筆不要，也不算一步復原
+      if (!maskChanged(before, after)) return setFix(before);
+      setUndo((u) => [...u.slice(-49), before]);
+      setRedo([]);
+      setFix(after);
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', up);

@@ -20,6 +20,7 @@ import { nextStart, prevEnd, selectedItemsAtTime, spansOverlap, type Span } from
 import { markerSnapPoints, snapTargetIfApplied } from '../engine/snap';
 import { plainSpeed } from '../engine/remap';
 import { audioBufferPeak, getAudioBuffer, setScrubbing, waveformLevels } from '../engine/audio';
+import { useBeatVersion } from '../engine/beats';
 import { fps, PPS_MAX, PPS_MIN, rulerLabel, rulerSteps, snapFrame } from '../engine/rulerTicks';
 import { undo, redo, useHistory, beginHistoryTransaction, endHistoryTransaction } from '../engine/history';
 import { relinkWithPicker } from '../engine/media';
@@ -2322,11 +2323,12 @@ function AudioBeats({ a, pps }: { a: AudioClip; pps: number }) {
  * 在自動剪輯分頁的能量曲線上改
  */
 function AudioChorus({ a, pps }: { a: AudioClip; pps: number }) {
+  const beatVersion = useBeatVersion();
   const shown = useDock((d) => !!findGroup(d.layout, (t) => (t.tabs.includes(t.active) ? t.active : t.tabs[0]) === 'auto'));
   const media = useStore((s) => s.media);
   const st = useAutoEdit((x) => x);
   const song = aeSong({ ...useStore.getState(), media }, st);
-  const src = useMemo(() => (shown && song ? songSource({ ...useStore.getState(), media }, song) : null), [shown, song?.mediaId, song?.a, song?.b, media]); // eslint-disable-line react-hooks/exhaustive-deps
+  const src = useMemo(() => (shown && song ? songSource({ ...useStore.getState(), media }, song) : null), [shown, song?.mediaId, song?.a, song?.b, media, beatVersion]); // eslint-disable-line react-hooks/exhaustive-deps
   if (!shown || !song || !src || st.lastTake?.id !== a.take || a.mediaId !== song.mediaId) return null;
   const music = st.analysis?.key === songKey(song) ? shapeMusic(st.analysis.info, st.shape) : null;
   const { auto, t: list } = songChorus(song, src.beats, music);

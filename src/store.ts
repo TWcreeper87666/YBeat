@@ -189,12 +189,17 @@ export interface AudioClip extends ItemBase {
   keepPitch?: boolean;
   /** 聲道：沒設定 = 立體聲 */
   channels?: 'left' | 'right' | 'swap' | 'mono';
-  /** 左右平衡 -1 ~ 1 */
+  /** 左右平衡 -1 ~ 1（輸出只有一個聲道時用） */
   pan?: number;
+  /** 左 / 右聲道的音量 0 ~ 2（輸出是兩個聲道時用；沒設定 = 1） */
+  volL?: number;
+  volR?: number;
   /** 整段音調，單位是半音 */
   pitch?: number;
-  /** 片段內秒數的音量、平衡與音調關鍵影格 */
-  keys?: Partial<Record<'volume' | 'pan' | 'pitch', Keyframe[]>>;
+  /** 改過的音符，使用素材秒數，依起點排序且不重疊 */
+  regions?: { id: string; a: number; b: number; pitch?: number; stretch?: number; gain?: number }[];
+  /** 片段內秒數的關鍵影格：音量、平衡、左 / 右聲道音量 */
+  keys?: Partial<Record<'volume' | 'pan' | 'volL' | 'volR', Keyframe[]>>;
   /** false = 不提供時間軸的節拍格線（音效之類的） */
   beats?: boolean;
 }
@@ -507,7 +512,7 @@ export function stretchPatch(type: ItemType, it: AnyItem, anchor: number, s: num
     if (c.effects?.length) patch.effects = c.effects.map((f) => (f.keys ? { ...f, keys: scaleKeyMap(f.keys, s) as Record<string, Keyframe[]> } : f));
     return patch;
   }
-  if (type === 'audio') return { ...base, rate: ((it as AudioClip).rate ?? 1) / s, keys: scaleKeyMap((it as AudioClip).keys, s) } as Partial<AudioClip>;
+  if (type === 'audio') return { ...base, rate: ((it as AudioClip).rate ?? 1) / s, keys: scaleKeyMap((it as AudioClip).keys, s), regions: (it as AudioClip).regions } as Partial<AudioClip>;
   const f = it as FxItem;
   // 有觸發的方塊：關鍵影格是「每次觸發」的時間，不跟著方塊長度縮放
   if (f.trigger) return base as Partial<FxItem>;
@@ -666,7 +671,7 @@ export const useStore = create<State>()(
         if (type === 'audio') {
           const a = it as AudioClip;
           const [ka, kb] = splitKeys(a.keys ?? {}, local);
-          return [{ ...a, duration: local, fadeOut: 0, keys: ka }, { ...a, id: uid(), start: t, duration: a.duration - local, in: a.in + local * (a.rate ?? 1), fadeIn: 0, keys: kb }];
+          return [{ ...a, duration: local, fadeOut: 0, keys: ka, regions: a.regions }, { ...a, id: uid(), start: t, duration: a.duration - local, in: a.in + local * (a.rate ?? 1), fadeIn: 0, keys: kb, regions: a.regions }];
         }
         const f = it as FxItem;
         // 有觸發的方塊：關鍵影格是「每次觸發」的時間，兩半都照原樣保留；手動的 Hit 分到兩段
@@ -1839,13 +1844,14 @@ export const useStore = create<State>()(
                 joined = { ...a, duration: a.duration + b.duration, keys, transitionOut: b.transitionOut ?? null, effects };
               } else if (type === 'audio') {
                 const a = A as AudioClip, b = B as AudioClip;
-                if (a.mediaId !== b.mediaId || (a.rate ?? 1) !== (b.rate ?? 1) || (a.channels ?? 'stereo') !== (b.channels ?? 'stereo') || (a.pan ?? 0) !== (b.pan ?? 0) || (a.pitch ?? 0) !== (b.pitch ?? 0) || Math.abs(a.in + a.duration * (a.rate ?? 1) - b.in) > 0.05) continue;
+                if (a.mediaId !== b.mediaId || (a.rate ?? 1) !== (b.rate ?? 1) || (a.channels ?? 'stereo') !== (b.channels ?? 'stereo') || (a.pan ?? 0) !== (b.pan ?? 0) || (a.volL ?? 1) !== (b.volL ?? 1) || (a.volR ?? 1) !== (b.volR ?? 1) || (a.pitch ?? 0) !== (b.pitch ?? 0) || Math.abs(a.in + a.duration * (a.rate ?? 1) - b.in) > 0.05) continue;
                 const keys: NonNullable<AudioClip['keys']> = {};
-                for (const k of ['volume', 'pan', 'pitch'] as const) {
+                for (const k of ['volume', 'pan', 'volL', 'volR'] as const) {
                   const ka = a.keys?.[k], kb = b.keys?.[k];
                   if (ka?.length || kb?.length) keys[k] = [...(ka ?? []), ...(kb ?? []).map((x) => ({ ...x, t: x.t + a.duration }))];
                 }
-                joined = { ...a, duration: a.duration + b.duration, fadeOut: b.fadeOut, keys };
+                const regions = [...(a.regions ?? []), ...(b.regions ?? []).filter((r) => !a.regions?.some((x) => x.id === r.id))].sort((x, y) => x.a - y.a);
+                joined = { ...a, duration: a.duration + b.duration, fadeOut: b.fadeOut, keys, regions };
               } else {
                 const a = A as FxItem, b = B as FxItem;
                 if (a.moduleId !== b.moduleId || JSON.stringify(a.params) !== JSON.stringify(b.params)) continue;

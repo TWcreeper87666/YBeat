@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert';
-import { detectPitch, pitchMarks, psola } from '../src/engine/psola';
+import { detectPitch, pitchMarks, psola, psolaPatch } from '../src/engine/psola';
 
 const sr = 48000;
 const input = new Float32Array(sr);
@@ -36,4 +36,13 @@ const freq = (x: Float32Array) => {
   return (z / 2) / ((b - a) / sr);
 };
 assert.ok(Math.abs(freq(hiUp) / 2000 - 2 ** (5 / 12)) < 0.05, `沒有音高的部分也變調：${freq(hiUp)}`);
+// 只變調一段：其他地方跟原本完全一樣，那一段的音高有變
+{
+  const a = Math.round(sr * 0.4), b = Math.round(sr * 0.6), pad = Math.round(sr * 0.03);
+  const [patched] = psolaPatch([input], sr, marks, [{ a, b }], () => 2);
+  assert.equal(patched.length, input.length);
+  for (let i = 0; i < input.length; i++) if (i < a - pad || i >= b + pad) assert.equal(patched[i], input[i], `沒變調的地方要一模一樣（${i}）`);
+  const mid = patched.slice(a + pad, b - pad);
+  assert.ok(Math.abs(median(detectPitch(mid, sr).f0) - 300) / 300 < 0.05, `變調的那段要升一個八度：${median(detectPitch(mid, sr).f0)}`);
+}
 console.log('PSOLA 通過');

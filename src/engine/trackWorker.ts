@@ -12,11 +12,10 @@ ort.env.logLevel = 'error';
 if (!self.crossOriginIsolated) ort.env.wasm.numThreads = 1;
 
 let session: Promise<ort.InferenceSession> | null = null;
-function getSession(modelUrl: string) {
+function getSession(modelBytes?: ArrayBuffer) {
   session ??= (async () => {
-    const r = await fetch(modelUrl);
-    if (!r.ok) throw new Error(`model HTTP ${r.status}`);
-    return ort.InferenceSession.create(new Uint8Array(await r.arrayBuffer()), { executionProviders: ['wasm'], logSeverityLevel: 3 });
+    if (!modelBytes) throw new Error('model bytes missing');
+    return ort.InferenceSession.create(new Uint8Array(modelBytes), { executionProviders: ['wasm'], logSeverityLevel: 3 });
   })();
   session.catch(() => (session = null));
   return session;
@@ -26,15 +25,15 @@ function getSession(modelUrl: string) {
 const templates = new Map<string, ort.Tensor>();
 
 export type TrackReq =
-  | { id: number; op: 'init'; tid: string; rgba: Uint8ClampedArray; w: number; h: number; box: PxBox; modelUrl: string }
-  | { id: number; op: 'update'; tid: string; rgba: Uint8ClampedArray; w: number; h: number; box: PxBox; modelUrl: string };
+  | { id: number; op: 'init'; tid: string; rgba: Uint8ClampedArray; w: number; h: number; box: PxBox; modelBytes?: ArrayBuffer }
+  | { id: number; op: 'update'; tid: string; rgba: Uint8ClampedArray; w: number; h: number; box: PxBox; modelBytes?: ArrayBuffer };
 export type TrackRes = { id: number; box?: PxBox; score?: number } | { id: number; error: string };
 
 self.onmessage = async (e: MessageEvent<TrackReq>) => {
   const q = e.data;
   const post = (r: TrackRes) => (self as unknown as Worker).postMessage(r);
   try {
-    const s = await getSession(q.modelUrl);
+    const s = await getSession(q.modelBytes);
     if (q.op === 'init') {
       templates.clear();
       const { blob } = cropBlob(q.rgba, q.w, q.h, q.box, 2, TEMPLATE);

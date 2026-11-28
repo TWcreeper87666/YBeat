@@ -37,14 +37,14 @@ export function detectPitch(mono: Float32Array, sr: number): { f0: Float32Array;
       if (tau < lo) continue;
       const score = d * tau / Math.max(1e-12, running);
       if (score < bestScore) { bestScore = score; best = tau; }
-      if (score < 0.15) {
+      if (score < 0.2) {
         let k = tau;
         while (k < hi && diff[k + 1] < diff[k]) k++;
         best = k;
         break;
       }
     }
-    if (best && bestScore < 0.3) {
+    if (best && bestScore < 0.4) {
       const a = diff[Math.max(1, best - 1)], b = diff[best], c = diff[Math.min(hi, best + 1)];
       const correction = Math.abs(a - 2 * b + c) > 1e-9 ? Math.max(-1, Math.min(1, (a - c) / (2 * (a - 2 * b + c)))) : 0;
       f0[frame] = fs / (best + correction);
@@ -114,5 +114,40 @@ export function psola(channels: Float32Array[], sr: number, marks: PitchMark[], 
     ts += Math.max(1, mark.voiced ? mark.period / beta : mark.period);
   }
   for (const channel of out) for (let j = 0; j < length; j++) channel[j] /= Math.max(weights[j], 1);
+  return out;
+}
+
+/**
+ * 只處理要變調的段落（spans：取樣位置），其他地方原封不動；交界處（前後各 pad 個取樣，那裡不變調）淡入淡出接回原本的聲音。
+ * 沒動到的字跟原版一模一樣（整段跑 PSOLA 就算不變調，重新疊合的波形也會跟原本有一點差）。
+ * beta(t)：t = 從開頭算起的秒數。輸出長度跟輸入一樣（只變調、不變長度）。
+ */
+export function psolaPatch(channels: Float32Array[], sr: number, marks: PitchMark[], spans: { a: number; b: number }[], beta: (t: number) => number, pad = Math.round(sr * 0.03)): Float32Array[] {
+  const out = channels.map((c) => c.slice());
+  const n = channels[0]?.length ?? 0;
+  if (!n) return out;
+  // 加上前後的 pad，靠太近的合成同一塊（不然一塊的淡出會跟下一塊的變調重疊）
+  const blocks: { a: number; b: number }[] = [];
+  for (const s of [...spans].sort((x, y) => x.a - y.a)) {
+    const a = Math.max(0, Math.floor(s.a) - pad), b = Math.min(n, Math.ceil(s.b) + pad);
+    if (b <= a) continue;
+    const last = blocks[blocks.length - 1];
+    if (last && a <= last.b) last.b = Math.max(last.b, b);
+    else blocks.push({ a, b });
+  }
+  for (const { a, b } of blocks) {
+    const sub = channels.map((c) => c.subarray(a, b));
+    const subMarks = marks.filter((m) => m.at >= a && m.at < b).map((m) => ({ ...m, at: m.at - a }));
+    const done = psola(sub, sr, subMarks, { stretch: 1, beta: (t) => beta(a / sr + t) });
+    const fade = Math.max(1, Math.min(pad, Math.floor((b - a) / 2)));
+    for (let ch = 0; ch < out.length; ch++) {
+      const o = out[ch], d = done[ch], src = channels[ch];
+      for (let i = 0; i < b - a; i++) {
+        // 開頭 / 結尾 fade 個取樣：原本 → 處理過的（開頭不是素材開頭時才需要）
+        const w = Math.min(1, a > 0 ? i / fade : 1, b < n ? (b - a - 1 - i) / fade : 1);
+        o[a + i] = src[a + i] * (1 - w) + d[i] * w;
+      }
+    }
+  }
   return out;
 }

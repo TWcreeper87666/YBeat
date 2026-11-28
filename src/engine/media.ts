@@ -3,6 +3,7 @@ import { dropFaces } from './face';
 import { dropMediaAnalysis } from './analysisStore';
 import { useAutoEdit } from './autoEditSettings';
 import { dropBoxTracks } from './boxTrack';
+import { dropBeats } from './beatAnalysis';
 import { colorBlob } from './colorBlob';
 import { $t } from '../i18n';
 import { uid, usedMediaIds, useStore, type Media } from '../store';
@@ -200,6 +201,7 @@ export function removeMedia(id: string, quiet = false) {
   const ae = useAutoEdit.getState();
   if (ae.segs.some((g) => g.mediaId === id)) useAutoEdit.setState({ segs: ae.segs.filter((g) => g.mediaId !== id) });
   dropBoxTracks(id);
+  dropBeats(id);
   if (used) {
     useStore.setState({ media: s.media.map((x) => (x.id === id ? { ...x, url: '', thumb: x.kind === 'image' ? '' : x.thumb, missing: true } : x)) });
     if (!quiet) toast($t('「{0}」已移除，使用中的片段標記為遺失', m.name));

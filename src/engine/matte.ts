@@ -6,6 +6,8 @@ import { create } from 'zustand';
 import { useStore, type AnimItem, type Clip, type Media, type Module } from '../store';
 import { clipSource } from './remap';
 import type { MatteReq, MatteRes } from './matteWorker';
+import { ensureModel, modelGeneration } from './models';
+import { $t } from '../i18n';
 import { hasKeyIn, insertKey, pickFrame, snapFps, toKey } from './matteIndex';
 import { decodeRange } from './matteDecode';
 import { Need, clipStill } from './jobNeed';
@@ -143,16 +145,22 @@ export function dropMatte(mediaId: string) {
 // ───────────── Worker ─────────────
 
 let worker: Worker | null = null;
+let sentModel = false;
 let seq = 0;
 const waiting = new Map<number, { res: (m: Uint8Array) => void; rej: (e: Error) => void }>();
-function infer(rgba: Uint8ClampedArray): Promise<Uint8Array> {
+let modelData: Promise<ArrayBuffer> | null = null;
+let generation = -1;
+async function infer(rgba: Uint8ClampedArray): Promise<Uint8Array> {
+  if (generation !== modelGeneration('u2netp')) { modelData = null; generation = modelGeneration('u2netp'); }
+  modelData ??= ensureModel('u2netp').then((m) => m.get(MODEL_URL)!).catch(() => { throw new Error($t('模型無法下載')); });
+  const modelBytes = await modelData.catch((e) => { modelData = null; throw e; });
   if (!worker) {
     worker = new Worker(new URL('./matteWorker.ts', import.meta.url), { type: 'module' });
     worker.onmessage = (e: MessageEvent<MatteRes>) => {
       const w = waiting.get(e.data.id);
       if (!w) return;
       waiting.delete(e.data.id);
-      if ('error' in e.data) w.rej(new Error(e.data.error));
+      if ('error' in e.data) { sentModel = false; w.rej(new Error(e.data.error)); }
       else {
         if (useMatte.getState().ep !== e.data.ep) useMatte.setState({ ep: e.data.ep });
         w.res(e.data.mask);
@@ -162,7 +170,9 @@ function infer(rgba: Uint8ClampedArray): Promise<Uint8Array> {
   const id = ++seq;
   return new Promise((res, rej) => {
     waiting.set(id, { res, rej });
-    worker!.postMessage({ id, rgba, modelUrl: MODEL_URL } satisfies MatteReq, [rgba.buffer]);
+    const first = !sentModel;
+    sentModel = true;
+    worker!.postMessage({ id, rgba, ...(first ? { modelBytes } : {}) } satisfies MatteReq, [rgba.buffer]);
   });
 }
 

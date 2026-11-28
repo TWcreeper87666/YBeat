@@ -12,6 +12,12 @@ import { pickFiles } from '../engine/media';
 import { openMenu, promptDialog, toast, type MenuItem } from './uiStore';
 import { LibFilter, LibToolbar } from './Library';
 import { DragNumber } from './DragNumber';
+import { Seg } from './Toggle';
+import { usePrefs } from '../prefs';
+import { mixdown } from '../engine/audio';
+import { projectDuration } from '../store';
+import { autoSubtitles, mono16k, releaseSpeech, ModelUnavailable, useSpeechJob } from '../engine/speech';
+import { ModelDeclined } from '../engine/models';
 
 const MIN_DUR = 0.05;
 
@@ -39,6 +45,39 @@ function setCueTime(c: Clip, field: 'start' | 'end', value: number) {
 
 type Cat = 'all' | 'warn';
 
+/** 自動字幕：語言、範圍（整個專案 / 循環範圍 / 自訂） */
+function AutoSubDialog({ busy, close, start }: { busy: boolean; close: () => void; start: (range: { a: number; b: number }) => void }) {
+  const language = usePrefs((s) => s.subtitleLanguage);
+  const full = useStore((s) => projectDuration(s));
+  const loop = useStore((s) => s.loop);
+  const [mode, setMode] = useState<'all' | 'loop' | 'custom'>(loop ? 'loop' : 'all');
+  const [custom, setCustom] = useState(() => ({ a: loop?.a ?? 0, b: Math.min(loop?.b ?? full, full) }));
+  const range = mode === 'loop' && loop ? { a: loop.a, b: Math.min(loop.b, full) } : mode === 'custom' ? custom : { a: 0, b: full };
+  const dur = Math.max(0, range.b - range.a);
+  return (
+    <div className="overlay dialog-overlay" onPointerDown={(e) => e.target === e.currentTarget && close()}>
+      <div className="dialog auto-sub" role="dialog" aria-modal="true" aria-label={$t('自動字幕')}>
+        <h3>{$t('自動字幕')}</h3>
+        <div className="form-row col"><span>{$t('語言')}</span><Seg value={language} opts={[{ v: 'auto', label: $t('自動') }, { v: 'zh', label: $t('中文') }, { v: 'en', label: 'English' }, { v: 'ja', label: $t('日本語') }]} on={(v) => usePrefs.getState().set({ subtitleLanguage: v })} /></div>
+        <div className="form-row col">
+          <span>{$t('範圍')}</span>
+          <Seg value={mode} on={setMode} opts={[{ v: 'all' as const, label: $t('整個專案') }, ...(loop ? [{ v: 'loop' as const, label: $t('循環範圍') }] : []), { v: 'custom' as const, label: $t('自訂') }]} />
+        </div>
+        {mode === 'custom' && <div className="form-row auto-sub-range">
+          <DragNumber value={custom.a} min={0} max={Math.max(0, custom.b - 0.5)} step={0.1} suffix=" s" onChange={(v) => setCustom((c) => ({ ...c, a: Math.round(v * 10) / 10 }))} />
+          <span>–</span>
+          <DragNumber value={custom.b} min={Math.min(full, custom.a + 0.5)} max={full} step={0.1} suffix=" s" onChange={(v) => setCustom((c) => ({ ...c, b: Math.round(v * 10) / 10 }))} />
+        </div>}
+        <div className="form-row"><span>{$t('長度')}</span><b>{formatTc(dur)}</b></div>
+        <div className="dialog-actions">
+          <button className="btn" onClick={close}>{$t('取消')}</button>
+          <button className="btn primary" disabled={busy || dur <= 0} onClick={() => start(range)}>{$t('開始')}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function LyricsPanel() {
   const allClips = useStore((s) => s.clips);
   const tracks = useStore((s) => s.tracks);
@@ -56,6 +95,10 @@ export function LyricsPanel() {
   const [q, setQ] = useState('');
   const [cat, setCat] = useState<Cat>('all');
   const [replaceOpen, setReplaceOpen] = useState(false);
+  const [autoOpen, setAutoOpen] = useState(false);
+  const language = usePrefs((s) => s.subtitleLanguage);
+  const job = useSpeechJob((s) => s.stage);
+  const controller = useRef<AbortController | null>(null);
   const [rep, setRep] = useState('');
   const [focusId, setFocusId] = useState<string | null>(null);
   const boxes = useRef(new Map<string, HTMLTextAreaElement>());
@@ -123,6 +166,28 @@ export function LyricsPanel() {
     const count = addSrtCues(lrc ? parseLrc(await file.text()) : parseSrt(await file.text()), lrc ? 'LRC' : 'SRT');
     toast(count ? $t('已匯入 {0} 段字幕', count) : $t('找不到有效字幕'), count ? undefined : 'error');
   };
+  const startAuto = async (range: { a: number; b: number }) => {
+    if (controller.current) return;
+    const abort = new AbortController(); controller.current = abort;
+    useSpeechJob.setState({ stage: $t('混音中'), done: 0, total: 1, cancel: () => abort.abort() });
+    setAutoOpen(false);
+    try {
+      const s = useStore.getState(), duration = range.b - range.a;
+      const mixed = duration > 0 ? await mixdown(s, new Map(s.modules.map((m) => [m.id, m])), duration, range.a) : null;
+      if (abort.signal.aborted) return;
+      if (!mixed) { toast($t('時間軸上沒有聲音'), 'error'); return; }
+      const cues = await autoSubtitles(await mono16k(mixed), language, abort.signal);
+      if (abort.signal.aborted) return;
+      const count = addSrtCues(cues.map((c) => ({ ...c, start: c.start + range.a, end: c.end + range.a })), 'AI');
+      toast(count ? $t('已加入 {0} 段字幕', count) : $t('沒有辨識到人聲'), count ? 'info' : 'error');
+    } catch (error) {
+      if (error instanceof ModelUnavailable) toast($t('模型無法下載'), 'error');
+      else if (!(error instanceof ModelDeclined) && (error as Error).name !== 'AbortError') {
+        console.error('[auto subtitles]', error);
+        toast($t('自動字幕失敗：{0}', error instanceof Error ? error.message : String(error)), 'error');
+      }
+    } finally { releaseSpeech(); controller.current = null; useSpeechJob.setState({ stage: null, done: 0, total: 1, cancel: null }); }
+  };
   const exportCues = (format: 'SRT' | 'LRC') => {
     const data = format === 'SRT' ? writeSrt(clips) : writeLrc(clips);
     if (data) downloadBlob(new Blob(['﻿', data], { type: 'text/plain;charset=utf-8' }), `YBeat_lyrics.${format.toLowerCase()}`);
@@ -139,6 +204,7 @@ export function LyricsPanel() {
     const r = (e.currentTarget as HTMLElement).getBoundingClientRect();
     openMenu(r.left, r.bottom, [
       { label: $t('匯入 SRT／LRC…'), action: importCues },
+      { label: $t('自動字幕…'), action: () => setAutoOpen(true) },
       { label: $t('匯出 SRT'), action: clips.length ? () => exportCues('SRT') : undefined },
       { label: $t('匯出 LRC'), action: clips.length ? () => exportCues('LRC') : undefined },
       { separator: true },
@@ -200,6 +266,7 @@ export function LyricsPanel() {
 
   return (
     <div className="lib lyrics-panel">
+      {autoOpen && <AutoSubDialog busy={!!job} close={() => setAutoOpen(false)} start={(r) => void startAuto(r)} />}
       <LibToolbar id="lyrics" query={q} setQuery={setQ} views={false} filter={{ active: cat !== 'all', reset: () => setCat('all') }}>
         <button className={`lib-add ${replaceOpen ? 'on' : ''}`} title={$t('取代')} onClick={() => setReplaceOpen(!replaceOpen)}><Replace size={14} /></button>
         <button className="lib-add" title={$t('在播放頭新增字幕')} onClick={add}><Plus size={15} /></button>

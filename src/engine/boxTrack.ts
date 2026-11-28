@@ -14,6 +14,8 @@ import { smoothTrack, trackAt, type TrackPoint } from './faceTrack';
 import { clipSource } from './remap';
 import { SCORE_THR, fromPx, toPx, type PxBox } from './vitTrack';
 import type { TrackReq, TrackRes } from './trackWorker';
+import { ensureModel, modelGeneration } from './models';
+import { $t } from '../i18n';
 import { Need, clipStill, sourceRange } from './jobNeed';
 
 /** 每秒最多追幾格（追蹤要連續：格子太稀，快的東西一格跑太遠就追不到） */
@@ -127,23 +129,31 @@ export function dropBoxTracks(mediaId: string) {
 // ───────────── Worker ─────────────
 
 let worker: Worker | null = null;
+let sentModel = false;
 let seq = 0;
 const waiting = new Map<number, { res: (r: { box?: PxBox; score?: number }) => void; rej: (e: Error) => void }>();
-function call(q: Omit<TrackReq, 'id' | 'modelUrl'>): Promise<{ box?: PxBox; score?: number }> {
+let modelData: Promise<ArrayBuffer> | null = null;
+let generation = -1;
+async function call(q: Omit<TrackReq, 'id' | 'modelBytes'>): Promise<{ box?: PxBox; score?: number }> {
+  if (generation !== modelGeneration('vittrack')) { modelData = null; generation = modelGeneration('vittrack'); }
+  modelData ??= ensureModel('vittrack').then((m) => m.get(MODEL_URL)!).catch(() => { throw new Error($t('模型無法下載')); });
+  const modelBytes = await modelData.catch((e) => { modelData = null; throw e; });
   if (!worker) {
     worker = new Worker(new URL('./trackWorker.ts', import.meta.url), { type: 'module' });
     worker.onmessage = (e: MessageEvent<TrackRes>) => {
       const w = waiting.get(e.data.id);
       if (!w) return;
       waiting.delete(e.data.id);
-      if ('error' in e.data) w.rej(new Error(e.data.error));
+      if ('error' in e.data) { sentModel = false; w.rej(new Error(e.data.error)); }
       else w.res(e.data);
     };
   }
   const id = ++seq;
   return new Promise((res, rej) => {
     waiting.set(id, { res, rej });
-    worker!.postMessage({ ...q, id, modelUrl: MODEL_URL } as TrackReq, [q.rgba.buffer]);
+    const first = !sentModel;
+    sentModel = true;
+    worker!.postMessage({ ...q, id, ...(first ? { modelBytes } : {}) } as TrackReq, [q.rgba.buffer]);
   });
 }
 

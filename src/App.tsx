@@ -23,11 +23,11 @@ import { fps } from './engine/rulerTicks';
 import { copyHits, copyKeys, cutHits, deleteSelectedHit, deleteSelectedKey, duplicateHits, hitEdge, hitsFocused, keysFocused, navHit, navHitEdge, nudgeHits, nudgeKeys, pasteHits, pasteKeys, selectAllHits, selectAllKeys, splitHit, trimHit } from './ui/EffectControls';
 import { ShapeDrawerHost } from './ui/ShapeDrawer';
 import { HELP_GPU, SHORTCUTS, TUTORIAL } from './ui/helpText';
-import { useLayout, toast, setBusy, stopPreviewFx, confirmDialog, promptDialog, openMenu, closeMenu, useConfirm, useMenu, type MenuItem } from './ui/uiStore';
+import { useLayout, toast, setBusy, stopPreviewFx, confirmDialog, confirmCheckDialog, promptDialog, openMenu, closeMenu, useConfirm, useMenu, type MenuItem } from './ui/uiStore';
 import { formatBytes, measureUsage, wipeAllData, type Usage } from './engine/storageUsage';
 import { DragNumber } from './ui/DragNumber';
 import { OVERLAY_DEFAULT, usePrefs, type OverlayColors } from './prefs';
-import { Eye, Film, Folder, Globe, Keyboard, Languages, Palette, Search, Settings, X } from 'lucide-react';
+import { Cpu, Eye, Film, Folder, Globe, Keyboard, Languages, Palette, Search, Settings, X } from 'lucide-react';
 import { downloadBlob, exportMp4 } from './engine/exporter';
 import { loadDemo } from './engine/demo';
 import { beginHistoryTransaction, endHistoryTransaction, stepsFrom, undo, redo, useHistory } from './engine/history';
@@ -40,6 +40,8 @@ import { ColorPanel } from './ui/ColorPanel';
 import { EditorWindow, openEditorWindow, useEditorWindow } from './ui/EditorWindow';
 import { snapToDevicePixels } from './ui/pixelSnap';
 import { Seg, Switch } from './ui/Toggle';
+import { MODELS, ModelDeclined, deleteModel, ensureModel, refreshModelStatus, useModels } from './engine/models';
+import { clearBeatResults } from './engine/beatAnalysis';
 
 
 // ───────────── 對話框 ─────────────
@@ -288,21 +290,24 @@ const QUALITIES = [1, 0.75, 0.5, 0.33];
 
 /** 設定的一項：標題、副標題，下面是輸入；inline = 輸入放右邊（數值類） */
 /** help = 使用教學裡的一段：名稱可以點（游標變問號），打開說明跳到那裡 */
-function SetRow({ label, desc, inline, help, children }: { label: ReactNode; desc: ReactNode; inline?: boolean; help?: string; children: ReactNode }) {
+/** action = 放在標題右邊的按鈕 */
+function SetRow({ label, desc, inline, help, action, children }: { label: ReactNode; desc: ReactNode; inline?: boolean; help?: string; action?: ReactNode; children: ReactNode }) {
+  const text = (
+    <div className="set-text">
+      {help
+        ? <button type="button" className="set-name set-help" title={$t('說明')} onClick={() => openHelp(help)}>{label}<CircleHelp size={12} /></button>
+        : <div className="set-name">{label}</div>}
+      <div className="set-desc">{desc}</div>
+    </div>
+  );
   return (
     <div className={`set-row ${inline ? 'inline' : ''}`}>
-      <div className="set-text">
-        {help
-          ? <button type="button" className="set-name set-help" title={$t('說明')} onClick={() => openHelp(help)}>{label}<CircleHelp size={12} /></button>
-          : <div className="set-name">{label}</div>}
-        <div className="set-desc">{desc}</div>
-      </div>
+      {action ? <div className="set-head">{text}{action}</div> : text}
       <div className="set-ctl">{children}</div>
     </div>
   );
 }
 
-/** 設定 → 專案 → 儲存空間：各項用量，清除全部要確認兩次（第二次要打字） */
 /** 瀏覽器實際用的顯示卡（WebGL 回報的名稱；拿不到 = null） */
 function gpuName(): string | null {
   try {
@@ -339,17 +344,20 @@ function GpuInfo() {
   );
 }
 
+/** 清除所有資料：確認兩次（第二次要打字） */
+async function wipeWithConfirm() {
+  if (!await confirmDialog({ title: $t('清除所有資料？'), message: $t('專案、素材、自訂的模組 / 形狀 / 風格、快取和設定都會刪除，無法復原。'), ok: $t('繼續'), danger: true })) return;
+  const word = $t('全部刪除');
+  const v = await promptDialog({ title: $t('再確認一次'), message: $t('輸入「{0}」來確認', word), value: '', ok: $t('清除') });
+  if (v === null) return;
+  if (v.trim() !== word) return void toast($t('輸入的字不一致，沒有刪除'), 'error');
+  await wipeAllData();
+}
+
+/** 設定 → 專案 → 儲存空間：各項用量 */
 function StorageUsage() {
   const [u, setU] = useState<Usage | null>(null);
   useEffect(() => { let live = true; void measureUsage().then((r) => live && setU(r)); return () => { live = false; }; }, []);
-  const wipe = async () => {
-    if (!await confirmDialog({ title: $t('清除所有資料？'), message: $t('專案、素材、自訂的模組 / 形狀 / 風格、快取和設定都會刪除，無法復原。'), ok: $t('繼續'), danger: true })) return;
-    const word = $t('全部刪除');
-    const v = await promptDialog({ title: $t('再確認一次'), message: $t('輸入「{0}」來確認', word), value: '', ok: $t('清除') });
-    if (v === null) return;
-    if (v.trim() !== word) return void toast($t('輸入的字不一致，沒有刪除'), 'error');
-    await wipeAllData();
-  };
   // 長條的尺度 = 最大那項再多 25%（最大的也不會整條滿）；至少 1 MB，清空後幾百 KB 才不會佔一大段
   const max = Math.max(1024 * 1024, 1.25 * Math.max(0, ...(u?.parts.map((p) => p.bytes) ?? [0])));
   return (
@@ -371,9 +379,41 @@ function StorageUsage() {
           </div>
         </>
       )}
-      <button className="btn danger-fill small" onClick={() => void wipe()}>{$t('清除所有資料…')}</button>
     </div>
   );
+}
+
+function ModelManager() {
+  const status = useModels((s) => s.status);
+  const progress = useModels((s) => s.progress);
+  useEffect(() => { void refreshModelStatus(); }, []);
+  const remove = async (id: string) => {
+    const def = MODELS.find((m) => m.id === id)!;
+    const answer = def.caches?.length
+      ? await confirmCheckDialog({ title: $t('刪除模型？'), message: def.name, check: $t('一起刪除分析結果'), ok: $t('刪除'), danger: true })
+      : { confirmed: await confirmDialog({ title: $t('刪除模型？'), message: def.name, ok: $t('刪除'), danger: true }), checked: false };
+    if (!answer.confirmed) return;
+    try { await deleteModel(id, { caches: answer.checked }); if (id === 'beat-this' && answer.checked) clearBeatResults(); }
+    catch { toast($t('刪除失敗'), 'error'); }
+  };
+  const download = async (id: string) => {
+    try { await ensureModel(id, { ask: true }); }
+    catch (e) { if (!(e instanceof ModelDeclined) && (e as Error).name !== 'AbortError') toast($t('模型無法下載'), 'error'); }
+  };
+  const all = async () => {
+    if (!await confirmDialog({ title: $t('全部刪除？'), message: $t('刪除所有已下載的 AI 模型'), ok: $t('刪除'), danger: true })) return;
+    for (const def of MODELS) await deleteModel(def.id, { caches: false });
+  };
+  const total = Object.values(status).reduce((n, s) => n + s.bytes, 0);
+  return <div className="storage">
+    <div className="storage-total"><b>{formatBytes(total)}</b><button className="btn small" onClick={() => void all()}>{$t('全部刪除')}</button></div>
+    <div className="storage-list">{MODELS.map((m) => <div key={m.id} className="storage-row">
+      <span><b>{$t(m.name)}</b> · {$t(m.feature)} · {formatBytes(m.files.reduce((n, f) => n + f.bytes, 0))} · {m.license}</span>
+      <span className="set-hint">{status[m.id]?.downloaded ? $t('已下載') : $t('未下載')}</span>
+      <button className="btn small" onClick={() => void (status[m.id]?.downloaded ? remove(m.id) : download(m.id))}>{status[m.id]?.downloaded ? $t('刪除') : $t('下載')}</button>
+      {progress[m.id] && <button className="btn small" onClick={progress[m.id].cancel}>{$t('取消')}</button>}
+    </div>)}</div>
+  </div>;
 }
 
 const OVERLAY_KEYS: [keyof OverlayColors, string][] = [
@@ -389,7 +429,7 @@ function SettingsDialog({ close }: { close: () => void }) {
     const l = useLayout.getState(), p = usePrefs.getState();
     return {
       layout: { previewScale: l.previewScale, upperLayerAt: l.upperLayerAt, wheelScroll: l.wheelScroll, trackSize: l.trackSize, beatLead: l.beatLead, timeGrid: l.timeGrid },
-      prefs: { stillDur: p.stillDur, transDur: p.transDur, autosave: p.autosave, proxy: p.proxy, proxyQuality: p.proxyQuality, theme: p.theme, overlay: p.overlay },
+      prefs: { stillDur: p.stillDur, transDur: p.transDur, autosave: p.autosave, proxy: p.proxy, proxyQuality: p.proxyQuality, aiBeats: p.aiBeats, theme: p.theme, overlay: p.overlay },
       format: useStore.getState().format,
     };
   });
@@ -410,7 +450,7 @@ function SettingsDialog({ close }: { close: () => void }) {
       if (useStore.getState().format !== orig.format) useStore.getState().setFormat(orig.format);
     },
   };
-  type Row = { label: string; desc: string; inline?: boolean; help?: string; ctl: ReactNode };
+  type Row = { label: string; desc: string; inline?: boolean; help?: string; action?: ReactNode; ctl: ReactNode };
   const secs: { title: string; icon: ReactNode; rows: Row[] }[] = [
     { title: $t('專案'), icon: <Folder size={13} />, rows: [
       { label: $t('輸出比例'), desc: `${$t('匯出與預覽的畫面比例')} · ${fmt.w} × ${fmt.h}`, ctl: (
@@ -418,13 +458,17 @@ function SettingsDialog({ close }: { close: () => void }) {
           opts={FORMATS.map((f) => ({ v: f.id, title: `${f.w} × ${f.h}`, label: <><span className="ratio-box" style={{ aspectRatio: `${f.w} / ${f.h}` }} />{f.label}</> }))} />
       ) },
       { label: $t('自動儲存'), desc: $t('關閉後按 Ctrl+S 存檔'), inline: true, ctl: <Switch v={P.autosave} on={(v) => P.set({ autosave: v })} /> },
-      { label: $t('儲存空間'), desc: $t('這個網站在瀏覽器裡用掉的空間'), ctl: <StorageUsage /> },
+      { label: $t('儲存空間'), desc: $t('這個網站在瀏覽器裡用掉的空間'), action: <button className="btn danger-fill small" onClick={() => void wipeWithConfirm()}>{$t('清除所有資料')}</button>, ctl: <StorageUsage /> },
     ] },
     { title: $t('預覽'), icon: <Eye size={13} />, rows: [
       { label: $t('預覽畫質'), desc: $t('調低編輯會比較順，不影響匯出'), ctl: <Seg value={L.previewScale} on={(q) => L.set({ previewScale: q })} opts={QUALITIES.map((q) => ({ v: q, label: q === 1 ? $t('完整') : `${Math.round(q * 100)}%` }))} /> },
       { label: $t('顯示卡'), desc: $t('預覽與匯出用的顯示卡'), help: HELP_GPU, ctl: <GpuInfo /> },
       { label: $t('預覽代理檔'), desc: $t('關鍵影格很稀的影片，預覽改用小副本，不影響匯出'), inline: true, ctl: <Switch v={P.proxy} on={(v) => P.set({ proxy: v })} /> },
       ...(P.proxy ? [{ label: $t('代理檔畫質'), desc: $t('越低檔案越小，換了會重新產生'), ctl: <Seg value={P.proxyQuality} on={(q) => P.set({ proxyQuality: q })} opts={[{ v: 'low' as const, label: $t('省空間') }, { v: 'medium' as const, label: $t('標準') }, { v: 'high' as const, label: $t('清晰') }]} /> }] : []),
+    ] },
+    { title: $t('AI 模型'), icon: <Cpu size={13} />, rows: [
+      { label: $t('AI 拍點偵測'), desc: $t('音樂的拍點與小節'), inline: true, ctl: <Switch v={P.aiBeats} on={(v) => P.set({ aiBeats: v })} /> },
+      { label: $t('模型管理'), desc: $t('下載與清除模型'), ctl: <ModelManager /> },
     ] },
     { title: $t('時間軸'), icon: <Film size={13} />, rows: [
       { label: $t('上層軌道顯示在'), desc: $t('疊在上面的軌道放在時間軸的哪一邊'), ctl: <Seg value={L.upperLayerAt} on={(v) => L.set({ upperLayerAt: v })} opts={[{ v: 'bottom' as const, label: $t('下方') }, { v: 'top' as const, label: $t('上方') }]} /> },
@@ -489,7 +533,7 @@ function SettingsDialog({ close }: { close: () => void }) {
             <section key={s.title}>
               <h4>{s.title}</h4>
               {s.rows.map((r) => (
-                <SetRow key={r.label} label={<Hl text={r.label} q={q} />} desc={<Hl text={r.desc} q={q} />} inline={r.inline} help={r.help}>{r.ctl}</SetRow>
+                <SetRow key={r.label} label={<Hl text={r.label} q={q} />} desc={<Hl text={r.desc} q={q} />} inline={r.inline} help={r.help} action={r.action}>{r.ctl}</SetRow>
               ))}
             </section>
           )) : <p className="help-empty muted">{$t('找不到符合的設定')}</p>}

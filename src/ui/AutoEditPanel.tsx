@@ -5,7 +5,8 @@ import { isTextField, modalOpen } from './focus';
 import { $t, displayName } from '../i18n';
 import { uid, useStore, type Media } from '../store';
 import { usePrefs } from '../prefs';
-import { mediaBeats } from '../engine/beats';
+import { mediaBeats, useBeatVersion } from '../engine/beats';
+import { requestBeats } from '../engine/beatAnalysis';
 import { categoryOf, CATEGORIES } from '../modules/categories';
 import { BUILTIN_COMBOS } from '../modules/combos';
 import { type Recipe, type RecipeId } from '../engine/autoEdit';
@@ -28,7 +29,7 @@ import { DragNumber } from './DragNumber';
 import { AeRangeDialog, SegList, aeDialogOpen, onAeDialogOpen, openSongRange, roleName, useAeFocus } from './AeSegments';
 import { pausePreviews } from './SourcePanel';
 import { SpeedCurveCard } from './SpeedCurveCard';
-import { focusLibrary, useDrag, usePreviewFx } from './uiStore';
+import { useDrag, usePreviewFx } from './uiStore';
 import { useDock } from './Dock';
 
 /** 面板上改設定：預覽先停（不然一邊播一邊改） */
@@ -462,6 +463,7 @@ function SectionBar({ info, onPick }: { info: MusicInfo; onPick?: (s: MusicInfo[
 // ───────────── 面板 ─────────────
 
 export function AutoEditPanel() {
+  const beatVersion = useBeatVersion();
   const st = useAutoEdit();
   const media = useStore((x) => x.media);
   const modules = useStore((x) => x.modules);
@@ -483,7 +485,7 @@ export function AutoEditPanel() {
     return () => { stop = true; clearTimeout(t); };
   }, [using, analyze, director]);
   const song = aeSong({ ...useStore.getState(), media }, st);
-  const songSrc = useMemo(() => (song ? songSource({ ...useStore.getState(), media }, song) : null), [song?.mediaId, song?.a, song?.b, media]); // eslint-disable-line react-hooks/exhaustive-deps
+  const songSrc = useMemo(() => (song ? songSource({ ...useStore.getState(), media }, song) : null), [song?.mediaId, song?.a, song?.b, media, beatVersion]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 轉場權重的分類預設收起
   const [open, setOpen] = useState<Set<string>>(() => new Set());
@@ -509,6 +511,7 @@ export function AutoEditPanel() {
   const levels = [0, 0, 0];
   for (const l of shapedInfo?.level ?? []) levels[l]++;
   const songM = song && media.find((m) => m.id === song.mediaId);
+  useEffect(() => { if (songM) void requestBeats(songM); }, [songM]);
   const bpm = songM ? mediaBeats(songM)?.bpm : undefined;
   const chorus = song ? songChorus(song, songSrc?.beats ?? [], shapedInfo) : null;
 
@@ -519,9 +522,7 @@ export function AutoEditPanel() {
   const trMods = modules.filter((m) => m.kind === 'transition');
   const previewTransition = (id: string) => {
     useStore.getState().setPlaying(false);
-    useDock.getState().activatePanel('transition');
     useDock.getState().activatePanel('preview');
-    focusLibrary([id]);
     usePreviewFx.setState({ fx: { moduleId: id, t0: performance.now() }, text: null, anim: null });
   };
   const fxMods = modules.filter((m) => m.kind === 'effect');

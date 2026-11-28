@@ -13,14 +13,11 @@ ort.env.logLevel = 'error';
 if (!self.crossOriginIsolated) ort.env.wasm.numThreads = 1;
 
 const sessions = new Map<string, Promise<ort.InferenceSession>>();
-function getSession(modelUrl: string) {
+function getSession(modelUrl: string, modelBytes?: ArrayBuffer) {
   let p = sessions.get(modelUrl);
   if (!p) {
-    p = (async () => {
-      const r = await fetch(modelUrl);
-      if (!r.ok) throw new Error(`model HTTP ${r.status}`);
-      return ort.InferenceSession.create(new Uint8Array(await r.arrayBuffer()), { executionProviders: ['wasm'], logSeverityLevel: 3 });
-    })();
+    if (!modelBytes) throw new Error('model bytes missing');
+    p = ort.InferenceSession.create(new Uint8Array(modelBytes), { executionProviders: ['wasm'], logSeverityLevel: 3 });
     sessions.set(modelUrl, p);
     p.catch(() => sessions.delete(modelUrl));
   }
@@ -30,15 +27,15 @@ function getSession(modelUrl: string) {
 /**
  * 偵測（YuNet）；或 embed = 臉的特徵（SFace：rgba 是對齊好的 112 × 112 臉，RGB、0..255、NCHW → 128 維）。
  */
-export type FaceReq = { id: number; rgba: Uint8ClampedArray; inW: number; inH: number; imgW: number; imgH: number; modelUrl: string; embed?: false }
-  | { id: number; rgba: Uint8ClampedArray; modelUrl: string; embed: true };
+export type FaceReq = { id: number; rgba: Uint8ClampedArray; inW: number; inH: number; imgW: number; imgH: number; modelUrl: string; modelBytes?: ArrayBuffer; embed?: false }
+  | { id: number; rgba: Uint8ClampedArray; modelUrl: string; modelBytes?: ArrayBuffer; embed: true };
 export type FaceRes = { id: number; faces: Face[] } | { id: number; emb: number[] } | { id: number; error: string };
 
 self.onmessage = async (e: MessageEvent<FaceReq>) => {
   const req = e.data;
   if (req.embed) {
     try {
-      const s = await getSession(req.modelUrl);
+      const s = await getSession(req.modelUrl, req.modelBytes);
       const n = 112 * 112, input = new Float32Array(3 * n);
       for (let i = 0; i < n; i++) {
         input[i] = req.rgba[i * 4];
@@ -56,7 +53,7 @@ self.onmessage = async (e: MessageEvent<FaceReq>) => {
   }
   const { id, rgba, inW, inH, imgW, imgH, modelUrl } = req;
   try {
-    const s = await getSession(modelUrl);
+    const s = await getSession(modelUrl, req.modelBytes);
     const n = inW * inH;
     const input = new Float32Array(3 * n);
     for (let i = 0; i < n; i++) {

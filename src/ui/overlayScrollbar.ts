@@ -125,12 +125,13 @@ const inside = (el: HTMLElement, p: { x: number; y: number } | null) => {
  * 捲軸要疊在哪一層：一般面板 = BASE（在面板內容上面、浮動視窗 / 對話框 / 選單下面）；
  * 捲動區塊在浮動的層（對話框、挑選視窗、編輯視窗…）裡 = 那一層再上面一點。
  */
-const BASE_Z = 45;
+let baseZ = 0;
 const layerZ = new WeakMap<HTMLElement, number>();
 function zFor(el: HTMLElement): number {
   let z = layerZ.get(el);
   if (z !== undefined) return z;
-  z = BASE_Z;
+  baseZ ||= parseInt(getComputedStyle(document.documentElement).getPropertyValue('--z-scrollbar')) || 45;
+  z = baseZ;
   for (let p: HTMLElement | null = el; p; p = p.parentElement) {
     const cs = getComputedStyle(p);
     const n = Number(cs.zIndex);

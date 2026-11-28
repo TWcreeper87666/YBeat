@@ -316,7 +316,7 @@ export function RangePicker({ m, init, others = [], editing, outsideClose = true
   const pw = (d: number) => `${(d / span) * 100}%`;
 
   return (
-    <div className="overlay" style={{ zIndex: 300 }} onPointerDown={(e) => outsideClose && e.target === e.currentTarget && close()}>
+    <div className="overlay dialog-overlay" onPointerDown={(e) => outsideClose && e.target === e.currentTarget && close()}>
       <div className={`dialog wide ae-range ${audio ? 'audio' : ''}`}>
         <h3 title={m.name}>{m.name}</h3>
         <div className={`ae-range-video ${cropOn ? 'cropping' : ''} ${audio ? 'audio' : ''}`}>
@@ -501,7 +501,7 @@ export function CropDialog({ m, time = 0, init, onCommit, onClose }: { m: Media;
   }, [onClose]);
   const ok = () => { onCommit(isFullCrop(crop) ? undefined : crop); onClose(); };
   return (
-    <div className="overlay" style={{ zIndex: 300 }} onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
+    <div className="overlay dialog-overlay" onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
       <div className="dialog wide ae-range">
         <h3 title={m.name}>{m.name}</h3>
         <div className="ae-range-video cropping">

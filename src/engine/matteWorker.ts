@@ -22,29 +22,28 @@ const STD = [0.229, 0.224, 0.225];
  */
 let session: Promise<ort.InferenceSession> | null = null;
 
-function getSession(modelUrl: string) {
+function getSession(modelBytes?: ArrayBuffer) {
   session ??= (async () => {
-    const r = await fetch(modelUrl);
-    if (!r.ok) throw new Error(`model HTTP ${r.status}`);
-    return ort.InferenceSession.create(new Uint8Array(await r.arrayBuffer()), { executionProviders: ['wasm'], logSeverityLevel: 3 });
+    if (!modelBytes) throw new Error('model bytes missing');
+    return ort.InferenceSession.create(new Uint8Array(modelBytes), { executionProviders: ['wasm'], logSeverityLevel: 3 });
   })();
   session.catch(() => (session = null));
   return session;
 }
 
-async function run(modelUrl: string, input: Float32Array) {
-  const s = await getSession(modelUrl);
+async function run(modelBytes: ArrayBuffer | undefined, input: Float32Array) {
+  const s = await getSession(modelBytes);
   const out = await s.run({ [s.inputNames[0]]: new ort.Tensor('float32', input, [1, 3, S, S]) });
   const d = (await out[s.outputNames[0]].getData()) as Float32Array;
   for (const t of Object.values(out)) t.dispose?.();
   return { d, ep: 'wasm' };
 }
 
-export interface MatteReq { id: number; rgba: Uint8ClampedArray; modelUrl: string }
+export interface MatteReq { id: number; rgba: Uint8ClampedArray; modelBytes?: ArrayBuffer }
 export type MatteRes = { id: number; mask: Uint8Array; ep: string } | { id: number; error: string };
 
 self.onmessage = async (e: MessageEvent<MatteReq>) => {
-  const { id, rgba, modelUrl } = e.data;
+  const { id, rgba, modelBytes } = e.data;
   try {
     const n = S * S;
     let mx = 0;
@@ -60,7 +59,7 @@ self.onmessage = async (e: MessageEvent<MatteReq>) => {
       const m = MEAN[c], sd = STD[c], base = c * n;
       for (let i = 0; i < n; i++) input[base + i] = (rgba[i * 4 + c] / mx - m) / sd;
     }
-    const { d, ep } = await run(modelUrl, input);
+    const { d, ep } = await run(modelBytes, input);
     let lo = Infinity, hi = -Infinity;
     for (let i = 0; i < n; i++) {
       if (d[i] < lo) lo = d[i];

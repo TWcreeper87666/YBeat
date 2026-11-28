@@ -3,6 +3,11 @@ import { Check, ChevronRight } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { closeMenu, openMenu, useConfirm, useDrag, useMenu, useToast, type MenuItem } from './uiStore';
 import { installFocusGuard, isTextField } from './focus';
+import { Check as ToggleCheck } from './Toggle';
+import { MODELS, useModels } from '../engine/models';
+import { useBeatAnalysis } from '../engine/beatAnalysis';
+import { useSpeechJob } from '../engine/speech';
+import { formatBytes } from '../engine/storageUsage';
 
 // ───────────── 右鍵 / 下拉選單 ─────────────
 
@@ -183,10 +188,12 @@ export function DragGhost() {
 export function ConfirmHost() {
   const req = useConfirm((s) => s.req);
   const [text, setText] = useState('');
+  const [checked, setChecked] = useState(false);
   /** 目前選中的按鈕：0 = 取消、1 = 確定（預設確定，跟以前按 Enter 的結果一樣） */
   const [sel, setSel] = useState(1);
   useEffect(() => {
     setText(req?.input ?? '');
+    setChecked(false);
     setSel(1);
     // 沒有輸入框：讓原本的焦點（例如屬性面板的欄位）離開，← / → / Enter 才會作用在對話框的按鈕上
     if (req && req.input === undefined) (document.activeElement as HTMLElement | null)?.blur?.();
@@ -213,13 +220,14 @@ export function ConfirmHost() {
   if (!req) return null;
   function done(v: boolean) {
     useConfirm.setState({ req: null });
-    req!.resolve(v, text);
+    req!.resolve(v, text, checked);
   }
   return (
-    <div className="overlay" style={{ zIndex: 300 }} onPointerDown={(e) => e.target === e.currentTarget && done(false)}>
+    <div className="overlay dialog-overlay" onPointerDown={(e) => e.target === e.currentTarget && done(false)}>
       <div className="dialog">
         <h3>{req.title}</h3>
         {req.message && <p className="muted">{req.message}</p>}
+        {req.check && <ToggleCheck v={checked} on={setChecked}>{req.check}</ToggleCheck>}
         {req.input !== undefined && (
           <input className="text-input" autoFocus value={text} onChange={(e) => setText(e.target.value)} onFocus={(e) => e.currentTarget.select()} />
         )}
@@ -234,10 +242,27 @@ export function ConfirmHost() {
 
 // ───────────── 提示 ─────────────
 
+/** 有進度條的背景工作：一行名稱 + 進度 + 取消，下面是進度條 */
+function ProgressToast({ label, detail, frac, cancel }: { label: string; detail?: string; frac: number; cancel?: () => void }) {
+  return (
+    <div className="toast busy has-bar">
+      <div className="toast-head">
+        <span>{label}</span>
+        {detail && <em>{detail}</em>}
+        {cancel && <button className="btn small" onClick={cancel}>{$t('取消')}</button>}
+      </div>
+      <i className="toast-bar"><b style={{ width: `${Math.round(Math.min(1, Math.max(0, frac)) * 100)}%` }} /></i>
+    </div>
+  );
+}
+
 export function Toasts() {
   const toasts = useToast((s) => s.toasts);
   const busy = useToast((s) => s.busy);
   const frac = useToast((s) => s.busyFrac);
+  const modelProgress = useModels((s) => s.progress);
+  const beatJobs = useBeatAnalysis((s) => s.jobs);
+  const speech = useSpeechJob();
   return (
     <div className="toasts">
       {busy && (
@@ -246,6 +271,13 @@ export function Toasts() {
           {frac !== null && <i className="toast-bar"><b style={{ width: `${Math.round(Math.min(1, Math.max(0, frac)) * 100)}%` }} /></i>}
         </div>
       )}
+      {Object.entries(modelProgress).map(([id, p]) => (
+        <ProgressToast key={id} label={`${$t('下載')} ${MODELS.find((m) => m.id === id)?.name ?? ''}`} detail={`${formatBytes(p.done)} / ${formatBytes(p.total)}`} frac={p.done / p.total} cancel={p.cancel} />
+      ))}
+      {Object.entries(beatJobs).map(([id, p]) => (
+        <ProgressToast key={id} label={$t('拍點偵測')} detail={p.total > 1 ? `${p.done} / ${p.total}` : undefined} frac={p.done / p.total} />
+      ))}
+      {speech.stage && <ProgressToast label={$t('自動字幕')} detail={speech.stage} frac={speech.done / Math.max(1, speech.total)} cancel={speech.cancel ?? undefined} />}
       {toasts.map((t) => (
         <div key={t.id} className={`toast ${t.kind}`}>{t.text}</div>
       ))}

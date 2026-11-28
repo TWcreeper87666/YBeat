@@ -1,7 +1,9 @@
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import './zIndex.css';
 import './styles.css';
 import { useStore } from './store';
+import { setTextFrameWidth } from './engine/text';
 import { restoreProject } from './engine/project';
 import { installAppBehavior } from './ui/Menu';
 import { installFileDrop } from './ui/dnd';
@@ -23,3 +25,6 @@ createRoot(document.getElementById('root')!).render(<App />);
 
 // 除錯用：在 DevTools 可以用 __store.getState() 查看狀態
 (window as unknown as { __store: typeof useStore }).__store = useStore;
+// 文字限制寬度用的是畫面寬度：輸出比例換了要重畫
+setTextFrameWidth(useStore.getState().format.w);
+useStore.subscribe((s, p) => { if (s.format !== p.format) setTextFrameWidth(s.format.w); });

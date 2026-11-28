@@ -6,6 +6,9 @@
  * 全部是純函式，結果依 peaks 陣列快取。
  */
 import type { AudioClip, Clip, Media } from '../store';
+import { beatResult, requestBeats, useBeatAnalysis } from './beatAnalysis';
+import { usePrefs } from '../prefs';
+import { useStore } from '../store';
 
 export interface Beat {
   /** 素材內秒數（timelineBeats 回傳的是時間軸秒數） */
@@ -159,14 +162,43 @@ export function estimateBeats(peaks: ArrayLike<number>, pps: number): BeatInfo |
 }
 
 const cache = new WeakMap<object, BeatInfo | null>();
+/** Beat This! 結果 → BeatInfo（結果物件不變就不重算） */
+const aiCache = new WeakMap<object, BeatInfo>();
 /** 素材的節拍（依 peaks 快取；沒有 peaks = null） */
 export function mediaBeats(m: Media | undefined): BeatInfo | null {
   if (!m?.peaks || m.missing) return null;
+  const ai = usePrefs.getState().aiBeats ? beatResult(m.id) : undefined;
+  if (ai && aiCache.has(ai)) return aiCache.get(ai)!;
+  if (ai?.beats.length && ai.beats.length > 1) {
+    const gaps = ai.beats.slice(1).map((t, i) => t - ai.beats[i]).filter((x) => x > 0).sort((a, b) => a - b);
+    const period = gaps[Math.floor(gaps.length / 2)];
+    const env = onsetEnvelope(m.peaks, m.peaksPerSec || 100);
+    let ref = 1e-6;
+    for (const v of env) ref = Math.max(ref, v);
+    const downs = new Set(ai.downbeats);
+    const info: BeatInfo = { bpm: 60 / period, period, beats: ai.beats.map((t) => ({ t, s: Math.min(1, env[Math.min(env.length - 1, Math.round(t * (m.peaksPerSec || 100)))] / ref), down: downs.has(t) })) };
+    aiCache.set(ai, info);
+    return info;
+  }
   if (cache.has(m.peaks)) return cache.get(m.peaks)!;
   const info = estimateBeats(m.peaks, m.peaksPerSec || 100);
   cache.set(m.peaks, info);
   return info;
 }
+
+// 音訊成為時間軸拍點來源時排入背景分析；同一素材只執行一份工作。
+const queueMusic = (s: ReturnType<typeof useStore.getState>) => {
+  for (const a of s.audios) {
+    const m = s.media.find((x) => x.id === a.mediaId);
+    if (m?.kind === 'audio' && m.peaks) void requestBeats(m);
+  }
+};
+useStore.subscribe((s, prev) => {
+  if (s.audios === prev.audios && s.media === prev.media) return;
+  queueMusic(s);
+});
+usePrefs.subscribe((s, prev) => { if (s.aiBeats && !prev.aiBeats) queueMusic(useStore.getState()); });
+export const useBeatVersion = () => useBeatAnalysis((s) => s.ver);
 
 /** 這個音訊片段有沒有提供節拍（連結在影片上的原音不算；屬性可以關掉） */
 export const beatSource = (a: AudioClip, attached: Set<string>) => a.beats !== false && !attached.has(a.id);

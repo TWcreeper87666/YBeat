@@ -12,3 +12,7 @@
 
 * \[ ] audio manipulation
 
+* \[ ] AI 模型：TransNetV2 切鏡點（autoEdit 不挑跨場景片段，~31 MB，只有第三方 ONNX 要比對數值）
+* \[ ] AI 模型：人聲降噪 RNNoise → DeepFilterNet3
+* \[ ] AI 模型：Whisper base（~77 MB）當「較準」選項
+* \[ ] AI 模型之後可以考慮：MediaPipe Pose Lite 卡動作高峰、MODNet 人像去背、RIFE 慢動作補格、CLIP 文字搜素材、UVR-MDX 人聲分離（權重授權待確認）

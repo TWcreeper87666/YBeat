@@ -46,6 +46,10 @@ interface Prefs {
   proxy: boolean;
   /** 代理檔畫質（proxy.ts 的 PROXY_BITRATE） */
   proxyQuality: ProxyQuality;
+  /** AI 拍點偵測 */
+  aiBeats: boolean;
+  /** 自動字幕辨識語言 */
+  subtitleLanguage: 'auto' | 'zh' | 'en' | 'ja';
   textStyles: UserTextStyle[];
   fxCombos: FxCombo[];
   /** 我的動畫：存的是整個動畫（圖層、關鍵影格、每個圖片位置用的素材；位置 / 軌道不算） */
@@ -61,9 +65,9 @@ interface Prefs {
 export interface AnimPreset { id: string; name: string; item: AnimItem }
 
 export const usePrefs = create<Prefs>()(
-  persist((set) => ({ stillDur: 2, transDur: 0.4, autosave: true, proxy: true, proxyQuality: 'medium', textStyles: [], fxCombos: [], animPresets: [], theme: 'dark', overlay: OVERLAY_DEFAULT, set: (p) => set(p) }), {
+  persist((set) => ({ stillDur: 2, transDur: 0.4, autosave: true, proxy: true, proxyQuality: 'medium', aiBeats: true, subtitleLanguage: 'auto', textStyles: [], fxCombos: [], animPresets: [], theme: 'dark', overlay: OVERLAY_DEFAULT, set: (p) => set(p) }), {
     name: 'ybeat-prefs',
-    partialize: (s) => ({ stillDur: s.stillDur, transDur: s.transDur, autosave: s.autosave, proxy: s.proxy, proxyQuality: s.proxyQuality, textStyles: s.textStyles, fxCombos: s.fxCombos, animPresets: s.animPresets, theme: s.theme, overlay: s.overlay }),
+    partialize: (s) => ({ stillDur: s.stillDur, transDur: s.transDur, autosave: s.autosave, proxy: s.proxy, proxyQuality: s.proxyQuality, aiBeats: s.aiBeats, subtitleLanguage: s.subtitleLanguage, textStyles: s.textStyles, fxCombos: s.fxCombos, animPresets: s.animPresets, theme: s.theme, overlay: s.overlay }),
   }),
 );
 

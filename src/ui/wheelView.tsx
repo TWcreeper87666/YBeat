@@ -20,11 +20,11 @@ export function wheelViewAction(e: Pick<WheelEvent, 'ctrlKey' | 'metaKey' | 'shi
 }
 
 /**
- * 顯示範圍 [a, b]（總長 dur）的捲軸：浮在父元素最下面（父元素要 position: relative），外觀跟全域的覆蓋式捲軸一樣。
+ * 顯示範圍 [a, b]（總長 dur）的捲軸：浮在父元素最下面（vertical = 最右邊；父元素要 position: relative），外觀跟全域的覆蓋式捲軸一樣。
  * 只有放大時出現；拖把手 = 平移，點空白處 = 跳過去
  */
-export function ViewScrollbar({ a, b, dur, onChange, className = '' }: {
-  a: number; b: number; dur: number; onChange: (view: [number, number]) => void; className?: string;
+export function ViewScrollbar({ a, b, dur, onChange, className = '', vertical = false }: {
+  a: number; b: number; dur: number; onChange: (view: [number, number]) => void; className?: string; vertical?: boolean;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const span = b - a;
@@ -36,15 +36,16 @@ export function ViewScrollbar({ a, b, dur, onChange, className = '' }: {
     e.preventDefault();
     e.stopPropagation();
     const r = ref.current!.getBoundingClientRect();
-    const k = dur / r.width;
+    const at = (ev: { clientX: number; clientY: number }) => (vertical ? ev.clientY - r.top : ev.clientX - r.left);
+    const k = dur / (vertical ? r.height : r.width);
     let a0 = a;
     // 點空白處：那裡放到中間
-    if (!onThumb) { a0 = clamp((e.clientX - r.left) * k - span / 2); onChange([a0, a0 + span]); }
-    const x0 = e.clientX;
+    if (!onThumb) { a0 = clamp(at(e) * k - span / 2); onChange([a0, a0 + span]); }
+    const x0 = at(e);
     const el = e.currentTarget as HTMLElement;
     el.setPointerCapture(e.pointerId);
     ref.current!.classList.add('drag');
-    const move = (ev: PointerEvent) => { const na = clamp(a0 + (ev.clientX - x0) * k); onChange([na, na + span]); };
+    const move = (ev: PointerEvent) => { const na = clamp(a0 + (at(ev) - x0) * k); onChange([na, na + span]); };
     const up = () => {
       ref.current?.classList.remove('drag');
       el.removeEventListener('pointermove', move);
@@ -56,8 +57,10 @@ export function ViewScrollbar({ a, b, dur, onChange, className = '' }: {
     el.addEventListener('pointercancel', up);
   };
   return (
-    <div ref={ref} className={`osb-track ${className}`.trim()} onPointerDown={(e) => down(e, false)}>
-      <div className="osb-thumb" style={{ left: `${(a / dur) * 100}%`, width: `max(24px, ${(span / dur) * 100}%)` }} onPointerDown={(e) => down(e, true)} />
+    <div ref={ref} className={`osb-track ${vertical ? 'v' : ''} ${className}`.trim()} onPointerDown={(e) => down(e, false)}>
+      <div className="osb-thumb" style={vertical
+        ? { top: `${(a / dur) * 100}%`, height: `max(24px, ${(span / dur) * 100}%)` }
+        : { left: `${(a / dur) * 100}%`, width: `max(24px, ${(span / dur) * 100}%)` }} onPointerDown={(e) => down(e, true)} />
     </div>
   );
 }

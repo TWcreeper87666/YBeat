@@ -15,6 +15,7 @@ const PARTS: [string, string | null, () => string][] = [
   ['ybeat-matte', null, () => $t('去背')],
   ['ybeat-face', null, () => $t('臉部追蹤')],
   ['ybeat-track', null, () => $t('物件追蹤')],
+  ['ybeat-beats', null, () => $t('拍點偵測')],
   ['ybeat-analysis', null, () => $t('自動剪輯分析')],
 ];
 
@@ -69,6 +70,12 @@ export async function measureUsage(): Promise<Usage> {
     }
     parts.push({ label: label(), bytes });
   }
+  let models = 0;
+  if (typeof caches !== 'undefined') {
+    const cache = await caches.open('ybeat-models');
+    for (const key of await cache.keys()) models += (await (await cache.match(key))?.blob())?.size ?? 0;
+  }
+  parts.push({ label: $t('AI 模型'), bytes: models });
   let ls = 0;
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i)!;
@@ -96,6 +103,7 @@ const CACHES: [string, string, (key: string) => string[]][] = [
   ['ybeat-matte', 'frames', (k) => [k]],
   ['ybeat-face', 'tracks', (k) => [k]],
   ['ybeat-track', 'tracks', (k) => [k.split('|')[0]]],
+  ['ybeat-beats', 'beats', (k) => [k]],
   ['ybeat-analysis', 'media', (k) => [k.split('|')[0]]],
   ['ybeat-analysis', 'meta', (k) => [k.split('|')[0]]],
   ['ybeat-analysis', 'music', (k) => [k.split(':')[0]]],

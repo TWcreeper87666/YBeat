@@ -56,15 +56,22 @@ export function writeLrc(clips: Clip[]): string {
   }).join('\n') + '\n';
 }
 
-export function addSrtCues(cues: Cue[], source: 'SRT' | 'LRC' = 'SRT'): number {
+export function addSrtCues(cues: Cue[], source: 'SRT' | 'LRC' | 'AI' = 'SRT'): number {
   if (!cues.length) return 0;
   const s = useStore.getState();
-  const track = s.tracks.video.length;
-  s.addTrack('video');
+  // 先用空的影片軌（最上層的優先；鎖住、不接收字幕的不用），沒有才新增
+  const used = new Set(s.clips.map((c) => c.track));
+  let track = -1;
+  for (let i = s.tracks.video.length - 1; i >= 0; i--) {
+    const t = s.tracks.video[i];
+    if (!used.has(i) && !t.locked && !t.noCaptions) { track = i; break; }
+  }
+  if (track < 0) { track = s.tracks.video.length; s.addTrack('video'); }
   const preset = TEXT_PRESETS.find((p) => p.id === 'subtitle')!;
   const clips = cues.map((cue) => makeClip({
     id: uid(), mediaId: '', track, start: cue.start, duration: cue.end - cue.start,
-    fit: 'contain', name: source, text: { ...DEFAULT_TEXT, ...preset.style, text: cue.text },
+    // 自動字幕不設名稱：時間軸直接顯示內文，改字也會跟著變
+    fit: 'contain', name: source === 'AI' ? undefined : source, text: { ...DEFAULT_TEXT, ...preset.style, text: cue.text },
     transform: { ...makeClip({ mediaId: '' }).transform, y: preset.y },
   }));
   useStore.setState({ clips: [...useStore.getState().clips, ...clips] });

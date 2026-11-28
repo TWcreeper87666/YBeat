@@ -1,5 +1,5 @@
 import { $t, displayName } from '../i18n';
-import { Layers, AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2, Zap, Crosshair, Scissors } from 'lucide-react';
+import { Layers, AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, AudioLines, Unlink2, Zap, Crosshair, Scissors } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ClipCutoutEditor } from './CutoutEditor';
@@ -12,13 +12,13 @@ import { CATEGORIES, categoryOf } from '../modules/categories';
 import { importFiles, pickFiles, relinkWithPicker, removeMedia, removeMediaEverywhere } from '../engine/media';
 import { applyMediaBatch, planMediaBatch } from '../engine/mediaBatch';
 import { nextStart } from '../engine/overlap';
-import { FONTS, TEXT_PRESETS, DEFAULT_TEXT, MAX_STROKES, defaultShadow, newStroke, renderText, shadowOf, type Shadow, type Stroke, type TextStyle } from '../engine/text';
+import { FONTS, TEXT_PRESETS, DEFAULT_TEXT, MAX_STROKES, WRAP_DEFAULT, defaultShadow, newStroke, renderText, shadowOf, type Shadow, type Stroke, type TextStyle } from '../engine/text';
 import { PaintEdit } from './PaintEdit';
 import { clipGroupMenu, clipPropMenu, clipTitleMenu, fxParamMenu, fxTitleMenu, trPropMenu, type FxOwner } from './applyAll';
 import { copyTransition, hasTransitionClipboard, pasteTransition } from './trSelect';
 import { DEFAULT_MASK, type Mask } from '../engine/mask';
 import { CLIP_MASK_ID } from '../modules/extra';
-import { mediaBeats } from '../engine/beats';
+import { mediaBeats, useBeatVersion } from '../engine/beats';
 import { shapeName } from '../engine/maskShapes';
 import { evalKeys, scaleKeyMap, sortKeys, type AnimProp, type Bez, type Keyframe } from '../engine/keyframes';
 import { isNumeric, canFollow, isHitFx, paramAt, parseDuration, parseParams, parsePointCh, resolveParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
@@ -67,6 +67,8 @@ import { startBoxPick, stopBoxPick, useBoxPick, useSubjectStatus } from './subje
 import { EffectControls, curveChannel, focusSection, cfxCh, clipChannels, clipHost, fxChannels, fxHost, maskChannels, registerHostKind, updateStackFx, type Channel, type Host, type Section } from './EffectControls';
 import { Check, Seg, SegToggles, Switch } from './Toggle';
 import { hasFrom } from '../engine/audioReact';
+import { getAudioBuffer, twoChannelOut } from '../engine/audio';
+import { closeEditorWindow, openEditorWindow } from './EditorWindow';
 
 // ───────────────────────── 素材 ─────────────────────────
 
@@ -1000,6 +1002,15 @@ function textSection(clip: Clip & { text: TextStyle }): Section {
         ),
       },
       { label: $t('行高'), node: <DragNumber variant="text" value={t.lineHeight} min={0.6} max={3} step={0.05} def={DEFAULT_TEXT.lineHeight} onChange={(v) => set({ lineHeight: v })} /> },
+      {
+        label: $t('限制寬度'),
+        node: (
+          <span className="row-inline">
+            <Switch v={!!t.wrap} on={(v) => set({ wrap: v ? WRAP_DEFAULT : undefined })} />
+            {!!t.wrap && <DragNumber variant="text" value={Math.round(t.wrap * 100)} min={10} max={100} step={1} decimals={0} def={WRAP_DEFAULT * 100} suffix="%" onChange={(v) => set({ wrap: Math.round(v) / 100 })} />}
+          </span>
+        ),
+      },
       // 多層外框：第一層最靠近字，後面每一層接在前一層外面
       {
         label: $t('外框'),
@@ -1248,9 +1259,14 @@ function ClipInspector({ id }: { id: string }) {
         {
           label: '',
           node: (
-            <button className="btn small-h" onClick={() => useStore.getState().unlinkSelected()} title={$t('把聲音分開成獨立的音訊片段')}>
-              <Unlink size={12} /> {$t('取消影音連結')}
-            </button>
+            <>
+              <button className="btn small-h" onClick={() => openAudioEditor(la.id)}>
+                <AudioLines size={12} /> {$t('編輯音訊')}
+              </button>
+              <button className="btn small-h" onClick={() => useStore.getState().unlinkSelected()} title={$t('把聲音分開成獨立的音訊片段')}>
+                <Unlink size={12} /> {$t('取消影音連結')}
+              </button>
+            </>
           ),
         },
       ],
@@ -2006,8 +2022,20 @@ function TransitionInspector({ selId }: { selId: string }) {
   );
 }
 
-type AudioChannel = 'volume' | 'pan' | 'pitch';
-const AUDIO_CHANNELS: AudioChannel[] = ['volume', 'pan', 'pitch'];
+type AudioChannel = 'volume' | 'pan' | 'volL' | 'volR';
+const AUDIO_CHANNELS: AudioChannel[] = ['volume', 'pan', 'volL', 'volR'];
+
+/** 素材的聲道數（解碼好才知道；還沒好先當立體聲） */
+function useSourceChannels(url: string | undefined) {
+  const [n, setN] = useState(2);
+  useEffect(() => {
+    if (!url) return;
+    let alive = true;
+    void getAudioBuffer(url).then((b) => { if (alive && b) setN(b.numberOfChannels); });
+    return () => { alive = false; };
+  }, [url]);
+  return n;
+}
 
 function audioHost(id: string): Host | null {
   const a = useStore.getState().audios.find((x) => x.id === id);
@@ -2018,7 +2046,7 @@ function audioHost(id: string): Host | null {
       const cur = useStore.getState().audios.find((x) => x.id === id);
       if (!cur || !AUDIO_CHANNELS.includes(ch as AudioChannel)) return;
       const keys = { ...cur.keys };
-      if (list?.length) keys[ch as AudioChannel] = sortKeys(ch === 'pitch' ? list.map((k) => ({ ...k, v: k.v - (cur.pitch ?? 0) })) : list);
+      if (list?.length) keys[ch as AudioChannel] = sortKeys(list);
       else delete keys[ch as AudioChannel];
       useStore.getState().updateAudio(id, { keys, ...(!list?.length && base !== undefined ? { [ch]: base } : {}) });
     },
@@ -2033,35 +2061,49 @@ registerHostKind('audio', {
   keys: (id, ch) => {
     const a = useStore.getState().audios.find((x) => x.id === id);
     const list = a?.keys?.[ch as AudioChannel] ?? [];
-    return ch === 'pitch' ? list.map((k) => ({ ...k, v: k.v + (a?.pitch ?? 0) })) : list;
+    return list;
   },
   all: (id) => AUDIO_CHANNELS.flatMap((ch) => (useStore.getState().audios.find((x) => x.id === id)?.keys?.[ch] ?? []).map((k) => ({ ch, id: k.id }))),
 });
 
+/** 影片的屬性 → 「編輯音訊」：選取連結的音訊片段，打開音訊編輯視窗（已經開著影片的編輯視窗就先完成、再換過去） */
+function openAudioEditor(audioId: string) {
+  closeEditorWindow();
+  useStore.getState().select({ type: 'audio', id: audioId });
+  openEditorWindow();
+}
+
 function AudioInspector({ id }: { id: string }) {
+  useBeatVersion();
   const a = useStore((s) => s.audios.find((c) => c.id === id));
   const media = useStore((s) => s.media.find((m) => m.id === a?.mediaId));
   const attached = useStore((s) => !!a && attachedAudioIds(s).has(a.id));
   const time = useStore((s) => s.time);
+  const srcChannels = useSourceChannels(media && !media.missing ? media.url : undefined);
   if (!a) return null;
   const { updateAudio } = useStore.getState();
   const bpm = mediaBeats(media)?.bpm;
   const host = audioHost(id)!;
   const local = Math.max(0, Math.min(a.duration, time - a.start));
+  const at = (ch: AudioChannel, base: number) => (a.keys?.[ch]?.length ? evalKeys(a.keys[ch]!, local) : base);
+  // 輸出兩個聲道 → 左 / 右聲道各自的音量；只有一個聲道 → 平衡
   const channels: Channel[] = [
-    { id: 'volume', label: $t('音量'), value: a.keys?.volume?.length ? evalKeys(a.keys.volume, local) : a.volume, keys: a.keys?.volume ?? [], def: 1, min: 0, max: 1, step: 0.01, display: 100, suffix: '%' },
-    { id: 'pan', label: $t('平衡'), value: a.keys?.pan?.length ? evalKeys(a.keys.pan, local) : a.pan ?? 0, keys: a.keys?.pan ?? [], def: 0, min: -1, max: 1, step: 0.01, display: 100 },
-    { id: 'pitch', label: $t('音調'), value: (a.pitch ?? 0) + (a.keys?.pitch?.length ? evalKeys(a.keys.pitch, local) : 0), keys: a.keys?.pitch?.map((k) => ({ ...k, v: k.v + (a.pitch ?? 0) })) ?? [], def: 0, min: -24, max: 24, step: 0.1, suffix: $t('半音') },
+    { id: 'volume', label: $t('音量'), value: at('volume', a.volume), keys: a.keys?.volume ?? [], def: 1, min: 0, max: 1, step: 0.01, display: 100, suffix: '%' },
+    ...(twoChannelOut(a.channels, srcChannels)
+      ? ([['volL', $t('左聲道'), a.volL], ['volR', $t('右聲道'), a.volR]] as const).map(([ch, label, v]): Channel => (
+        { id: ch, label, value: at(ch, v ?? 1), keys: a.keys?.[ch] ?? [], def: 1, min: 0, max: 2, step: 0.01, display: 100, suffix: '%' }))
+      : [{ id: 'pan', label: $t('平衡'), value: at('pan', a.pan ?? 0), keys: a.keys?.pan ?? [], def: 0, min: -1, max: 1, step: 0.01, display: 100 }]),
   ];
   return (
     <EffectControls host={host}
       title={<Title kind="k-audio" label={$t('音訊')} name={a.name ?? media?.name ?? $t('（素材遺失）')} onRename={(n) => useStore.getState().renameItem('audio', a.id, n)} />}
       sections={[{ id: 'info', title: $t('資訊'), rows: infoRows(a, media ?? undefined) }, { id: 'sound', title: $t('聲音'), channels, rows: [
+        { label: $t('音調'), node: <DragNumber variant="text" value={a.pitch ?? 0} min={-24} max={24} step={0.1} suffix={$t('半音')} def={0} onChange={(v) => updateAudio(id, { pitch: v })} /> },
         { label: $t('淡入'), node: <DragNumber variant="text" value={a.fadeIn} min={0} max={Math.min(10, a.duration)} step={0.01} suffix="s" def={0} onChange={(v) => updateAudio(id, { fadeIn: v })} /> },
         { label: $t('淡出'), node: <DragNumber variant="text" value={a.fadeOut} min={0} max={Math.min(10, a.duration)} step={0.01} suffix="s" def={0} onChange={(v) => updateAudio(id, { fadeOut: v })} /> },
         { label: $t('速率'), node: <DragNumber variant="text" value={a.rate ?? 1} min={0.1} max={4} step={0.01} suffix="×" def={1} onChange={(v) => { const duration = Math.min(a.duration * ((a.rate ?? 1) / v), maxDurFor('audio', a)); updateAudio(id, { rate: v, duration, keys: scaleKeyMap(a.keys, duration / a.duration) }); }} /> },
         { label: $t('保持音調'), node: <PitchSwitch v={a.keepPitch !== false} on={(v) => updateAudio(id, { keepPitch: v })} /> },
-        { label: $t('聲道'), node: <Seg value={a.channels ?? 'stereo'} on={(v) => updateAudio(id, { channels: v === 'stereo' ? undefined : v })} opts={[
+        { label: $t('聲道'), node: <Seg className="small-seg" value={a.channels ?? 'stereo'} on={(v) => updateAudio(id, { channels: v === 'stereo' ? undefined : v })} opts={[
           { v: 'stereo', label: $t('立體聲') }, { v: 'left', label: $t('左') }, { v: 'right', label: $t('右') }, { v: 'swap', label: $t('對調') }, { v: 'mono', label: $t('單聲道') },
         ] as const} /> },
         // 節拍格線的來源（連結在影片上的原音不提供）
@@ -2091,6 +2133,7 @@ function useMediaProbe(m: Media | undefined) {
 
 /** 素材庫點開的素材：檔案資訊 + 素材預覽的入點 / 出點 */
 function MediaInspector({ id }: { id: string }) {
+  useBeatVersion();
   const m = useStore((s) => s.media.find((x) => x.id === id));
   const uses = useStore((s) => s.clips.filter((c) => c.mediaId === id).length + s.audios.filter((a) => a.mediaId === id).length);
   const p = useMediaProbe(m);

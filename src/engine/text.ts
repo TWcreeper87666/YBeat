@@ -1,4 +1,5 @@
 import { $t } from '../i18n';
+import { wrapText } from './textWrap';
 /** 文字 / 字幕片段：用 canvas 畫成圖，再當成一般片段（可變換、打關鍵影格、套轉場） */
 
 /** 填色：純色或雙色漸層（範圍是整塊文字，不是每個字各一段）。字本身與每一層外框共用 */
@@ -42,6 +43,8 @@ export interface TextStyle {
   bgOpacity: number;
   /** 陰影；null = 沒有陰影 */
   shadow: Shadow | null;
+  /** 限制寬度：最寬佔畫面寬度的比例（0..1），超過自動換行；沒有 = 不限 */
+  wrap?: number;
 }
 
 export interface Shadow {
@@ -95,9 +98,12 @@ export interface TextPreset {
   duration: number;
 }
 
+/** 打開限制寬度時的預設：畫面寬度的 85% */
+export const WRAP_DEFAULT = 0.85;
+
 export const TEXT_PRESETS: TextPreset[] = [
   { id: 'title', name: $t('大標題'), style: { text: $t('大標題'), size: 150, bold: true, shadow: defaultShadow(150) }, y: -0.1, duration: 3 },
-  { id: 'subtitle', name: $t('字幕'), style: { text: $t('這裡是字幕'), size: 64, bold: true, strokes: [{ ...newStroke('#000000', 8), join: 'miter' }], shadow: null }, y: 0.3, duration: 3 },
+  { id: 'subtitle', name: $t('字幕'), style: { text: $t('這裡是字幕'), size: 64, bold: true, strokes: [{ ...newStroke('#000000', 8), join: 'miter' }], shadow: null, wrap: WRAP_DEFAULT }, y: 0.3, duration: 3 },
   { id: 'boxed', name: $t('底框字幕'), style: { text: $t('底框字幕'), size: 60, bold: false, bg: '#000000', bgOpacity: 0.6, shadow: null }, y: 0.3, duration: 3 },
   { id: 'outline', name: $t('描邊大字'), style: { text: 'BEAT', size: 220, font: FONTS[2].id, fill: solid('#ffffff'), strokes: [{ ...newStroke('#ff3d6e', 14), join: 'miter' }, { ...newStroke('#000000', 10), join: 'miter' }], shadow: null }, y: 0, duration: 2 },
   { id: 'neon', name: $t('霓虹'), style: { text: 'NEON', size: 160, fill: { type: 'linear', color: '#29d3c2', color2: '#b06bff', angle: 0 }, strokes: [newStroke('#ffffff', 4)], shadow: { color: '#b06bff', opacity: 0.9, angle: 90, distance: 0, blur: 40 } }, y: 0, duration: 2 },
@@ -147,17 +153,31 @@ function paintStyle(g: CanvasRenderingContext2D, p: Paint, r: { x: number; y: nu
 /** 文字片段的 canvas（以 style 為 key 快取） */
 const cache = new Map<string, HTMLCanvasElement>();
 
+/** 輸出畫面的寬度（px；文字 canvas 的 1 px = 輸出的 1 px），main.tsx 跟著輸出比例更新 */
+let frameW = 1080;
+export function setTextFrameWidth(w: number) {
+  if (w > 0 && w !== frameW) { frameW = w; cache.clear(); }
+}
+
 export function textKey(s: TextStyle) {
-  return JSON.stringify(s);
+  return s.wrap ? `${JSON.stringify(s)}|${frameW}` : JSON.stringify(s);
+}
+
+/** 要畫的每一行（限制寬度時自動換行） */
+function textLines(s: TextStyle, probe: CanvasRenderingContext2D): string[] {
+  const text = s.text || ' ';
+  if (!s.wrap) return text.split('\n');
+  const maxW = Math.max(s.size, s.wrap * frameW - textPad(s) * 2);
+  return wrapText(text, maxW, (l) => probe.measureText(l).width);
 }
 
 export function renderText(s: TextStyle): HTMLCanvasElement {
   const key = textKey(s);
   const hit = cache.get(key);
   if (hit) return hit;
-  const lines = (s.text || ' ').split('\n');
   const probe = document.createElement('canvas').getContext('2d')!;
   probe.font = fontOf(s);
+  const lines = textLines(s, probe);
   const widths = lines.map((l) => probe.measureText(l || ' ').width);
   const lh = s.size * s.lineHeight;
   const extra = textPad(s);

@@ -115,7 +115,7 @@ export const closeMenu = () => useMenu.setState({ menu: null });
 
 // ───────────── 確認對話框 ─────────────
 
-export interface ConfirmReq { title: string; message: string; ok: string; danger?: boolean; input?: string; resolve: (v: boolean, text?: string) => void }
+export interface ConfirmReq { title: string; message: string; ok: string; danger?: boolean; input?: string; check?: string; resolve: (v: boolean, text?: string, checked?: boolean) => void }
 export const useConfirm = create<{ req: ConfirmReq | null }>(() => ({ req: null }));
 
 /** 跳出輸入框，按確定回傳文字，取消回傳 null */
@@ -130,6 +130,12 @@ export function confirmDialog(o: { title: string; message: string; ok?: string; 
   return new Promise((resolve) => {
     useConfirm.getState().req?.resolve(false);
     useConfirm.setState({ req: { ok: $t('確定'), ...o, resolve } });
+  });
+}
+export function confirmCheckDialog(o: { title: string; message: string; check: string; ok?: string; danger?: boolean }): Promise<{ confirmed: boolean; checked: boolean }> {
+  return new Promise((resolve) => {
+    useConfirm.getState().req?.resolve(false);
+    useConfirm.setState({ req: { ok: $t('確定'), ...o, resolve: (confirmed, _text, checked) => resolve({ confirmed, checked: !!checked }) } });
   });
 }
 
