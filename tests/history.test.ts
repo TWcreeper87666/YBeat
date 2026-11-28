@@ -4,7 +4,7 @@
 console.warn = () => {};
 import { strict as assert } from 'node:assert';
 import { useStore } from '../src/store';
-import { beginHistoryTransaction, endHistoryTransaction, historyPath, mergeIntoStep, redo, resetHistory, settleHistory, stepsFrom, undo, useHistory } from '../src/engine/history';
+import { beginHistoryScope, beginHistoryTransaction, endHistoryScope, endHistoryTransaction, historyPath, mergeIntoStep, redo, resetHistory, settleHistory, stepsFrom, undo, useHistory } from '../src/engine/history';
 
 const S = () => useStore.getState();
 /** 做一步（立刻結算，不等 400ms 合併） */
@@ -93,5 +93,39 @@ redo();
 assert.equal(audioTracks(), n2 + 2, '重做也是一起');
 step(() => S().addTrack('audio'));
 assert.equal(mergeIntoStep(12345), false, '前一步不是指定的就不併');
+
+// ── 獨立的復原紀錄（編輯視窗）：裡面復原退不到開始之前；完成 = 一步、取消 = 不留紀錄 ──
+resetHistory();
+const n3 = audioTracks();
+step(() => S().addTrack('audio')); // 主紀錄的一步
+beginHistoryScope();
+assert.equal(useHistory.getState().canUndo, false, '剛開始：沒有可以復原的');
+step(() => S().addTrack('audio'));
+step(() => S().addTrack('audio'));
+undo();
+assert.equal(audioTracks(), n3 + 2, '裡面一次退一步');
+undo();
+undo();
+assert.equal(audioTracks(), n3 + 1, '退不到開始之前');
+redo();
+redo();
+endHistoryScope(true);
+assert.equal(audioTracks(), n3 + 3);
+undo();
+assert.equal(audioTracks(), n3 + 1, '完成後：整段一次復原');
+undo();
+assert.equal(audioTracks(), n3, '再之前是主紀錄原本的一步');
+redo();
+redo();
+assert.equal(audioTracks(), n3 + 3, '重做整段');
+const p3 = historyPath();
+beginHistoryScope();
+step(() => S().addTrack('audio'));
+endHistoryScope(false);
+assert.equal(audioTracks(), n3 + 3, '取消：還原成開始時');
+assert.deepEqual(historyPath(), p3, '取消：主紀錄不多一步');
+assert.equal(useHistory.getState().canRedo, false);
+undo();
+assert.equal(audioTracks(), n3 + 1, '取消後復原 = 編輯視窗之前的那一步');
 
 console.log('PASS 復原紀錄');

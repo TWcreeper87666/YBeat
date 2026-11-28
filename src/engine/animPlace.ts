@@ -1,5 +1,7 @@
 /** 動畫放到時間軸：吸附到拍、從底下的片段填圖片位置、找空的影片軌 */
-import { mediaUsable, uid, useStore, type Clip } from '../store';
+import { comboClipFx, mediaUsable, uid, useStore, type Clip, type ClipFx, type Media } from '../store';
+import { matteAt, MATTE_SIZE } from './matte';
+import { popFraming, scoreMatte } from './subjectPop';
 import { usePrefs } from '../prefs';
 import { animTemplate, type AnimItem, type AnimSlot } from './animation';
 import { POP_VARIANTS, type PopVariant } from './subjectPop';
@@ -49,11 +51,24 @@ export function placeAnim(source: string, track: number, time: number): string |
   return id;
 }
 
+/** 縮放主體時的中心（畫面比例，0 = 正中）：主體的中心，碰到下緣就用下緣；那一格的去背遮罩算好了才知道，沒有 = undefined */
+export function subjectCenter(media: Media, sourceTime: number, f: { w: number; h: number } = useStore.getState().format): { cx: number; cy: number } | undefined {
+  const m = matteAt(media, media.kind === 'image' ? 0 : sourceTime);
+  if (!m) return undefined;
+  const sc = scoreMatte(m.data, MATTE_SIZE);
+  if (!sc.area) return undefined;
+  const { cx, cy } = popFraming(sc, media.width, media.height, f.w, f.h);
+  // 主體碰到畫面下緣（半身、腳在畫面外）：以下緣為中心縮放，放大縮小時不會浮起來
+  const k = Math.max(f.w / media.width, f.h / media.height), sy = (media.height * k) / f.h;
+  const bottom = (sc.bbox[3] - 0.5) * sy;
+  return { cx, cy: bottom >= 0.48 ? 0.5 : cy };
+}
+
 /**
  * 建立動畫（不放進專案）：placeAnim 和素材庫的「用時間軸畫面試看」共用。
  * snap = 開頭吸附到最近的一拍（試看不吸附，從播放頭開始）
  */
-export function buildAnim(source: string, track: number, time: number, snap = true): { item: AnimItem; under?: Clip } | null {
+export function buildAnim(source: string, track: number, time: number, snap = true, opts?: { center?: { cx: number; cy: number } }): { item: AnimItem; under?: Clip } | null {
   const s = useStore.getState();
   const grid = triggerBeats(1);
   const snapT = snap && grid.length ? grid.reduce((a, b) => (Math.abs(b - time) < Math.abs(a - time) ? b : a), grid[0]) : time;
@@ -77,16 +92,19 @@ export function buildAnim(source: string, track: number, time: number, snap = tr
     return m.kind === 'video' ? clipSource(c, Math.max(0, t - c.start), m, modules).src : 0;
   };
   const next = under ? covering(end + 1e-3, under.track)[0] : undefined;
+  // 縮放以主體為中心（不然主體會往畫面中間飄）：試看直接給；放到時間軸時看底下那一格的去背遮罩算好了沒
+  const center = opts?.center ?? (under ? subjectCenter(media.get(under.mediaId)!, srcAt(under, start)) : undefined);
 
   const id = uid();
   let item: AnimItem = preset
     // presetId 留著原本的範本種類（素材庫縮圖、預設名稱用）
     ? { ...structuredClone(preset.item), id, start, duration, track, take: undefined, locked: undefined }
     : combo
-      ? comboItem(combo, { id, start, duration, track,
+      ? comboItem(combo, { id, start, duration, track, center,
         under: under && { mediaId: under.mediaId, sourceTime: srcAt(under, start) },
         next: next && { mediaId: next.mediaId, sourceTime: srcAt(next, end) } })
-    : animTemplate(variant!, { id, start, duration, track, subject: under?.mediaId ?? null, reveal: next?.mediaId ?? null });
+    : animTemplate(variant!, { id, start, duration, track, subject: under?.mediaId ?? null, reveal: next?.mediaId ?? null,
+      cx: center?.cx, cy: center?.cy, ...(variant === 'textBehind' ? { text: 'TEXT' } : {}) });
   item.beatTimes = Array.from({ length: nBeats + 1 }, (_, i) => i * beat);
   // 範本：主體 / 背景 / 分身用底下那一格，揭露用下一個鏡頭的第一格
   if (!preset && !combo && under) {
@@ -236,3 +254,11 @@ export function setAnimSlot(animId: string, slotId: string, mediaId: string | nu
   patchAnimSlot(animId, slotId, { mediaId, sourceTime: 0 });
 }
 
+
+/** 圖層加特效（我的組合 = 主特效 + 疊加的特效依序加上） */
+export function addAnimLayerFx(animId: string, layerId: string, moduleId: string) {
+  const a = useStore.getState().anims.find((x) => x.id === animId);
+  if (!a?.layers.some((l) => l.id === layerId)) return;
+  const add = comboClipFx(moduleId).map((f: ClipFx) => ({ ...f, id: uid() }));
+  useStore.getState().updateAnim(animId, { layers: a.layers.map((l) => (l.id === layerId ? { ...l, effects: [...(l.effects ?? []), ...add] } : l)) });
+}

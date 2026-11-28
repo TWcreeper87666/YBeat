@@ -219,8 +219,51 @@ export function mergeIntoStep(step: number): boolean {
   return true;
 }
 
+/**
+ * 獨立的復原紀錄（編輯視窗用）：開始後 Ctrl+Z / Ctrl+Y 只在這段裡面走，退不到開始之前；
+ * 結束：commit = 整段變更併成主紀錄的一步；不 commit = 還原成開始時的專案內容、主紀錄不多一步
+ */
+let scope: { start: Doc; past: Doc[]; future: Doc[]; path: number[]; futureIds: number[] } | null = null;
+export function beginHistoryScope() {
+  if (scope || transaction) return;
+  flush();
+  scope = { start: docOf(useStore.getState()), past: [...past], future, path: [...path], futureIds };
+  past.length = 0;
+  future = [];
+  futureIds = [];
+  sync();
+}
+
+export function endHistoryScope(commit: boolean) {
+  if (!scope) return;
+  flush();
+  const sc = scope;
+  scope = null;
+  if (!commit) {
+    const now = docOf(useStore.getState());
+    apply({ ...sc.start, aux: now.aux });
+  }
+  const changed = commit && !sameDoc(sc.start, docOf(useStore.getState()));
+  past.length = 0;
+  past.push(...sc.past);
+  path = sc.path;
+  if (changed) {
+    past.push(sc.start);
+    if (past.length > LIMIT) past.shift();
+    future = [];
+    futureIds = [];
+    path.push(nextId++);
+  } else {
+    future = sc.future;
+    futureIds = sc.futureIds;
+  }
+  touch();
+  sync();
+}
+
 export function resetHistory() {
   clearTimeout(timer);
+  scope = null;
   past.length = 0;
   future = [];
   burstStart = null;

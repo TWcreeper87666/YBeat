@@ -28,10 +28,15 @@ export const lang: Lang = detect();
 if (typeof document !== 'undefined') document.documentElement.lang = lang === 'zh' ? 'zh-Hant' : lang;
 
 /** 翻譯；`{0}`、`{1}` 會換成後面的參數 */
+/** Mac：快捷鍵寫 ⌘ / ⌥（程式裡 Ctrl 一律也接受 ⌘） */
+export const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+/** 介面上的按鍵名稱：Mac 把 Ctrl 換成 ⌘、Alt 換成 ⌥ */
+export const keyLabel = (s: string) => (IS_MAC ? s.replace(/Ctrl/g, '⌘').replace(/Alt/g, '⌥') : s);
+
 export function $t(s: string, ...args: unknown[]): string {
   let out = lang === 'en' ? EN[s] ?? s : lang === 'ja' ? JA[s] ?? EN[s] ?? s : s;
   if (args.length) out = out.replace(/\{(\d+)\}/g, (m, i) => (+i < args.length ? String(args[+i]) : m));
-  return out;
+  return IS_MAC ? keyLabel(out) : out;
 }
 
 export function saveLang(l: Lang) {

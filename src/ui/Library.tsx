@@ -70,7 +70,7 @@ useLayout.subscribe((s, p) => (s.libCard !== p.libCard || s.libRow !== p.libRow)
 window.addEventListener(
   'wheel',
   (e) => {
-    if (!e.ctrlKey || !(e.target as Element).closest?.('.lib-body')) return;
+    if (!(e.ctrlKey || e.metaKey) || !(e.target as Element).closest?.('.lib-body')) return;
     e.preventDefault();
     const id = (e.target as Element).closest('.lib')?.querySelector<HTMLElement>('.lib-bar[data-views]')?.dataset.views;
     const L = useLayout.getState();
@@ -145,17 +145,26 @@ interface PickerReq {
   y: number;
   /** 視窗寬度；有給 = 小視窗，高度跟著內容 */
   w?: number;
+  /** 打開它的按鈕：再按一次 = 關掉 */
+  anchor?: Element | null;
+  /** 從開著的視窗換到另一個按鈕：視窗留在原地，只換內容 */
+  keepPos?: true;
 }
 const usePicker = create<{ req: PickerReq | null }>(() => ({ req: null }));
 export const closePicker = () => usePicker.setState({ req: null });
 /** 挑選視窗開著（Esc 先關它，別的 Esc 處理要讓開） */
 export const pickerOpen = () => !!usePicker.getState().req;
 
-/** 打開挑選視窗，出現在 anchor（按下的按鈕）旁邊 */
+/** 打開挑選視窗，出現在 anchor（按下的按鈕）旁邊；同一個按鈕再按一次 = 關掉 */
 export function openPicker(anchor: Element | null, title: string, body: PickerReq['body'], size?: { w: number }) {
+  const cur = usePicker.getState().req;
+  if (anchor && cur?.anchor === anchor) return closePicker();
   const r = anchor?.getBoundingClientRect();
-  usePicker.setState({ req: { title, body, x: r ? r.left : innerWidth / 2 - 180, y: r ? r.bottom + 4 : 120, ...(size ? { w: size.w } : {}) } });
+  usePicker.setState({ req: { title, body, anchor, x: r ? r.left : innerWidth / 2 - 180, y: r ? r.bottom + 4 : 120, ...(size ? { w: size.w } : {}), ...(cur ? { keepPos: true as const } : {}) } });
 }
+
+/** 目前開著的挑選視窗是哪個按鈕打開的（那個按鈕可以標成「編輯中」） */
+export const usePickerAnchor = () => usePicker((s) => s.req?.anchor ?? null);
 
 const PICK_W = 380, PICK_H = 440;
 
@@ -169,7 +178,7 @@ export function PickerHost() {
   const [pos, setPos] = useState({ x: 0, y: 0 });
 
   useLayoutEffect(() => {
-    if (!req) return;
+    if (!req || req.keepPos) return;
     // 放得下就在按鈕下方，不然往上 / 往左移
     const w = req.w ?? PICK_W;
     const h = req.w ? ref.current?.offsetHeight ?? 200 : PICK_H;
@@ -182,8 +191,9 @@ export function PickerHost() {
     if (!req) return;
     const down = (e: PointerEvent) => {
       const t = e.target as HTMLElement;
-      // 視窗裡、右鍵選單、確認對話框：不關
-      if (ref.current?.contains(t) || t.closest?.('.ctxmenu, .overlay .dialog, .popover')) return;
+      // 視窗裡、右鍵選單、確認對話框：不關；打開它的按鈕：交給按鈕（再按一次 = 關掉）
+      // 其他會開挑選視窗的按鈕（data-picker-anchor）：視窗留著，換成那個按鈕的內容
+      if (ref.current?.contains(t) || t.closest?.('.ctxmenu, .overlay .dialog, .popover, [data-picker-anchor]') || req.anchor?.contains(t)) return;
       closePicker();
     };
     const key = (e: KeyboardEvent) => {

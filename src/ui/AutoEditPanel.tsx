@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { create } from 'zustand';
 import { ChevronDown, ChevronRight, Flag, Pause, Pencil, Play, Plus, RotateCcw, Save, Trash2, Wand2, X } from 'lucide-react';
-import { isTextField } from './focus';
+import { isTextField, modalOpen } from './focus';
 import { $t, displayName } from '../i18n';
 import { uid, useStore, type Media } from '../store';
 import { usePrefs } from '../prefs';
@@ -308,7 +308,7 @@ function EnergyCurve({ info, shape, onChange, chorus, zones, pops }: { info: Mus
   useEffect(() => {
     if (!chorus || !scale) return;
     const key = (e: KeyboardEvent) => {
-      if (!aeHover || aeDialogOpen() || isTextField(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
+      if (!aeHover || aeDialogOpen() || modalOpen() || isTextField(e.target) || e.ctrlKey || e.metaKey || e.altKey) return;
       const st = useSongPlay.getState();
       const at = st.pos ?? chorus.beats[0].t;
       if (e.code === 'Space') {
@@ -640,12 +640,16 @@ export function AutoEditPanel() {
         </div>
 
         <div className="ae-col ae-side">
-          <Seg className="ae-tabs" value={tab} on={(v: AeTab) => useAeView.setState({ tab: v })} opts={[
-            { v: 'feet', label: <>{$t('素材')}<span className="ae-count">{pick === 'list' ? segs.length : feet.length}</span></> },
-            { v: 'style', label: $t('風格') },
-            { v: 'fx', label: <>{$t('特效')}{rulesOn + (st.popOn ? 1 : 0) + (st.speedOn ? 1 : 0) > 0 && <span className="ae-count">{rulesOn + (st.popOn ? 1 : 0) + (st.speedOn ? 1 : 0)}</span>}</> },
-            { v: 'zones', label: <>{$t('分段')}{zones.length > 0 && <span className="ae-count">{zones.length}</span>}</> },
-          ]} />
+          <div className="tabs ae-tabs" role="tablist">
+            {([
+              { v: 'feet', label: <>{$t('素材')}<span className="ae-count">{pick === 'list' ? segs.length : feet.length}</span></> },
+              { v: 'style', label: $t('風格') },
+              { v: 'fx', label: <>{$t('特效')}{rulesOn + (st.popOn ? 1 : 0) + (st.speedOn ? 1 : 0) > 0 && <span className="ae-count">{rulesOn + (st.popOn ? 1 : 0) + (st.speedOn ? 1 : 0)}</span>}</> },
+              { v: 'zones', label: <>{$t('分段')}{zones.length > 0 && <span className="ae-count">{zones.length}</span>}</> },
+            ] as { v: AeTab; label: React.ReactNode }[]).map((o) => (
+              <button key={o.v} role="tab" aria-selected={tab === o.v} className={`tab ${tab === o.v ? 'on' : ''}`} onClick={() => useAeView.setState({ tab: o.v })}>{o.label}</button>
+            ))}
+          </div>
 
           {tab === 'feet' && (
             <div className="ae-card">
@@ -655,6 +659,10 @@ export function AutoEditPanel() {
                   {(pick === 'all' ? feet.length > 0 : segs.length > 0) && <button className="link" onClick={() => set({ pick: 'list', segs: [] })}>{$t('全部移除')}</button>}
                   {pick === 'list' && <button className="link" onClick={() => set({ pick: 'all', segs: [] })}>{$t('用全部素材')}</button>}
                 </span>
+              </div>
+              <div className="ae-line ae-order">
+                <span className="ae-label">{$t('素材順序')}</span>
+                <Seg value={st.order} on={(v) => set({ order: v })} opts={[{ v: 'library', label: $t('清單順序') }, { v: 'shuffle', label: $t('隨機') }, { v: 'bag', label: $t('輪流') }]} />
               </div>
               <div className="ae-smart">
                 <Check v={st.analyze} on={(v) => set({ analyze: v })} title={$t('依運動量、畫質、有沒有人、原本的剪接點挑片段')}>{$t('分析影片內容')}</Check>
@@ -710,10 +718,6 @@ export function AutoEditPanel() {
                   {knob($t('鏡頭最短'), <DragNumber value={p.minShotSec} min={0.1} max={10} step={0.05} decimals={2} suffix="s" onChange={(v) => setParam('minShotSec', Math.min(v, p.maxShotSec))} />)}
                   {knob($t('鏡頭最長'), <DragNumber value={p.maxShotSec} min={0.5} max={30} step={0.5} decimals={1} suffix="s" onChange={(v) => setParam('maxShotSec', Math.max(v, p.minShotSec))} />)}
                   {knob($t('隨機變化'), pct(p.jitter, (v) => setParam('jitter', v)))}
-                </div>
-                <div className="ae-line ae-order">
-                  <span className="ae-label">{$t('素材順序')}</span>
-                  <Seg value={st.order} on={(v) => set({ order: v })} opts={[{ v: 'library', label: $t('清單順序') }, { v: 'shuffle', label: $t('隨機') }, { v: 'bag', label: $t('輪流') }]} />
                 </div>
                 <Check v={st.kenBurns} on={(v) => set({ kenBurns: v })}>{$t('推近 / 拉遠')}</Check>
               </Addon>

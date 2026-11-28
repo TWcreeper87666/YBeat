@@ -336,16 +336,25 @@ function expandLayers(pop: PlanPop, T: (beat: number) => number): PopLayer[] {
     return [...copies, centre];
   }
   if (pop.variant === 'spin') {
-    return [-15, 15, 0].map((angle, i) => {
+    // 左右兩個旋轉的分身（縮小、腳底貼畫面下緣），第 2、3 拍各跳出一個；中間的主體逐拍放大，最後一拍分身淡掉
+    const S = 0.7, OFF = 0.3;
+    const fade = end - (t1 - T(pop.b1 - 1)) / 2;
+    const twins = ([-1, 1] as const).map((side, i) => {
       const copy = layer(i + 1, true);
-      copy.keys = finalAlignment(steps([0.85, 0.9, 0.95, 1]));
-      copy.keys.rotation = [key(0, angle), key(end, 0)];
-      if (i < 2) {
-        const fade = end - (t1 - T(pop.b1 - 1)) / 2;
-        copy.keys.opacity = [key(0, 0.5), key(fade, 0.5, 'linear'), key(end, 0)];
-      }
+      const appear = T(pop.b0 + i + 1) - t0;
+      // 以畫面中心縮放後，分身中心 = S·c + 位移：放在主體旁邊 OFF 的地方，腳底跟主體一樣高
+      const x = pop.cx * (1 - S) + side * OFF, y = pop.cy * (1 - S) + (1 - S) * 0.5 * 0.5;
+      copy.keys = {
+        scaleX: [key(0, S), key(end, S)], scaleY: [key(0, S), key(end, S)],
+        x: [key(0, x), key(end, x)], y: [key(0, y), key(end, y)],
+        rotation: [key(appear, side * 40, 'back'), key(appear + (T(pop.b0 + i + 2) - T(pop.b0 + i + 1)) / 2, side * 15), key(end, side * 15)],
+        opacity: [key(0, 0), key(appear, 0.85), key(fade, 0.85, 'linear'), key(end, 0)],
+      };
       return copy;
     });
+    const main = layer(3, true);
+    main.keys = finalAlignment(steps([0.85, 0.9, 0.95, 1]));
+    return [...twins, main];
   }
   if (pop.variant === 'dim' || pop.variant === 'blur') {
     const full = layer(1, false);

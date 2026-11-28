@@ -27,13 +27,19 @@ interface L {
   blend?: AnimLayer['blend'];
   mask?: { slotId: string; layerId: string; mode: 'window' | 'hole'; scale: K[] };
   fx?: Omit<Fx, 'id'>[];
+  /** 縮放以主體為中心（位移跟著縮放補回去，主體停在原位）；放的時候知道主體在哪才有用 */
+  pivot?: true;
 }
 
 const keyList = (layer: string, prop: string, ks: K[]): Keyframe[] =>
   ks.map(([t, v, e], j) => ({ id: `${layer}-${prop}-${j}`, t, v, ease: EASE[e ?? 'hold'] }));
 
-function toLayer(l: L): AnimLayer {
+function toLayer(l: L, center?: { cx: number; cy: number }): AnimLayer {
   const keys: Keys = {};
+  // 以主體為中心縮放：縮放 s 時位移 c·(1 − s)
+  if (l.pivot && center && l.s && !l.x && !l.y) l = { ...l,
+    x: l.s.map(([t, v, e]): K => [t, center.cx * (1 - v), e]),
+    y: l.s.map(([t, v, e]): K => [t, center.cy * (1 - v), e]) };
   if (l.x) keys.x = keyList(l.id, 'x', l.x);
   if (l.y) keys.y = keyList(l.id, 'y', l.y);
   if (l.s) { keys.scaleX = keyList(l.id, 'scaleX', l.s); keys.scaleY = keyList(l.id, 'scaleY', l.s); }
@@ -156,9 +162,9 @@ const DEFS: Record<ComboId, () => Def> = {
     slots: [bg, copy('echo1'), copy('echo2'), subj()],
     layers: [
       bgLayer(2),
-      { id: 'echo1', slot: 'echo1', from: 0, to: 0.6, s: [[0, 1.45, 'out'], [0.6, 1]], o: [[0, 0.4, 'lin'], [0.6, 0]], blend: 'screen' },
-      { id: 'echo2', slot: 'echo2', from: 0.2, to: 0.8, s: [[0.2, 1.25, 'out'], [0.8, 1]], o: [[0.2, 0.4, 'lin'], [0.8, 0]], blend: 'screen' },
-      { id: 'subject', slot: 'subject', from: 0, to: 2, s: [[0, 0.8, 'back'], [0.7, 1]] },
+      { id: 'echo1', slot: 'echo1', from: 0, to: 0.6, s: [[0, 1.45, 'out'], [0.6, 1]], o: [[0, 0.4, 'lin'], [0.6, 0]], blend: 'screen', pivot: true },
+      { id: 'echo2', slot: 'echo2', from: 0.2, to: 0.8, s: [[0.2, 1.25, 'out'], [0.8, 1]], o: [[0.2, 0.4, 'lin'], [0.8, 0]], blend: 'screen', pivot: true },
+      { id: 'subject', slot: 'subject', from: 0, to: 2, s: [[0, 0.8, 'back'], [0.7, 1]], pivot: true },
     ],
   }),
   // 黑白背景、彩色主體逐拍放大，第三拍衝一下，每拍描邊亮一次
@@ -168,7 +174,7 @@ const DEFS: Record<ComboId, () => Def> = {
     layers: [
       bgLayer(4, [{ moduleId: 'fx-bw', params: { contrast: 1.4, amount: 1, decay: 0 } }]),
       { id: 'subject', slot: 'subject', from: 0, to: 4,
-        s: [[0, 0.85], [1, 0.9], [2, 0.95, 'back'], [3, 1.08, 'out'], [3.5, 1]],
+        s: [[0, 0.85], [1, 0.9], [2, 0.95, 'back'], [3, 1.08, 'out'], [3.5, 1]], pivot: true,
         fx: [{ moduleId: 'fx-matteoutline', params: { width: 10, glow: 1, intensity: 1, pulse: true }, beatEvery: 1, hitBeats: 0.3 }] },
     ],
   }),
@@ -203,7 +209,7 @@ const DEFS: Record<ComboId, () => Def> = {
 export interface ComboFill { mediaId: string | null; sourceTime: number }
 
 /** 建立組合動畫：揭露位置用 next，其他位置用 under（沒有 = 待補） */
-export function comboItem(combo: ComboId, opts: { id: string; start: number; duration: number; track: number; under?: ComboFill; next?: ComboFill }): AnimItem {
+export function comboItem(combo: ComboId, opts: { id: string; start: number; duration: number; track: number; under?: ComboFill; next?: ComboFill; center?: { cx: number; cy: number } }): AnimItem {
   const d = DEFS[combo]();
   const slots: AnimSlot[] = d.slots.map((s) => {
     const fill = (s.role === 'reveal' ? opts.next : opts.under) ?? { mediaId: null, sourceTime: 0 };
@@ -211,7 +217,7 @@ export function comboItem(combo: ComboId, opts: { id: string; start: number; dur
   });
   return {
     id: opts.id, track: opts.track, start: opts.start, duration: opts.duration,
-    slots, layers: d.layers.map(toLayer),
+    slots, layers: d.layers.map((l) => toLayer(l, opts.center)),
     beatTimes: Array.from({ length: d.beats + 1 }, (_, b) => b * opts.duration / d.beats),
     presetId: combo,
   };

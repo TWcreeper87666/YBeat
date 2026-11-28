@@ -115,6 +115,16 @@ export function refineLead(emb: number[], faces: { emb: number[] }[], thr = REFI
   return c;
 }
 
+/** 認不出主角時退一步：最像主角的那張臉夠像、而且明顯比同框其他人像 */
+export const LEAD_GUESS = 0.15, LEAD_MARGIN = 0.1;
+/** 這一格裡最可能是主角的臉（沒有夠明顯的 = null）；已經認得出來的就是那一張 */
+export function guessLead<T extends { h: number; emb?: number[] }>(list: T[] | null | undefined, lead: Lead): T | null {
+  const sims = (list ?? []).filter((f) => f.emb).map((f) => ({ f, s: cosine(f.emb!, lead.centroid) })).sort((a, b) => b.s - a.s);
+  const [a, b] = sims;
+  if (!a || a.s < LEAD_GUESS) return null;
+  return a.s >= IS_LEAD || !b || a.s - b.s >= LEAD_MARGIN ? a.f : null;
+}
+
 /** 每個取樣點：主角在（lead）/ 只有別人（others）/ 沒人或認不出來（none）/ 沒取樣（null） */
 export type LeadState = 'lead' | 'others' | 'none';
 export function leadStates(facesAt: FacesAt[], lead: Lead): (LeadState | null)[] {

@@ -1,6 +1,6 @@
 import { snapFrame } from '../engine/rulerTicks';
 import { snapActive } from './snapKey';
-import { animDropDur, placeAnim, setAnimSlot } from '../engine/animPlace';
+import { addAnimLayerFx, animDropDur, placeAnim, setAnimSlot } from '../engine/animPlace';
 import { stopLibraryPreview } from './SourcePanel';
 import { $t, displayName } from '../i18n';
 import type React from 'react';
@@ -101,6 +101,7 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
   // 拖到「屬性」面板：套用到目前選取的項目（特效 → 片段特效 / 取代特效軌上的特效；轉場 → 進場；變速 → 時間重映射）
   const insp = els.find((e) => e.classList?.contains('panel-inspector'));
   document.querySelector('.panel-inspector')?.classList.toggle('drop-here', false);
+  if (!insp) markAnimLayer(null, null);
   // 遮罩形狀：片段 → 加片段遮罩；特效 → 換遮罩形狀（拖到屬性面板 = 套用到選取的項目）
   if (payload.kind === 'mask') {
     if (insp) {
@@ -117,6 +118,13 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
   if (insp && payload.kind === 'module') {
     const sel = s.selection;
     let t: DropTarget = null;
+    // 動畫：拖到哪個圖層（圖層的區塊或它的特效區塊）就加到那個圖層
+    if (payload.moduleKind === 'effect' && sel?.type === 'anim') {
+      const layerId = animLayerAt(insp, y);
+      if (layerId && s.anims.some((a) => a.id === sel.id)) t = { kind: 'animLayer', animId: sel.id, layerId };
+      markAnimLayer(insp, t?.kind === 'animLayer' ? t.layerId : null);
+      return t;
+    }
     if (sel?.type === 'clip' && s.clips.some((c) => c.id === sel.id)) {
       const c = s.clips.find((x) => x.id === sel.id)!;
       const m = s.media.find((x) => x.id === c.mediaId);
@@ -265,11 +273,39 @@ export function computeTarget(payload: DragPayload, x: number, y: number, alt = 
   }
 }
 
+/**
+ * 屬性面板裡游標所在的動畫圖層：區塊的列跟標題是平的（不是包在一起），
+ * 所以找游標上方最近的區塊標題（圖層 = layer.<id>，圖層的特效 = afx.<id>.…）
+ */
+function animLayerAt(insp: HTMLElement, y: number): string | null {
+  let id: string | null = null;
+  for (const el of insp.querySelectorAll<HTMLElement>('.ec-section[data-sec]')) {
+    if (el.getBoundingClientRect().top > y) break;
+    id = el.dataset.sec!;
+  }
+  if (id?.startsWith('layer.')) return id.slice(6);
+  if (id?.startsWith('afx.')) return id.split('.')[1];
+  return null;
+}
+
+/** 標出要放進去的圖層（它的區塊標題） */
+function markAnimLayer(insp: HTMLElement | null, layerId: string | null) {
+  document.querySelectorAll('.ec-section.drop-here').forEach((el) => el.classList.remove('drop-here'));
+  if (insp && layerId) insp.querySelector(`.ec-section[data-sec="${CSS.escape(`layer.${layerId}`)}"]`)?.classList.add('drop-here');
+}
+
 /** 執行放置 */
 export async function applyDrop(payload: DragPayload, target: DropTarget, files?: File[], point?: { x: number; y: number }) {
   const s = useStore.getState();
   if (!target) {
     if (files) await importMany(files);
+    return;
+  }
+  if (target.kind === 'animLayer') {
+    if (payload.kind === 'module') {
+      addAnimLayerFx(target.animId, target.layerId, payload.id);
+      toast($t('已加到圖層'));
+    }
     return;
   }
   if (target.kind === 'animSlot') {
@@ -542,6 +578,7 @@ export function startLibraryDrag(e: React.PointerEvent, payload: DragPayload, la
     useSnapLine.setState({ t: null });
     document.body.classList.remove('drag-ok', 'drag-no');
     document.querySelector('.panel-inspector')?.classList.remove('drop-here');
+    markAnimLayer(null, null);
     showSortMark(null, null);
     if (started && sort && sortAt !== null) {
       suppressClick();

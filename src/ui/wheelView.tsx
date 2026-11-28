@@ -9,7 +9,7 @@ import React, { useRef } from 'react';
 export type WheelViewAction = { kind: 'zoom' | 'scrollX' | 'scrollY'; delta: number };
 
 /** Match the main timeline's wheel setting, including Chrome's swapped Shift delta. */
-export function wheelViewAction(e: Pick<WheelEvent, 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'deltaX' | 'deltaY'>, wheelScroll: 'horizontal' | 'vertical', zoomWithMeta = false): WheelViewAction {
+export function wheelViewAction(e: Pick<WheelEvent, 'ctrlKey' | 'metaKey' | 'shiftKey' | 'altKey' | 'deltaX' | 'deltaY'>, wheelScroll: 'horizontal' | 'vertical', zoomWithMeta = true): WheelViewAction {
   if (e.ctrlKey || (zoomWithMeta && e.metaKey)) return { kind: 'zoom', delta: e.deltaY };
   const swap = e.shiftKey || e.altKey;
   const swipeX = Math.abs(e.deltaX) > Math.abs(e.deltaY) && !swap;

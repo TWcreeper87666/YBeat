@@ -18,7 +18,8 @@ import { fps, rulerLabel, rulerSteps, snapFrame, tc } from '../engine/rulerTicks
 import { openMenu, useKeySel, useLayout, useTrimView, type KeyRef, type MenuItem } from './uiStore';
 import { beatHits, HIT_MIN, normalizeHits, overwriteHits, type BeatEvery, type FxTiming, type Hit } from '../engine/trigger';
 import { beatSnapPoints } from './beatGrid';
-import { AudioLines, ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Timer } from 'lucide-react';
+import { AudioLines, ChevronDown, ChevronLeft, ChevronRight, Diamond, RotateCcw, Search, Timer, X } from 'lucide-react';
+import { Seg } from './Toggle';
 import { marqueeClamp } from './marqueeClamp';
 import { ViewScrollbar, wheelViewAction } from './wheelView';
 import { dragPan } from './middlePan';
@@ -204,7 +205,7 @@ export interface HostKind {
 const hostKinds: Record<string, HostKind> = {};
 export const registerHostKind = (type: string, kind: HostKind) => { hostKinds[type] = kind; };
 
-function hostFor(owner: string) {
+export function hostFor(owner: string) {
   const [type, id] = [owner.slice(0, owner.indexOf(':')), owner.slice(owner.indexOf(':') + 1)];
   return type === 'clip' ? clipHost(id) : type === 'effect' ? fxHost(id) : hostKinds[type]?.host(id) ?? null;
 }
@@ -343,7 +344,7 @@ function listen(onMove: (ev: PointerEvent) => void, onUp?: () => void) {
 /** 選取關鍵影格；primary 為主選取 */
 function selectKeys(owner: string, keys: KeyRef[], primary?: KeyRef) {
   const p = primary ?? keys[keys.length - 1];
-  useKeySel.setState({ owner, keys, sel: p ? { owner, ...p } : null, focus: true });
+  useKeySel.setState({ owner, keys, sel: p ? { owner, ...p } : null, focus: true, channel: p?.ch ?? null });
 }
 const clearKeys = () => useKeySel.setState({ owner: null, keys: [], sel: null });
 const sameKey = (a: KeyRef, b: KeyRef) => a.ch === b.ch && a.id === b.id;
@@ -499,6 +500,27 @@ export function nudgeKeys(dt: number): boolean {
 
 // ───────────────────────── 效果控制面板 ─────────────────────────
 
+/** 這個屬性改過了嗎：有關鍵影格、音訊反應開著，或固定值不是預設值（沒有關鍵影格時 value 就是存的值） */
+const edited = (ch: Channel) => ch.keys.length > 0 || !!ch.drive?.on || Math.abs(ch.value - ch.def) > 1e-6;
+
+/**
+ * 屬性面板的篩選：keys = 只留有關鍵影格的屬性、edited = 只留改過的屬性（不能動畫的列看不出改過沒，不顯示）；
+ * 搜尋比對屬性名稱，比到區塊標題 = 整個區塊都留下。沒有留下任何列的區塊整個不顯示
+ */
+function filterSections(sections: Section[], mode: 'all' | 'keys' | 'edited', query: string): Section[] {
+  const q = query.trim().toLowerCase();
+  const has = (s: string) => s.toLowerCase().includes(q);
+  return sections.flatMap((sec) => {
+    const whole = !!q && has(sec.title);
+    const match = (label: string) => !q || whole || has(label);
+    const channels = (sec.channels ?? []).filter((ch) => match(ch.label) && (mode === 'all' || (mode === 'keys' ? ch.keys.length > 0 : edited(ch))));
+    const rows = mode === 'all' ? (sec.rows ?? []).filter((r) => match(r.label)) : [];
+    const rest = mode === 'all' && (!q || whole);
+    const out: Section = { ...sec, channels, rows, timing: rest ? sec.timing : undefined, footer: rest ? sec.footer : undefined };
+    return channels.length || rows.length || out.timing || out.footer ? [out] : [];
+  });
+}
+
 export interface Section {
   id: string;
   title: string;
@@ -592,6 +614,9 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
   const leftPx = useLayout((s) => s.ecLeftPx);
   const collapsed = useLayout((s) => s.ecCollapsed);
   const ksel = useKeySel();
+  const fmode = useLayout((s) => s.ecFilter);
+  const [query, setQuery] = useState('');
+  const [fcol, setFcol] = useState<Record<string, boolean>>({});
   const [open, setOpen] = useState<Record<string, boolean>>({});
   const [marquee, setMarquee] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
   const rulerRef = useRef<HTMLDivElement>(null);
@@ -631,6 +656,8 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
   const mine = ksel.owner === host.owner;
   const isSel = (ch: string, id: string) => mine && ksel.keys.some((k) => k.ch === ch && k.id === id);
   const primary = mine ? ksel.sel : null;
+  /** 目前在看的屬性（預覽上的路徑 / 框跟著它） */
+  const curCh = mine ? ksel.channel ?? ksel.sel?.ch ?? null : null;
 
   const [, bump] = useState(0);
   const view = clampView(viewMem.get(host.owner) ?? { a: 0, b: dur }, dur);
@@ -894,8 +921,11 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
     listen((ev) => useLayout.getState().set({ ecLeftPx: Math.round(Math.min(LEFT_MAX, Math.max(LEFT_MIN, ev.clientX - r.left))) }));
   };
 
-  const isCollapsed = (sec: Section) => collapsed[sec.id] ?? !!sec.defaultCollapsed;
-  const toggleSection = (sec: Section) => useLayout.getState().set({ ecCollapsed: { ...collapsed, [sec.id]: !isCollapsed(sec) } });
+  // 篩選：有篩選時區塊一律展開（收合狀態另外記，不動原本的）
+  const filtering = fmode !== 'all' || !!query.trim();
+  const shown = filtering ? filterSections(sections, fmode, query) : sections;
+  const isCollapsed = (sec: Section) => filtering ? !!fcol[sec.id] : collapsed[sec.id] ?? !!sec.defaultCollapsed;
+  const toggleSection = (sec: Section) => filtering ? setFcol({ ...fcol, [sec.id]: !fcol[sec.id] }) : useLayout.getState().set({ ecCollapsed: { ...collapsed, [sec.id]: !isCollapsed(sec) } });
   // 刻度文字是 mm:ss:ff（比較寬）：依尺規寬度決定最多幾個，每個至少 64px
   // 尺規跟時間軸的一樣：大刻度（有數字）+ 小刻度，放大到最後小刻度是一格
   useLayout((l) => l.timeGrid);
@@ -942,7 +972,32 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
         </div>
       </div>
 
-      {sections.map((sec) => {
+      {/* 篩選：搜尋屬性名稱 + 只看有關鍵影格 / 改過的 */}
+      <div className="ec-row ec-filter">
+        <div className="ec-left">
+          <div className="lib-search ec-search">
+            <Search size={13} />
+            <input placeholder={$t('搜尋…')} value={query} onChange={(e) => setQuery(e.target.value)} onKeyDown={(e) => { if (e.key === 'Escape' && query) { e.stopPropagation(); setQuery(''); } }} />
+            {query && <button onClick={() => setQuery('')}><X size={13} /></button>}
+          </div>
+        </div>
+        <div className="ec-right" />
+      </div>
+      <div className="ec-row ec-filter">
+        <div className="ec-left">
+          <Seg className="ec-filter-seg" value={fmode} on={(v) => useLayout.getState().set({ ecFilter: v })}
+            opts={[{ v: 'all', label: $t('全部') }, { v: 'keys', label: <Diamond size={12} />, title: $t('有關鍵影格') }, { v: 'edited', label: $t('已修改') }]} />
+        </div>
+        <div className="ec-right" />
+      </div>
+      {filtering && !shown.length && (
+        <div className="ec-empty">
+          <span>{$t('沒有符合的屬性')}</span>
+          <button className="btn small-h" onClick={() => { setQuery(''); useLayout.getState().set({ ecFilter: 'all' }); }}>{$t('清除篩選')}</button>
+        </div>
+      )}
+
+      {shown.map((sec) => {
         const isCol = isCollapsed(sec);
         return (
           <React.Fragment key={sec.id}>
@@ -973,8 +1028,8 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
                   const isOpen = open[rowKey];
                   return (
                     <React.Fragment key={ch.id}>
-                      <div className={`ec-row ${animated ? 'anim' : ''} ${ch.drive?.on ? 'driven' : ''}`}>
-                        <div className="ec-left ec-ch">
+                      <div className={`ec-row ${animated ? 'anim' : ''} ${ch.drive?.on ? 'driven' : ''} ${curCh === ch.id ? 'cur' : ''}`}>
+                        <div className="ec-left ec-ch" onPointerDown={() => curCh !== ch.id && useKeySel.setState({ owner: host.owner, channel: ch.id })}>
                           <span className="twirl small" onClick={() => setOpen({ ...open, [rowKey]: !isOpen })} title={$t('展開曲線')}>
                             {isOpen ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
                           </span>
@@ -982,7 +1037,7 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
                             <Timer size={13} />
                           </button>
                           {ch.drive && <button className={`ec-watch ${ch.drive.on ? 'on' : ''}`} title={$t('音訊反應')} onClick={ch.drive.toggle}><AudioLines size={13} /></button>}
-                          <span className="ec-label" title={ch.label} onContextMenu={(e) => channelMenu(e, ch)}>{ch.label}{ch.icon}</span>
+                          <span className="ec-label" title={ch.label} onPointerDown={() => useKeySel.setState({ owner: host.owner, channel: ch.id, keys: [], sel: null })} onContextMenu={(e) => channelMenu(e, ch)}>{ch.label}{ch.icon}</span>
                           <span className="ec-nav">
                             {animated && (
                               <>
@@ -999,6 +1054,7 @@ export function EffectControls({ host, sections, title, extra, titleMenu }: { ho
                         </div>
                         <div
                           className="ec-right ec-lane"
+                          onClick={() => useKeySel.setState({ owner: host.owner, channel: ch.id })}
                           onPointerDown={startMarquee}
                           onDoubleClick={(e) => e.target === e.currentTarget && addKeyAt(e, ch)}
                           onContextMenu={(e) => laneMenu(e, ch)}
@@ -1170,7 +1226,7 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
     e.preventDefault();
     e.stopPropagation();
     setKeyMode(k.id);
-    useKeySel.setState({ owner: host.owner, keys: [{ ch: ch.id, id: k.id }], sel: { owner: host.owner, ch: ch.id, id: k.id }, focus: true });
+    useKeySel.setState({ owner: host.owner, keys: [{ ch: ch.id, id: k.id }], sel: { owner: host.owner, ch: ch.id, id: k.id }, focus: true, channel: ch.id });
     frozen.current = range;
     const p0 = pt(e);
     // 點曲線上的關鍵影格：播放頭跟過去（拖曳時跟著走）
@@ -1218,7 +1274,7 @@ function GraphRow({ host, ch, lc, view, selId }: { host: Host; ch: Channel; lc: 
     if (keys.length < 2) return useKeySel.setState({ owner: null, keys: [], sel: null });
     let i = keys.findIndex((k, j) => j < keys.length - 1 && t >= k.t && t < keys[j + 1].t);
     if (i < 0) i = t < keys[0].t ? 0 : keys.length - 2;
-    useKeySel.setState({ owner: host.owner, keys: [{ ch: ch.id, id: keys[i].id }], sel: { owner: host.owner, ch: ch.id, id: keys[i].id }, focus: true });
+    useKeySel.setState({ owner: host.owner, keys: [{ ch: ch.id, id: keys[i].id }], sel: { owner: host.owner, ch: ch.id, id: keys[i].id }, focus: true, channel: ch.id });
   };
   const onDbl = (e: React.MouseEvent) => {
     const t = T(pt(e).x);

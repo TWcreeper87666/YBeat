@@ -98,6 +98,12 @@ function ensureRenderer() {
   return renderer;
 }
 
+/** 縮圖共用的渲染器（動畫範本的卡片也用，不另外開 WebGL） */
+export function thumbRenderer(): { r: Renderer; canvas: HTMLCanvasElement } {
+  const r = ensureRenderer();
+  return { r, canvas: canvas! };
+}
+
 /** 滑過卡片時的動態縮圖：畫第 progress（0..1）那一格到 out；畫不出來 = false */
 export function drawThumbFrame(m: Module, progress: number, out: HTMLCanvasElement): boolean {
   if (m.kind === 'remap') return false;

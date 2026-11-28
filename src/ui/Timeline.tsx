@@ -361,7 +361,7 @@ function clipMaxDur(c: Clip): number {
 
 /** 點擊 / 拖曳時間軸項目：處理 Ctrl / Shift 選取，以及整組移動（可跨軌） */
 /** 雙擊片段 / 特效：選取並打開編輯視窗 */
-function openItemEditor(type: 'clip' | 'effect', id: string) {
+function openItemEditor(type: 'clip' | 'effect' | 'anim', id: string) {
   const s = useStore.getState();
   if (s.selection?.type !== type || s.selection.id !== id) s.select({ type, id });
   openEditorWindow();
@@ -834,7 +834,7 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
   const n = useStore.getState().selected.length;
   const items: MenuItem[] = [
     // 編輯視窗：屬性 + 預覽的對話框（影片 / 文字片段、特效軌的特效）
-    ...(type !== 'audio' && type !== 'anim' ? [{ label: $t('在編輯視窗中編輯…'), shortcut: $t('雙擊'), action: () => openItemEditor(type, it.id) }, { separator: true } as MenuItem] : []),
+    ...(type !== 'audio' ? [{ label: $t('在編輯視窗中編輯…'), shortcut: $t('雙擊'), action: () => openItemEditor(type, it.id) }, { separator: true } as MenuItem] : []),
     // 分割（S）、修剪（Q / W）不放選單：快捷鍵與工具列就夠了
     { label: $t('節拍'), submenu: beatMenuItems() },
     { separator: true },
@@ -1339,9 +1339,9 @@ const AnimView = React.memo(function AnimView({ a, pps, sel, missing }: { a: Ani
   const preview = movePreview(key);
   const opCls = useOpCls(key);
   return <div data-key={key}
-    className={`fxitem ${a.locked ? 'locked' : ''} ${sel ? 'sel' : ''} ${missing ? 'missing' : ''} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
+    className={`fxitem animblock ${a.locked ? 'locked' : ''} ${sel ? 'sel' : ''} ${missing ? 'missing' : ''} ${preview.moving ? 'move-ghost' : ''} ${preview.affected ? 'move-affected' : ''} ${opCls}`}
     style={{ left: a.start * pps, width: Math.max(1, a.duration * pps), '--x': `${a.start * pps}px`, '--w': `${Math.max(1, a.duration * pps)}px` } as React.CSSProperties}
-    onPointerDown={(e) => itemPointerDown(e, 'anim', a)} onContextMenu={(e) => itemMenu(e, 'anim', a)}>
+    onPointerDown={(e) => itemPointerDown(e, 'anim', a)} onDoubleClick={() => openItemEditor('anim', a.id)} onContextMenu={(e) => itemMenu(e, 'anim', a)}>
     <div className="handle l" onPointerDown={(e) => resizeItem(e, 'anim', a, 'l', false)} />
     {a.locked && <LockBadge type="anim" item={a} />}
     <span className="clip-name" title={animLabel(a)}>{animLabel(a)}</span>
@@ -1456,12 +1456,11 @@ export async function deleteTracks(rows: Row[]) {
   useTrackSel.setState({ keys: [], anchor: null, focus: false });
 }
 
-/** 沒有任何項目、沒鎖定的軌道；影片軌全空時留第一條（至少要有一條影片軌） */
+/** 沒有任何項目的軌道（鎖定的也算：空的就沒東西要保護）；影片軌全空時留第一條（至少要有一條影片軌） */
 function emptyTracks(): Row[] {
   const st = useStore.getState();
-  const rows = KINDS.flatMap((kind) => st.tracks[kind].map((t, idx) => ({ kind, idx, t })))
-    .filter((r) => !r.t.locked && st.trackItemCount(r.kind, r.idx) === 0)
-    .map(({ kind, idx }) => ({ kind, idx }));
+  const rows = KINDS.flatMap((kind) => st.tracks[kind].map((_, idx) => ({ kind, idx })))
+    .filter((r) => st.trackItemCount(r.kind, r.idx) === 0);
   const video = rows.filter((r) => r.kind === 'video');
   return video.length >= st.tracks.video.length ? rows.filter((r) => r !== video[0]) : rows;
 }

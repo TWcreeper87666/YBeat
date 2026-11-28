@@ -1,7 +1,7 @@
 (globalThis as any).localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 (globalThis as any).window = globalThis;
 import { strict as assert } from 'node:assert';
-import { animLayers, animTemplate, snapAnimBeats } from '../src/engine/animation';
+import { animLayers, animMaskAt, animTemplate, snapAnimBeats } from '../src/engine/animation';
 import { expandPop, POP_VARIANTS } from '../src/engine/subjectPop';
 import { setBeatSource } from '../src/engine/trigger';
 import { settleHistory, undo, resetHistory } from '../src/engine/history';
@@ -44,6 +44,29 @@ assert.equal(animLayers(base, 4, 1).length, 0);
 const snapped = snapAnimBeats({ ...base, start: 0.2 }, [0, 1, 2, 3, 4, 5]);
 assert.ok(Math.abs(snapped.beatTimes![1] - 0.8) < 1e-8);
 console.log('PASS missing slots and beat snap');
+
+{
+  const legacy = { ...base, layers: [{ ...base.layers[0], fromBeat: 0, toBeat: 4, keys: {}, base: { x: 0.25, y: 0.1, opacity: 0.8 } }] };
+  const before = animLayers(legacy, 0.25, 1, 16 / 9)[0];
+  assert.deepEqual(animLayers({ ...legacy, transform: undefined, keys: undefined }, 0.25, 1, 16 / 9)[0], before);
+  const moved = { ...legacy, transform: { x: 0.1, y: 0.2, scaleX: 1, scaleY: 1, rotation: 90, opacity: 0.5 } };
+  const draw = animLayers(moved, 0.25, 1, 16 / 9)[0];
+  assert.ok(Math.abs(draw.x - (0.1 - 0.1 * 9 / 16)) < 1e-9);
+  assert.ok(Math.abs(draw.y - (0.2 + 0.25 * 16 / 9)) < 1e-9);
+  assert.equal(draw.opacity, 0.4);
+  const sheared = animLayers({ ...legacy, transform: { ...moved.transform, scaleX: 2, scaleY: 1 },
+    layers: [{ ...legacy.layers[0], base: { ...legacy.layers[0].base, rotation: 45 } }] }, 0.25, 1, 16 / 9)[0];
+  assert.ok(sheared.matrix && Math.abs(sheared.matrix[0] * sheared.matrix[2] + sheared.matrix[1] * sheared.matrix[3]) > 0.1,
+    'nonuniform overall scale retains the shear from layer rotation');
+  const keyed = { ...moved, keys: { x: [{ id: 'all-x', t: 1, v: 0.3, ease: 'hold' as const }] } };
+  const patch = stretchPatch('anim', keyed, 0, 2) as Partial<typeof keyed>;
+  assert.deepEqual(patch.beatTimes, keyed.beatTimes?.map((b) => b * 2));
+  assert.equal(patch.keys, undefined);
+  assert.equal(animLayers({ ...keyed, ...patch }, 2.5, 1, 16 / 9)[0].x,
+    animLayers(keyed, 1.25, 1, 16 / 9)[0].x);
+  assert.deepEqual(snapAnimBeats({ ...keyed, start: 0.2 }, [0, 1, 2, 3, 4, 5]).keys, keyed.keys);
+  console.log('PASS overall animation transform, stretch and legacy data');
+}
 
 useStore.setState({ anims: [base] });
 const saved = JSON.parse(JSON.stringify(packProject(useStore.getState())));
@@ -153,17 +176,17 @@ console.log('PASS animation store operations and undo');
   useStore.setState({ anims: [item], clips: [], tracks: { video: [{}], fx: [], audio: [] } });
   patchAnimSlot('same', 'p2', { mediaId: 'b', sourceTime: 3 });
   const get = () => useStore.getState().anims[0];
-  assert.deepEqual(get().slots.map((s) => s.mediaId), ['a', 'a', 'b', 'a']);
+  assert.deepEqual(get().slots.map((s) => s.mediaId), ['a', 'b', 'a']);
   setAnimSameMedia('same', true, 'p2');
   assert.ok(get().sameMedia);
-  assert.deepEqual(get().slots.map((s) => [s.mediaId, s.sourceTime]), [['b', 3], ['b', 3], ['b', 3], ['b', 3]]);
+  assert.deepEqual(get().slots.map((s) => [s.mediaId, s.sourceTime]), [['b', 3], ['b', 3], ['b', 3]]);
   setAnimSlot('same', 'p3', 'c');
-  assert.deepEqual(get().slots.map((s) => s.mediaId), ['c', 'c', 'c', 'c']);
+  assert.deepEqual(get().slots.map((s) => s.mediaId), ['c', 'c', 'c']);
   patchAnimSlot('same', 'p1', { cutout: { mode: 'off' } });
   assert.equal(get().slots.filter((s) => s.cutout?.mode === 'off').length, 1, 'cut-out stays per slot');
   setAnimSameMedia('same', false);
   setAnimSlot('same', 'p1', 'd');
-  assert.deepEqual(get().slots.map((s) => s.mediaId), ['c', 'd', 'c', 'c']);
+  assert.deepEqual(get().slots.map((s) => s.mediaId), ['d', 'c', 'c']);
   console.log('PASS same image for all slots');
 }
 
@@ -193,17 +216,19 @@ console.log('PASS animation store operations and undo');
   const triple = comboItem('tripleSlide', { id: 't', start: 0, duration: 2, track: 0, under: { mediaId: 'old', sourceTime: 0 } });
   const fly = animTemplate('fly', { id: 'f', start: 0, duration: 2, subject: 'old', reveal: 'oldR' });
   const echo = comboItem('zoomEcho', { id: 'z', start: 0, duration: 2, track: 0, under: { mediaId: 'old', sourceTime: 0 } });
-  const src3 = copySlots(usedImageSlots({ ...triple, slots: triple.slots.map((s, i) => ({ ...s, mediaId: ['bg', 'A', 'B', 'C'][i] })) }));
+  const src3 = copySlots(usedImageSlots({ ...triple, slots: triple.slots.map((s, i) => ({ ...s, mediaId: ['A', 'B', 'C'][i] })) }));
   // 一個人 → 三人：三個都是他；背景來源沒有 → 保留
   const one = copySlots(usedImageSlots({ ...fly, slots: fly.slots.map((s) => (s.role === 'subject' ? { ...s, mediaId: 'P' } : s)) }));
-  assert.deepEqual(ids({ slots: pasteSlots(triple, one, { usable }).slots }), { background: 'old', p1: 'P', p2: 'P', p3: 'P' });
+  assert.deepEqual(ids({ slots: pasteSlots(triple, one, { usable }).slots }), { p1: 'P', p2: 'P', p3: 'P' });
+  const duo = comboItem('duoClash', { id: 'd', start: 0, duration: 2, track: 0, under: { mediaId: 'old', sourceTime: 0 } });
+  assert.deepEqual(ids({ slots: pasteSlots(duo, one, { usable }).slots }), { background: 'old', p1: 'P', p2: 'P' });
   // 三人 → 一個主體：用第一個
   assert.equal(pasteSlots(fly, src3, { usable }).slots.find((s) => s.role === 'subject')!.mediaId, 'A');
   // 分身沒有對應的：跟著主體
-  assert.deepEqual(ids({ slots: pasteSlots(echo, src3, { usable }).slots }), { background: 'bg', echo1: 'A', echo2: 'A', subject: 'A' });
+  assert.deepEqual(ids({ slots: pasteSlots(echo, src3, { usable }).slots }), { echo1: 'A', echo2: 'A', subject: 'A' });
   // 遺失的素材略過
   const lost = { slots: [{ role: 'subject' as const, image: { mediaId: 'gone', sourceTime: 0 } }, { role: 'subject' as const, image: { mediaId: 'Q', sourceTime: 1 } }] };
-  assert.deepEqual(ids({ slots: pasteSlots(triple, lost, { usable }).slots }), { background: 'old', p1: 'Q', p2: 'Q', p3: 'Q' });
+  assert.deepEqual(ids({ slots: pasteSlots(triple, lost, { usable }).slots }), { p1: 'Q', p2: 'Q', p3: 'Q' });
   // 全用同一張：全部第一個主體
   assert.ok(pasteSlots({ ...triple, sameMedia: true }, src3, { usable }).slots.every((s) => s.mediaId === 'A'));
   // 多個動畫：依序分配（6 人 → 前三、後三），一次就好
@@ -214,15 +239,27 @@ console.log('PASS animation store operations and undo');
   // 透過 store：複製 → 貼到兩個動畫
   const media = ['bg', 'A', 'B', 'C', 'old'].map((id) => ({ id, name: id, kind: 'image', url: '', thumb: '', duration: 1, width: 10, height: 10 })) as any;
   const t2 = { ...triple, id: 't2', start: 3 };
-  const src = { ...triple, id: 'src', start: 6, slots: triple.slots.map((s, i) => ({ ...s, mediaId: ['bg', 'A', 'B', 'C'][i] })) };
+  const src = { ...triple, id: 'src', start: 6, slots: triple.slots.map((s, i) => ({ ...s, mediaId: ['A', 'B', 'C'][i] })) };
   useStore.setState({ media, anims: [triple, t2, src], clips: [], tracks: { video: [{}], fx: [], audio: [] } });
   assert.ok(copyAnimImages('src'));
   assert.equal(pasteAnimImages(['t2', 't']), 2);
   const got = useStore.getState().anims.find((a) => a.id === 't2')!;
-  assert.deepEqual(ids(got), { background: 'bg', p1: 'A', p2: 'B', p3: 'C' });
+  assert.deepEqual(ids(got), { p1: 'A', p2: 'B', p3: 'C' });
   // 單一列
   assert.ok(copyAnimImages('src', 'p3'));
   pasteAnimImages(['t'], 'p1');
   assert.equal(useStore.getState().anims.find((a) => a.id === 't')!.slots.find((s) => s.id === 'p1')!.mediaId, 'C');
   console.log('PASS copy / paste animation images');
+}
+
+{
+  // 整體遮罩：沒有形狀 = 不套；關鍵影格用拍
+  const base = animTemplate('spin', { id: 'm', start: 0, duration: 4 });
+  assert.equal(animMaskAt(base, 1), null);
+  const mask = { shape: 'ellipse', invert: false, x: 0, y: 0, w: 0.5, h: 0.5, feather: 0, rotation: 0 };
+  const item = { ...base, mask: { mask, keys: { 'mask.x': [{ id: 'k0', t: 0, v: 0, ease: [0, 0, 1, 1] as [number, number, number, number] }, { id: 'k1', t: 2, v: 0.4, ease: [0, 0, 1, 1] as [number, number, number, number] }] } } };
+  assert.equal(animMaskAt(item, 1)!.x, 0.2);
+  assert.equal(animMaskAt(item, 1)!.w, 0.5);
+  assert.equal(animMaskAt({ ...item, mask: { mask: { ...mask, shape: 'none' } } }, 1), null);
+  console.log('PASS whole-animation mask');
 }

@@ -1,4 +1,4 @@
-import { confidentLead, cosine, findLead, followableLead, isLead, leadInfo, leadShare, pickedLead, refineLead, similarity, SFACE_DST, type FacesAt } from '../src/engine/faceLead';
+import { confidentLead, cosine, findLead, followableLead, guessLead, isLead, leadInfo, leadShare, pickedLead, refineLead, similarity, SFACE_DST, type FacesAt } from '../src/engine/faceLead';
 import type { MediaInfo } from '../src/engine/mediaAnalysis';
 
 let fails = 0;
@@ -85,7 +85,19 @@ ok(cosine(vec(1), vec(1, 0.1)) > 0.9 && Math.abs(cosine(vec(1), vec(2))) < 0.3, 
   ok(r.faces[5]?.x === 0.7 && r.people[5] > 0 && r.people[2] === 0, '沒取樣的點用最近的');
 }
 
+// 認不出主角時：同框最像主角、而且明顯比別人像的那張臉；差不多像 / 都不像 = 不猜
+{
+  const lead = pickedLead([1, 0, 0]);
+  const me = { x: 0.3, y: 0.4, h: 0.2, emb: [0.25, 0.97, 0] };   // cos ≈ 0.25（側臉，沒到 IS_LEAD）
+  const other = { x: 0.8, y: 0.4, h: 0.25, emb: [0.02, 0, 1] };
+  ok(guessLead([other, me], lead) === me, '認不出主角：挑同框最像的');
+  ok(guessLead([me, { ...other, emb: [0.2, 0.98, 0] }], lead) === null, '兩個差不多像：不猜');
+  ok(guessLead([other], lead) === null, '都不像：不猜');
+  ok(guessLead([{ ...me, emb: undefined }], lead) === null, '沒有特徵：不猜');
+}
+
 if (fails) {
   console.log(`\n${fails} 個失敗`);
   process.exit(1);
 }
+

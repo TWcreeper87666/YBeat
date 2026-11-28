@@ -1,4 +1,4 @@
-import { $t, LANGS, lang, saveLang, type Lang } from './i18n';
+import { $t, keyLabel, LANGS, lang, saveLang, type Lang } from './i18n';
 import { Check, CircleDot, CircleHelp, LoaderCircle } from 'lucide-react';
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
@@ -23,7 +23,7 @@ import { fps } from './engine/rulerTicks';
 import { copyHits, copyKeys, cutHits, deleteSelectedHit, deleteSelectedKey, duplicateHits, hitEdge, hitsFocused, keysFocused, navHit, navHitEdge, nudgeHits, nudgeKeys, pasteHits, pasteKeys, selectAllHits, selectAllKeys, splitHit, trimHit } from './ui/EffectControls';
 import { ShapeDrawerHost } from './ui/ShapeDrawer';
 import { HELP_GPU, SHORTCUTS, TUTORIAL } from './ui/helpText';
-import { useLayout, toast, setBusy, stopPreviewFx, confirmDialog, promptDialog, openMenu, useConfirm, type MenuItem } from './ui/uiStore';
+import { useLayout, toast, setBusy, stopPreviewFx, confirmDialog, promptDialog, openMenu, closeMenu, useConfirm, useMenu, type MenuItem } from './ui/uiStore';
 import { formatBytes, measureUsage, wipeAllData, type Usage } from './engine/storageUsage';
 import { DragNumber } from './ui/DragNumber';
 import { OVERLAY_DEFAULT, usePrefs, type OverlayColors } from './prefs';
@@ -117,7 +117,7 @@ function Keys({ k }: { k: string }) {
       {alts.map((alt, i) => (
         <Fragment key={i}>
           {i > 0 && <span className="help-or">/</span>}
-          {alt.split(/\+(?=.)/).map((part, j) => <kbd key={j}>{part}</kbd>)}
+          {alt.split(/\+(?=.)/).map((part, j) => <kbd key={j}>{keyLabel(part)}</kbd>)}
         </Fragment>
       ))}
     </span>
@@ -712,6 +712,16 @@ function selRange(): { a: number; b: number } | null {
 /** 時間軸捲到看得到播放頭（時間沒變也要捲，例如已經在 0 秒時按 Home） */
 const revealPlayhead = () => requestAnimationFrame(() => window.dispatchEvent(new Event('timeline-reveal-playhead')));
 
+const REPEATABLE = new Set(['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', '=', '+', '-']);
+
+/** 編輯視窗開著時還能用的快捷鍵（關鍵影格 / 作用列的快捷鍵另外處理） */
+function editorKeyOk(e: KeyboardEvent, mod: boolean, k: string) {
+  if (keysFocused() || hitsFocused()) return true;
+  if (mod) return k === 'z' || k === 'y' || k === 's';
+  if (e.altKey) return false;
+  return [' ', 'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'F1', 'Escape'].includes(e.key);
+}
+
 function onKey(e: KeyboardEvent) {
   const el = e.target as HTMLElement;
   if (isTextField(el)) return; // 只有打字欄位攔住快捷鍵（滑桿、下拉選單等由 focus.ts 處理）
@@ -728,6 +738,18 @@ function onKey(e: KeyboardEvent) {
     return;
   }
   const k = e.key.toLowerCase();
+  // 右鍵選單 / 選單列開著：Esc 交給選單（只關選單，不取消選取）；其他快捷鍵先關掉選單再照常作用
+  if (useMenu.getState().menu) {
+    if (e.key === 'Escape') return;
+    if (!['Shift', 'Control', 'Alt', 'Meta'].includes(e.key)) closeMenu();
+  }
+  // 按住不放：只有移動類（方向鍵、縮放、復原 / 重做）重複；其他是一次性的動作（N / Space 不會一直來回切、M 不會疊一堆標記）
+  if (e.repeat && !REPEATABLE.has(e.key) && !(mod && (k === 'z' || k === 'y'))) {
+    if (e.key === ' ') e.preventDefault();
+    return;
+  }
+  // 編輯視窗開著：只留播放、移動播放頭、復原 / 存檔這類；分割、刪除、貼上等改時間軸結構的不作用（會改到正在編輯的片段）
+  if (useEditorWindow.getState().open && !editorKeyOk(e, mod, k)) return;
   const frame = 1 / fps();
   // 有選取文字（例如程式碼的錯誤訊息）：Ctrl+C 交給瀏覽器複製文字
   if (mod && k === 'c' && getSelection()?.toString()) return;
@@ -789,6 +811,8 @@ function onKey(e: KeyboardEvent) {
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') { e.preventDefault(); return navItem(e.key === 'ArrowLeft' ? -1 : 1, e.shiftKey); }
     if (e.key === 'Home' || e.key === 'End') { e.preventDefault(); return navEdge(e.key === 'Home' ? 'first' : 'last', e.shiftKey); }
     if (e.key === 'ArrowUp' || e.key === 'ArrowDown') { e.preventDefault(); return navRow(e.key === 'ArrowUp' ? -1 : 1); }
+    // Ctrl+Shift+字母：只有 Ctrl+Shift+Z（重做）、Ctrl+Shift+G（解除群組）有定義，其他不要當成 Ctrl+字母
+    if (e.shiftKey && k !== 'z' && k !== 'g' && e.key !== 'Delete' && e.key !== 'Backspace') return;
     if (k === 'z') { e.preventDefault(); e.shiftKey ? redo() : undo(); }
     else if (k === 'y') { e.preventDefault(); redo(); }
     else if (k === 'c') s.copy();
@@ -824,7 +848,7 @@ function onKey(e: KeyboardEvent) {
     case 'ArrowDown': { e.preventDefault(); const p = editPoints().find((t) => t > s.time + 1e-3); if (p !== undefined) s.setTime(p); break; }
     case 'Escape': stopPreviewFx(); closeSource(); s.setLoop(null); s.select(null); break;
     case 'F1': e.preventDefault(); openDialog('shortcuts'); break;
-    case 'Enter': if (s.selection?.type === 'clip' || s.selection?.type === 'effect' || s.selection?.type === 'transition') { e.preventDefault(); openEditorWindow(); } break;
+    case 'Enter': if (s.selection?.type === 'clip' || s.selection?.type === 'effect' || s.selection?.type === 'transition' || s.selection?.type === 'anim') { e.preventDefault(); openEditorWindow(); } break;
     case '=': case '+': s.setPps(s.pps * 1.25); break;
     case '-': s.setPps(s.pps / 1.25); break;
     case '\\': window.dispatchEvent(new Event('timeline-fit')); break;
@@ -836,6 +860,8 @@ function onKey(e: KeyboardEvent) {
           if (previous.length) { s.setTime(previous[previous.length - 1].t); revealPlayhead(); }
         } else s.addMarker(s.time);
       }
+      // 單鍵：加 Shift / Alt 不算（Shift+M 上面另外處理）
+      else if (e.shiftKey || e.altKey) return;
       else if (k === 's') s.split();
       else if (k === 'q') s.trim('start');
       else if (k === 'w') s.trim('end');
@@ -894,7 +920,7 @@ export default function App() {
           <Globe size={15} />
           <span>{LANGS.find((l) => l.id === lang)!.label}</span>
         </button>
-        <button className="title-icon" title={$t('設定') + ' (Ctrl+,)'} onClick={() => openDialog('settings')}>
+        <button className="title-icon" title={$t('設定') + keyLabel(' (Ctrl+,)')} onClick={() => openDialog('settings')}>
           <Settings size={15} />
         </button>
         <button className="btn primary small-h" onClick={() => openDialog('export')}>{$t('匯出影片')}</button>

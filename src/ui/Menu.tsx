@@ -1,4 +1,4 @@
-import { $t } from '../i18n';
+import { $t, keyLabel } from '../i18n';
 import { Check, ChevronRight } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { closeMenu, openMenu, useConfirm, useDrag, useMenu, useToast, type MenuItem } from './uiStore';
@@ -95,7 +95,7 @@ function MenuList({ items, at, from }: { items: MenuItem[]; at: { x: number; y: 
             >
               <span className="mcheck">{it.checked ? <Check size={11} /> : ''}</span>
               <span className="mlabel">{it.label}</span>
-              <kbd>{it.shortcut ?? ''}</kbd>
+              <kbd>{keyLabel(it.shortcut ?? '')}</kbd>
             </button>
           ),
         )}

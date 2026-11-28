@@ -21,9 +21,9 @@ export const PANELS: { id: PanelId; title: string }[] = [
   { id: 'lyrics', title: $t('字幕／歌詞') },
   { id: 'transition', title: $t('轉場') },
   { id: 'effect', title: $t('特效') },
+  { id: 'anim', title: $t('動畫') },
   { id: 'mask', title: $t('遮罩') },
   { id: 'remap', title: $t('變速') },
-  { id: 'anim', title: $t('動畫') },
   { id: 'inspector', title: $t('屬性') },
   { id: 'code', title: $t('程式碼') },
   { id: 'ai', title: 'AI' },
@@ -32,7 +32,7 @@ export const PANELS: { id: PanelId; title: string }[] = [
   { id: 'timeline', title: $t('時間軸') },
 ];
 const TITLE = Object.fromEntries(PANELS.map((p) => [p.id, p.title])) as Record<PanelId, string>;
-const LIB: PanelId[] = ['media', 'color', 'text', 'transition', 'effect', 'mask', 'remap', 'anim', 'lyrics'];
+const LIB: PanelId[] = ['media', 'color', 'text', 'transition', 'effect', 'anim', 'mask', 'remap', 'lyrics'];
 const SIDE: PanelId[] = ['inspector', 'ai', 'auto', 'code'];
 
 /** 內建版面 */
@@ -119,7 +119,7 @@ export const useDock = create<DockState>()(
     }),
     {
       name: 'ybeat-dock',
-      // known = 存檔時已經有的分頁：之後新增的分頁（存檔裡沒有、也不是使用者自己關掉的）放進「變速」那一組
+      // known = 存檔時已經有的分頁：之後新增的分頁（存檔裡沒有、也不是使用者自己關掉的）放進素材庫那一組，排在預設版面裡它前面那個分頁的後面
       partialize: (s) => ({ layout: s.layout, current: s.current, customs: s.customs, known: PANELS.map((p) => p.id) }),
       merge: (saved, cur) => {
         const p = saved as Partial<DockState> & { known?: PanelId[] };
@@ -128,7 +128,10 @@ export const useDock = create<DockState>()(
         for (const { id } of PANELS) {
           if (known.includes(id) || !layout || panelsIn(layout).includes(id)) continue;
           const g = findGroup(layout, (t) => t.tabs.includes('remap')) ?? findGroup(layout, (t) => t.tabs.includes('media'));
-          if (g) layout = mapTabs(layout, (t) => (t.id === g.id ? { ...t, tabs: [...t.tabs, id] } : t));
+          if (!g) continue;
+          const before = LIB.slice(0, Math.max(0, LIB.indexOf(id))).reverse().find((x) => g.tabs.includes(x));
+          const at = before ? g.tabs.indexOf(before) + 1 : g.tabs.length;
+          layout = mapTabs(layout, (t) => (t.id === g.id ? { ...t, tabs: [...t.tabs.slice(0, at), id, ...t.tabs.slice(at)] } : t));
         }
         return { ...cur, ...p, layout };
       },

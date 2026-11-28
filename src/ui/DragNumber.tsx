@@ -118,7 +118,7 @@ export function DragNumber({
         locked = true;
       }
       let v = start + acc * perPx * (ev.shiftKey ? 0.1 : 1);
-      if (ev.ctrlKey) v = Math.round(v / (st * 10)) * st * 10;
+      if (ev.ctrlKey || ev.metaKey) v = Math.round(v / (st * 10)) * st * 10;
       onChange(round(clamp(v)));
     };
     const up = () => {

@@ -32,7 +32,7 @@ import { tc } from '../engine/rulerTicks';
 import { CURVE_ID, curveCode, defaultCurveKeys, keysToCurve } from '../engine/remapCurve';
 
 /** 混合模式選單（函式：語言在載入時決定） */
-const BLENDS = (): Record<BlendMode, string> => ({
+export const BLENDS = (): Record<BlendMode, string> => ({
   normal: $t('一般'),
   add: $t('加亮（相加）'),
   screen: $t('濾色'),
@@ -1269,10 +1269,10 @@ function ClipInspector({ id }: { id: string }) {
   );
 }
 
-type FxLike = { moduleId: string; params: ParamValues; keys?: Record<string, Keyframe[]>; mask?: Mask; audio?: Record<string, AudioDrive>; follow?: FollowMap };
+export type FxLike = { moduleId: string; params: ParamValues; keys?: Record<string, Keyframe[]>; mask?: Mask; audio?: Record<string, AudioDrive>; follow?: FollowMap };
 
 /** 遮罩的屬性列：形狀（＋繪製）、在預覽中編輯、反轉，以及位置 / 大小等可打關鍵影格的屬性 */
-function maskBlock(
+export function maskBlock(
   f: FxLike,
   local: number,
   update: (p: Partial<FxLike>) => void,

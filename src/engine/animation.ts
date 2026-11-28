@@ -2,6 +2,8 @@ import { evalKeys, type Keyframe, type Keys } from './keyframes';
 import { expandPop, POP_VARIANTS, type PopVariant } from './subjectPop';
 import type { ClipFx } from '../store';
 import type { Crop } from './transform';
+import { DEFAULT_TRANSFORM, type Transform } from './transform';
+import { maskAt, type Mask } from './mask';
 
 export interface AnimSlot {
   id: string;
@@ -11,6 +13,8 @@ export interface AnimSlot {
   sourceTime: number;
   crop?: Crop;
   cutout?: { mode: 'auto' | 'off'; outline?: string };
+  /** 不顯示（用到這個位置的圖層都不畫；例如不要背景，看下面的軌道） */
+  hidden?: true;
 }
 
 export interface AnimLayer {
@@ -23,7 +27,8 @@ export interface AnimLayer {
   /** 沒有關鍵影格的屬性用這個值（沒有 = 預設：位置 0、縮放 1、透明度 1） */
   base?: Partial<Record<keyof Keys, number>>;
   blend?: 'normal' | 'add' | 'screen' | 'multiply' | 'subtract' | 'lighten';
-  mask?: { slotId: string; layerId?: string; mode: 'window' | 'hole'; scale?: Keyframe[] };
+  /** pivot：遮罩縮放的中心（畫面寬 / 高的比例，相對參考圖層的中心；沒有 = 參考圖層的中心） */
+  mask?: { slotId: string; layerId?: string; mode: 'window' | 'hole'; scale?: Keyframe[]; pivot?: { x: number; y: number } };
   effects?: (ClipFx & { beatEvery?: 1 | 2; hitBeats?: number })[];
   text?: string;
 }
@@ -40,10 +45,14 @@ export interface AnimItem {
   link?: string;
   slots: AnimSlot[];
   layers: AnimLayer[];
+  transform?: Transform;
+  keys?: Keys;
   beatTimes?: number[];
   presetId?: string;
   /** 所有圖片位置用同一張（換一張 = 全部一起換） */
   sameMedia?: true;
+  /** 整體的遮罩（跟片段遮罩一樣：遮罩內保留、遮罩外透明）；關鍵影格（mask.x…）用拍 */
+  mask?: { mask: Mask; keys?: Record<string, Keyframe[]> };
 }
 
 export interface AnimDrawLayer {
@@ -56,10 +65,40 @@ export interface AnimDrawLayer {
   scaleY: number;
   rotation: number;
   opacity: number;
+  /** Pixel-space forward matrix, column-major. */
+  matrix?: [number, number, number, number];
   mask?: AnimLayer['mask'];
 }
 
 const value = (keys: Keyframe[] | undefined, beat: number, fallback: number) => keys?.length ? evalKeys(keys, beat) : fallback;
+export function animTransformAt(item: AnimItem, beat: number): Transform {
+  const base = item.transform ?? DEFAULT_TRANSFORM;
+  return { x: value(item.keys?.x, beat, base.x), y: value(item.keys?.y, beat, base.y),
+    scaleX: value(item.keys?.scaleX, beat, base.scaleX), scaleY: value(item.keys?.scaleY, beat, base.scaleY),
+    rotation: value(item.keys?.rotation, beat, base.rotation), opacity: value(item.keys?.opacity, beat, base.opacity) };
+}
+
+/** Combine positions in screen pixels, where x and y use different normalized axes. */
+export function composeAnimTransform(layer: Transform, whole: Transform, aspect: number): Transform {
+  const rad = whole.rotation * Math.PI / 180;
+  const dx = layer.x * aspect * whole.scaleX, dy = layer.y * whole.scaleY;
+  return { x: whole.x + (dx * Math.cos(rad) - dy * Math.sin(rad)) / aspect,
+    y: whole.y + dx * Math.sin(rad) + dy * Math.cos(rad),
+    scaleX: layer.scaleX * whole.scaleX, scaleY: layer.scaleY * whole.scaleY,
+    rotation: layer.rotation + whole.rotation, opacity: layer.opacity * whole.opacity };
+}
+
+export function animMatrix(layer: Transform, whole: Transform): [number, number, number, number] {
+  const a = layer.rotation * Math.PI / 180, b = whole.rotation * Math.PI / 180;
+  const ca = Math.cos(a), sa = Math.sin(a), cb = Math.cos(b), sb = Math.sin(b);
+  const m00 = whole.scaleX * ca * layer.scaleX, m10 = whole.scaleY * sa * layer.scaleX;
+  const m01 = -whole.scaleX * sa * layer.scaleY, m11 = whole.scaleY * ca * layer.scaleY;
+  return [cb * m00 - sb * m10, sb * m00 + cb * m10,
+    cb * m01 - sb * m11, sb * m01 + cb * m11];
+}
+/** 整體遮罩在第 beat 拍的樣子（沒有形狀 = null） */
+export const animMaskAt = (item: AnimItem, beat: number) => maskAt(item.mask?.mask, item.mask?.keys, beat);
+
 /** 時間軸時間 t → 項目內的拍（照項目自己的拍點；拍點外用 beatTime 外插） */
 export const animBeatAtTime = (item: AnimItem, t: number, beatTime: number) => beatAt(item, t, beatTime);
 const beatAt = (item: AnimItem, t: number, beatTime: number) => {
@@ -90,19 +129,23 @@ export function animSecAt(item: Pick<AnimItem, 'beatTimes' | 'duration'>, beat: 
   return g[g.length - 1] + (beat - (g.length - 1)) * len;
 }
 
-export function animLayers(item: AnimItem, t: number, beatTime: number): AnimDrawLayer[] {
+export function animLayers(item: AnimItem, t: number, beatTime: number, aspect = 1): AnimDrawLayer[] {
   if (t < item.start || t >= item.start + item.duration || beatTime <= 0) return [];
   const beat = beatAt(item, t, beatTime);
+  const whole = animTransformAt(item, beat);
   const slots = new Map(item.slots.map((s) => [s.id, s]));
   return item.layers.flatMap((layer) => {
     const slot = slots.get(layer.slotId);
-    if (!slot || (!slot.mediaId && !layer.text) || beat < layer.fromBeat || beat >= layer.toBeat) return [];
+    if (!slot || slot.hidden || (!slot.mediaId && !layer.text) || beat < layer.fromBeat || beat >= layer.toBeat) return [];
     const b = beat, k = layer.keys, o = layer.base ?? {};
-    return [{ id: layer.id, slot, layer,
+    const own: Transform = {
       x: value(k.x, b, o.x ?? 0), y: value(k.y, b, o.y ?? 0),
       scaleX: value(k.scaleX, b, o.scaleX ?? 1), scaleY: value(k.scaleY, b, o.scaleY ?? 1),
       rotation: value(k.rotation, b, o.rotation ?? 0), opacity: value(k.opacity, b, o.opacity ?? 1),
-      mask: layer.mask }];
+    };
+    const xf = !item.transform && !item.keys ? own : composeAnimTransform(own, whole, aspect);
+    return [{ id: layer.id, slot, layer, ...xf,
+      ...(!item.transform && !item.keys ? {} : { matrix: animMatrix(own, whole) }), mask: layer.mask }];
   });
 }
 
@@ -139,8 +182,13 @@ export function animTemplate(variant: PopVariant, opts: { id: string; start: num
     const keys: Keys = {};
     for (const [prop, list] of Object.entries(l.keys ?? {}))
       keys[prop as keyof Keys] = list.map((k, j) => ({ id: `${i}-${prop}-${j}`, t: k.t + l.t0, v: k.v, ease: ease(k.ease) }));
+    // 去背層自己的輪廓（逐拍放大、黑白背景…）：遮罩跟著這一層本身（縮放、位移都一樣），不另外縮放
+    const self = l.mask && l.matte;
     const mask = l.mask ? { slotId: 'subject', mode: l.mask.invert ? 'hole' as const : 'window' as const,
-      scale: l.mask.scale.map((k, j) => ({ id: `${i}-mask-${j}`, t: k.t + l.t0, v: k.v, ease: ease(k.ease) })) } : undefined;
+      // 剪影窗 / 主體挖洞：以主體中心逐拍放大
+      ...(self ? { layerId: `layer-${i}` } : {
+        scale: l.mask.scale.map((k, j) => ({ id: `${i}-mask-${j}`, t: k.t + l.t0, v: k.v, ease: ease(k.ease) })),
+        pivot: { x: opts.cx ?? 0, y: opts.cy ?? 0 } }) } : undefined;
     return { id: `layer-${i}`, slotId, fromBeat: l.t0, toBeat: l.t1, keys, blend: l.blend, mask,
       text: variant === 'textBehind' && i === 1 ? opts.text : undefined,
       // 文字放在畫面偏上（主體的頭附近）

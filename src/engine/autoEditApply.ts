@@ -22,7 +22,7 @@ import { ensureMatte, matteAt, MATTE_SIZE } from './matte';
 import { directMedia, directorShots } from '../ai/director';
 import { countdown } from '../ai/gemini';
 import { bestFace, freeRoom, peopleScore, type FaceBox } from './mediaAnalysis';
-import { confidentLead, findLead, followableLead, isLead, leadInfo, leadShare, pickedLead, refineLead, type Lead } from './faceLead';
+import { confidentLead, findLead, followableLead, guessLead, isLead, leadInfo, leadShare, pickedLead, refineLead, type Lead } from './faceLead';
 import { padBox } from './faceTrack';
 import { aiErrorText, toAiError, useAiSettings } from '../ai/assistant';
 export { useAutoEdit, type AutoEditSettings };
@@ -678,11 +678,16 @@ function applyLead(sampled: Map<string, Sampled>, lead: Lead, strong: boolean) {
         return b ? [{ t: i * x.info!.step, x: b.x, y: b.y, w: b.w ?? b.h, h: b.h }] : [];
       });
       if (pts.length) files++;
+      const near = r.states.flatMap((s, i) => {
+        const b = s === 'lead' ? null : guessLead(x.info!.facesAt![i], lead);
+        return b ? [{ t: i * x.info!.step, x: b.x, y: b.y, w: b.w ?? b.h, h: b.h }] : [];
+      });
+      const nearPt = near.length ? { leadNear: near } : {};
       if (!strong) {
-        extra.set(id, { leadKnown: true, ...(pts.length ? { leadPts: pts } : {}) });
+        extra.set(id, { leadKnown: true, ...(pts.length ? { leadPts: pts } : {}), ...nearPt });
         continue;
       }
-      extra.set(id, { info: { ...x.info, faces: r.faces, people: r.people }, people: r.people.reduce((s, v) => s + v, 0) / Math.max(1, r.people.length), ban: r.ban, leadPts: pts, leadKnown: true });
+      extra.set(id, { info: { ...x.info, faces: r.faces, people: r.people }, people: r.people.reduce((s, v) => s + v, 0) / Math.max(1, r.people.length), ban: r.ban, leadPts: pts, leadKnown: true, ...nearPt });
       spans += r.ban.length;
       // 給 AI 導演看：這一格有沒有主角
       const step = x.info.step, sampledIdx = r.states.map((s, i) => (s ? i : -1)).filter((i) => i >= 0);
@@ -694,7 +699,9 @@ function applyLead(sampled: Map<string, Sampled>, lead: Lead, strong: boolean) {
     } else if (x.faceList?.length) {
       const lf = x.faceList.filter((f) => isLead(f, lead)).sort((p, q) => q.h - p.h)[0];
       if (lf) files++;
-      const pt = lf ? { leadPts: [{ t: 0, x: lf.x, y: lf.y, w: lf.w ?? lf.h, h: lf.h }] } : {};
+      const gf = lf ? null : guessLead(x.faceList, lead);
+      const pt = lf ? { leadPts: [{ t: 0, x: lf.x, y: lf.y, w: lf.w ?? lf.h, h: lf.h }] }
+        : gf ? { leadNear: [{ t: 0, x: gf.x, y: gf.y, w: gf.w ?? gf.h, h: gf.h }] } : {};
       if (!strong) {
         extra.set(id, { leadKnown: true, ...(lf ? { face: lf, ...pt } : {}) });
         continue;

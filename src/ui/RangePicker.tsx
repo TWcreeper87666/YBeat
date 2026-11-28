@@ -480,3 +480,46 @@ function CropBox({ crop, set, k, onStart, onClick }: { crop: Crop; set: (c: Crop
     </>
   );
 }
+
+/** 只裁切的視窗（動畫的圖片位置）：圖片 / 影片的某一格 + 裁切框 + 比例 */
+export function CropDialog({ m, time = 0, init, onCommit, onClose }: { m: Media; time?: number; init?: Crop; onCommit: (crop: Crop | undefined) => void; onClose: () => void }) {
+  const [crop, setCrop] = useState<Crop>(init ?? FULL);
+  const out = useStore((s) => s.format);
+  const [ratio, setRatioState] = useState<Ratio>(init && !isFullCrop(init) ? 'free' : lastRatio);
+  const k = ratioK(ratio, m, out);
+  const setRatio = (r: Ratio) => {
+    lastRatio = r;
+    setRatioState(r);
+    const kk = ratioK(r, m, out);
+    if (kk) setCrop((c) => maxCrop(kk, c.x + c.w / 2, c.y + c.h / 2));
+  };
+  useEffect(() => { if (k && (!init || isFullCrop(init))) setCrop(maxCrop(k)); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); onClose(); } };
+    window.addEventListener('keydown', key, true);
+    return () => window.removeEventListener('keydown', key, true);
+  }, [onClose]);
+  const ok = () => { onCommit(isFullCrop(crop) ? undefined : crop); onClose(); };
+  return (
+    <div className="overlay" style={{ zIndex: 300 }} onPointerDown={(e) => e.target === e.currentTarget && onClose()}>
+      <div className="dialog wide ae-range">
+        <h3 title={m.name}>{m.name}</h3>
+        <div className="ae-range-video cropping">
+          {m.kind === 'video'
+            ? <video src={m.url} muted playsInline preload="auto" onLoadedMetadata={(e) => { e.currentTarget.currentTime = time; }} />
+            : <img src={m.url} alt="" draggable={false} />}
+          <CropBox crop={crop} set={setCrop} k={k} onStart={() => {}} onClick={() => {}} />
+        </div>
+        <div className="ae-line">
+          <span className="spacer" />
+          {!isFullCrop(crop) && <span className="ae-stat">{Math.round(crop.w * m.width)}×{Math.round(crop.h * m.height)}</span>}
+        </div>
+        <div className="dialog-actions">
+          <Seg className="ae-ratio" value={ratio} on={setRatio} opts={RATIOS.map((r) => ({ v: r, label: r === 'free' ? $t('自由') : r === 'out' ? $t('輸出比例') : r, title: r === 'out' ? `${$t('裁切比例')} · ${out.w} × ${out.h}` : $t('裁切比例') }))} />
+          <button className="btn" onClick={onClose}>{$t('取消')}</button>
+          <button className="btn primary" onClick={ok}>{$t('確定')}</button>
+        </div>
+      </div>
+    </div>
+  );
+}

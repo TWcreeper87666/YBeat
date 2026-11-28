@@ -121,6 +121,25 @@ const inside = (el: HTMLElement, p: { x: number; y: number } | null) => {
   return p.x >= r.left && p.x <= r.right && p.y >= r.top && p.y <= r.bottom;
 };
 
+/**
+ * 捲軸要疊在哪一層：一般面板 = BASE（在面板內容上面、浮動視窗 / 對話框 / 選單下面）；
+ * 捲動區塊在浮動的層（對話框、挑選視窗、編輯視窗…）裡 = 那一層再上面一點。
+ */
+const BASE_Z = 45;
+const layerZ = new WeakMap<HTMLElement, number>();
+function zFor(el: HTMLElement): number {
+  let z = layerZ.get(el);
+  if (z !== undefined) return z;
+  z = BASE_Z;
+  for (let p: HTMLElement | null = el; p; p = p.parentElement) {
+    const cs = getComputedStyle(p);
+    const n = Number(cs.zIndex);
+    if (cs.position === 'fixed' && Number.isFinite(n)) z = Math.max(z, n + 1);
+  }
+  layerZ.set(el, z);
+  return z;
+}
+
 /** 每一格更新位置；都看不到了就停 */
 function frame() {
   raf = 0;
@@ -132,7 +151,10 @@ function frame() {
     const g = geom(b);
     const show = !!g && g.range > 1 && (b.drag || now < b.until || inside(b.el!, pointer));
     b.root.classList.toggle('on', show);
-    if (b.el) b.root.classList.toggle('thin', thin(b.el));
+    if (b.el) {
+      b.root.classList.toggle('thin', thin(b.el));
+      b.root.style.zIndex = String(zFor(b.el));
+    }
     if (g) {
       Object.assign(b.root.style, { left: `${g.x}px`, top: `${g.y}px`, width: `${g.w}px`, height: `${g.h}px` });
       if (axis === 'v') Object.assign(b.thumb.style, { top: `${g.pos}px`, height: `${g.len}px` });

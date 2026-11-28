@@ -27,6 +27,8 @@ interface Layout {
   clipTab: 'frame' | 'speed' | 'sound';
   /** 效果控制：收合的區塊 */
   ecCollapsed: Record<string, boolean>;
+  /** 效果控制的篩選：全部 / 有關鍵影格 / 已修改 */
+  ecFilter: 'all' | 'keys' | 'edited';
   /** 素材庫顯示方式 / 篩選 */
   libView: Record<string, 'list' | 'grid'>;
   mediaFilter: 'all' | 'video' | 'image' | 'audio';
@@ -64,7 +66,7 @@ interface Layout {
   set(p: Partial<Omit<Layout, 'set' | 'reset'>>): void;
   reset(): void;
 }
-const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, beatDivision: 1 as const, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], previewScale: 1, repeat: false, scrubAudio: true, beatLead: 4, timeGrid: 60 as TimeGrid, wheelScroll: 'horizontal' as Layout['wheelScroll'], upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300, libCard: 84, libRow: 30, previewBg: '', trackSize: 'm' as Layout['trackSize'] };
+const LAYOUT_DEFAULT = { leftW: 480, timelineH: 320, codeH: 320, floating: false, floatRect: { x: 120, y: 60, w: 360, h: 640 }, grid: false, gridRows: 3, gridCols: 3, gridCenter: true, gridSafe: true, beats: true, beatDivision: 1 as const, codeOpen: false, clipTab: 'frame' as const, ecCollapsed: {} as Record<string, boolean>, ecFilter: 'all' as Layout['ecFilter'], libView: { media: 'grid', transition: 'grid', effect: 'grid', remap: 'list', text: 'grid' } as Record<string, 'list' | 'grid'>, mediaFilter: 'all' as Layout['mediaFilter'], previewScale: 1, repeat: false, scrubAudio: true, beatLead: 4, timeGrid: 60 as TimeGrid, wheelScroll: 'horizontal' as Layout['wheelScroll'], upperLayerAt: 'bottom' as Layout['upperLayerAt'], modCat: {} as Record<string, string>, libFilterOpen: {} as Record<string, boolean>, editorLayout: 'auto' as Layout['editorLayout'], editorSplit: { stacked: 0.6, side: 0.42 }, ecLeftPx: 300, libCard: 84, libRow: 30, previewBg: '', trackSize: 'm' as Layout['trackSize'] };
 
 export const useLayout = create<Layout>()(
   persist(
@@ -155,6 +157,8 @@ export type DropTarget =
   | { kind: 'aeSong'; mediaId: string; whole: boolean }
   /** 素材拖到屬性面板裡動畫的某個圖片位置：換那一張 */
   | { kind: 'animSlot'; animId: string; slotId: string }
+  /** 特效拖到屬性面板裡動畫的某個圖層（或那個圖層的特效）：加到那個圖層 */
+  | { kind: 'animLayer'; animId: string; layerId: string }
   | null;
 
 export interface DragState {
@@ -182,16 +186,20 @@ export const useColorPick = create<{ pick: ((hex: string) => void) | null }>(() 
 
 // ───────────── 屬性面板中選取的關鍵影格 ─────────────
 
+/** 預覽上選中的動畫物件（動畫裡的某一個圖層）：拖它 = 整個圖層連同關鍵影格一起移動 */
+export const useAnimPick = create<{ animId: string | null; layerId: string | null }>(() => ({ animId: null, layerId: null }));
+
 export interface KeyRef { ch: string; id: string }
 /**
  * 屬性面板中選取的關鍵影格。sel = 主選取（決定曲線上要調哪一段），keys = 全部選取的；
  * focus = 最後點的是屬性面板的關鍵影格區（快捷鍵要作用在關鍵影格上）
  */
-export const useKeySel = create<{ owner: string | null; keys: KeyRef[]; sel: { owner: string; ch: string; id: string } | null; focus: boolean }>(() => ({
+export const useKeySel = create<{ owner: string | null; keys: KeyRef[]; sel: { owner: string; ch: string; id: string } | null; focus: boolean; channel: string | null }>(() => ({
   owner: null,
   keys: [],
   sel: null,
   focus: false,
+  channel: null,
 }));
 
 // ───────────── 時間軸吸附參考線 ─────────────

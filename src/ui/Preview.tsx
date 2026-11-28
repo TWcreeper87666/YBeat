@@ -4,20 +4,26 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { create } from 'zustand';
 import { flushSync } from 'react-dom';
 import { axisAligned, gridSnapLines, rotatedHalf, snapMoveAxis, snapScaleAxis } from '../engine/snap';
-import { makeTextClip, projectDuration, remapFor, srcAvail, useStore, type Clip, type FxItem, type Media } from '../store';
+import { makeClip, makeTextClip, projectDuration, remapFor, srcAvail, useStore, type Clip, type FxItem, type Media } from '../store';
 import { fxCombo, stillDur, usePrefs } from '../prefs';
 import { getRenderer, Renderer, computeFrame, makeCtx, setRenderer } from '../engine/renderer';
 import { clipSource, setRemapErrorReporter } from '../engine/remap';
 import { syncAudioPreview, stopAudioPreview } from '../engine/audio';
 import { parseDuration } from '../engine/params';
 import { trialTransitionAt, withClip } from '../engine/trialTransition';
-import { clipTransformAt, fitSize, isAnimated, setPropsAt, type Transform } from '../engine/transform';
+import { clipTransformAt, DEFAULT_TRANSFORM, fitSize, isAnimated, setPropsAt, type Transform } from '../engine/transform';
+import { animBeatAt, animBeatLen, animLayers, animTransformAt, composeAnimTransform, type AnimItem, type AnimLayer } from '../engine/animation';
+import { evalKeys, upsertKey, type AnimProp, type Keyframe } from '../engine/keyframes';
 import { textSize } from '../engine/text';
-import { MaskGizmos, cfxMaskKey, useMaskEdit } from './MaskEditor';
+import { MaskGizmos, animMaskKey, cfxMaskKey, useMaskEdit } from './MaskEditor';
 import { GridOverlay } from './GridOverlay';
 import { ParamGizmos } from './ParamGizmos';
 import { TextInlineEdit } from './TextInlineEdit';
-import { stopPreviewFx, toast, useColorPick, useLayout, usePreviewFx, useTrimView } from './uiStore';
+import { stopPreviewFx, toast, useAnimPick, useColorPick, useKeySel, useLayout, usePreviewFx, useTrimView } from './uiStore';
+import { matteAt, MATTE_SIZE, useMatte } from '../engine/matte';
+import { scoreMatte } from '../engine/subjectPop';
+import { focusSection } from './EffectControls';
+import { slotNames } from './animNames';
 import { useEditorWindow } from './EditorWindow';
 import { fps } from '../engine/rulerTicks';
 import { useFaces } from '../engine/face';
@@ -28,7 +34,8 @@ import { leadFromBox } from '../engine/leadPick';
 import { sampledNow } from '../engine/mediaSampler';
 import { useAutoEdit } from '../engine/autoEditSettings';
 import { sampleCtx } from './previewSample';
-import { animTrialCtx } from './animTrial';
+import { animSampleMedia } from './previewSample';
+import { animTrialCtx, withAnimPlaceholders, withPlaceholderSlots } from './animTrial';
 
 const frameAspect = () => useStore.getState().format.w / useStore.getState().format.h;
 
@@ -106,7 +113,8 @@ export function Preview() {
         // 輸出比例 / 預覽畫質
         const sc = useLayout.getState().previewScale || 1;
         r.setSize(st.format.w * sc, st.format.h * sc, st.format.h);
-        let ctx = makeCtx(st);
+        // 動畫還沒放圖的位置：先用示範圖（只有預覽）
+        let ctx = withAnimPlaceholders(makeCtx(st), st.format);
         // 文字分頁點選的樣式：疊在目前畫面最上層（多一條暫時的軌道），整段循環播放
         const tx = usePreviewFx.getState().text;
         if (tx && !st.playing) {
@@ -494,6 +502,15 @@ function applyAt(clipId: string, values: Partial<Transform>, local: number) {
   if (c) s.updateClip(clipId, setPropsAt(c, values, Math.min(c.duration, Math.max(0, local))));
 }
 
+function applyAnimAt(animId: string, values: Partial<Transform>, local: number) {
+  const s = useStore.getState();
+  const a = s.anims.find((x) => x.id === animId);
+  if (!a) return;
+  const patch = setPropsAt({ transform: a.transform ?? DEFAULT_TRANSFORM, keys: a.keys }, values,
+    animBeatAt(a, Math.min(a.duration, Math.max(0, local))));
+  s.updateAnim(animId, patch);
+}
+
 // 按住旋轉把手時，整個畫面都顯示旋轉游標
 window.addEventListener('pointerdown', (e) => {
   if (!(e.target as HTMLElement).closest?.('.grot, .mask-rot')) return;
@@ -520,6 +537,114 @@ const SNAP_PX = 8;
 const snapLines = (W: number, H: number) => gridSnapLines(W, H, useLayout.getState());
 type Rect = { left: number; top: number; width: number; height: number };
 const sameRect = (a: Rect, b: Rect) => a.left === b.left && a.top === b.top && a.width === b.width && a.height === b.height;
+// ───────────────────────── 動畫裡的物件（圖層）：預覽上的框、拖曳 ─────────────────────────
+
+interface LayerBox extends Box { layerId: string; name: string }
+
+/** 去背遮罩的外框（素材的 0..1 座標）；還沒算好 / 沒有主體 = 整張 */
+const matteBoxes = new Map<string, [number, number, number, number]>();
+function subjectBox(media: Media, t: number): [number, number, number, number] {
+  const m = matteAt(media, t);
+  if (!m) return [0, 0, 1, 1];
+  const key = `${media.id}:${m.idx}`;
+  let b = matteBoxes.get(key);
+  if (!b) {
+    const sc = scoreMatte(m.data, MATTE_SIZE);
+    b = sc.area ? sc.bbox : [0, 0, 1, 1];
+    matteBoxes.set(key, b);
+  }
+  return b;
+}
+
+/** 動畫裡每個看得到的圖層在預覽上的框（去背的圖層只框住主體） */
+/** 素材（含預覽用的示範圖） */
+function mediaById(id: string | null): Media | undefined {
+  if (!id) return undefined;
+  const s = useStore.getState();
+  const hit = s.media.find((m) => m.id === id);
+  if (hit) return hit;
+  const sm = animSampleMedia(s.format.w, s.format.h);
+  return [sm.scene, ...sm.people, sm.reveal].find((m) => m.id === id);
+}
+
+/** 圖層畫在畫面上時，主體（去背的範圍；沒去背 = 整張）的中心與大小（畫面比例，以畫面中心為 0） */
+function slotFrame(slot: AnimItem['slots'][number], W: number, H: number) {
+  const media = mediaById(slot.mediaId);
+  if (!media || media.missing) return null;
+  // 素材 cover 到畫面上：素材座標 → 畫面比例座標
+  const k = Math.max(W / media.width, H / media.height), sx = (media.width * k) / W, sy = (media.height * k) / H;
+  const [u0, v0, u1, v1] = slot.cutout?.mode === 'auto' ? subjectBox(media, media.kind === 'image' ? 0 : slot.sourceTime) : [0, 0, 1, 1];
+  return { cx: ((u0 + u1) / 2 - 0.5) * sx, cy: ((v0 + v1) / 2 - 0.5) * sy, w: (u1 - u0) * sx, h: (v1 - v0) * sy };
+}
+
+/** 圖層的變換套到畫面上的一點（畫面比例座標 → 像素）：以畫面中心縮放、旋轉，再位移 */
+function placePoint(t: { x: number; y: number; scaleX: number; scaleY: number; rotation: number }, cx: number, cy: number, W: number, H: number) {
+  const r = (t.rotation * Math.PI) / 180;
+  const px = t.scaleX * cx * W, py = t.scaleY * cy * H;
+  return { x: (0.5 + t.x) * W + px * Math.cos(r) - py * Math.sin(r), y: (0.5 + t.y) * H + px * Math.sin(r) + py * Math.cos(r) };
+}
+
+/** 動畫裡每個看得到的圖層在預覽上的框（去背的圖層只框住主體；還沒放圖的用示範圖） */
+function animLayerBoxes(item0: AnimItem, time: number, W: number, H: number): LayerBox[] {
+  if (!W || !H || time < item0.start || time >= item0.start + item0.duration) return [];
+  const item = withPlaceholderSlots(item0);
+  const names = slotNames(item0);
+  const out: LayerBox[] = [];
+  for (const d of animLayers(item, time, animBeatLen(item), W / H)) {
+    if (d.layer.text) continue;
+    const f = slotFrame(d.slot, W, H);
+    if (!f) continue;
+    const c = placePoint(d, f.cx, f.cy, W, H);
+    out.push({ layerId: d.layer.id, name: names.get(d.slot.id) ?? '', cx: c.x, cy: c.y,
+      w: Math.abs(d.scaleX) * f.w * W, h: Math.abs(d.scaleY) * f.h * H, rot: d.rotation });
+  }
+  return out;
+}
+
+/** 預覽上位移 (dx, dy)（畫面比例）→ 圖層自己的位移：整體有旋轉 / 縮放時，要先轉回整體的座標 */
+function toLayerDelta(item: AnimItem, beat: number, dx: number, dy: number, aspect: number) {
+  const all = animTransformAt(item, beat);
+  const rad = (-all.rotation * Math.PI) / 180;
+  const px = dx * aspect, py = dy;
+  return { x: (px * Math.cos(rad) - py * Math.sin(rad)) / (aspect * (all.scaleX || 1)), y: (px * Math.sin(rad) + py * Math.cos(rad)) / (all.scaleY || 1) };
+}
+
+/** 圖層整個移動：位置有關鍵影格 = 每個關鍵影格一起移；沒有 = 改固定值 */
+const shiftLayer = (l: AnimLayer, dx: number, dy: number): AnimLayer => {
+  const keys = { ...l.keys };
+  const base = { ...l.base };
+  if (keys.x?.length) keys.x = keys.x.map((k) => ({ ...k, v: k.v + dx }));
+  else base.x = (base.x ?? 0) + dx;
+  if (keys.y?.length) keys.y = keys.y.map((k) => ({ ...k, v: k.v + dy }));
+  else base.y = (base.y ?? 0) + dy;
+  return { ...l, keys, base };
+};
+
+/** 選中預覽上的動畫物件：屬性面板捲到它的圖層、預覽顯示它的位置路徑 */
+function pickAnimLayer(animId: string, layerId: string | null) {
+  useAnimPick.setState({ animId, layerId });
+  if (!layerId) return;
+  useKeySel.setState({ owner: `anim:${animId}`, channel: `${layerId}:x`, keys: [], sel: null });
+  focusSection(`layer.${layerId}`);
+}
+
+/** 拖預覽上的動畫物件：整個圖層（含所有位置關鍵影格）跟著滑鼠移動 */
+function dragAnimLayer(e: React.PointerEvent, item: AnimItem, layerId: string, W: number, H: number) {
+  e.stopPropagation();
+  e.preventDefault();
+  stopPreviewFx();
+  pickAnimLayer(item.id, layerId);
+  const orig = item.layers.find((l) => l.id === layerId);
+  if (!orig) return;
+  const beat = animBeatAt(item, Math.max(0, Math.min(item.duration, useStore.getState().time - item.start)));
+  const x0 = e.clientX, y0 = e.clientY;
+  dragWin((ev) => {
+    const d = toLayerDelta(item, beat, (ev.clientX - x0) / W, (ev.clientY - y0) / H, W / H);
+    const cur = useStore.getState().anims.find((a) => a.id === item.id);
+    if (cur) useStore.getState().updateAnim(item.id, { layers: cur.layers.map((l) => (l.id === layerId ? shiftLayer(orig, d.x, d.y) : l)) });
+  });
+}
+
 function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> }) {
   const [rect, setRect] = useState({ left: 0, top: 0, width: 0, height: 0 });
   const [guides, setGuides] = useState<{ x: number | null; y: number | null }>({ x: null, y: null });
@@ -528,6 +653,8 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
   const layerRef = useRef<HTMLDivElement>(null);
   const sel = useStore((s) => s.selection);
   const clip = useStore((s) => (sel?.type === 'clip' ? s.clips.find((c) => c.id === sel.id) : undefined));
+  const anim = useStore((s) => (sel?.type === 'anim' ? s.anims.find((a) => a.id === sel.id) : undefined));
+  const keyFocus = useKeySel();
   const media = useStore((s) => (clip ? s.media.find((m) => m.id === clip.mediaId) : undefined));
   const time = useStore((s) => s.time);
 
@@ -553,12 +680,24 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
   }, [view, canvasRef]);
 
   const W = rect.width, H = rect.height;
+  const pick = useAnimPick();
+  const pickedLayer = anim && pick.animId === anim.id ? pick.layerId : null;
+  // 動畫裡的物件：去背遮罩算好時框會更新
+  useMatte((m) => m.ver);
+  const layerBoxes = anim ? animLayerBoxes(anim, time, W, H) : [];
+  const animMedia = { width: W || 1, height: H || 1 } as Media;
+  const animBoxClip = anim ? makeClip({ id: anim.id, mediaId: '', track: anim.track, start: anim.start,
+    duration: anim.duration, in: 0, fit: 'contain', scaleUnlinked: true,
+    transform: animTransformAt(anim, animBeatAt(anim, Math.max(0, time - anim.start))) }) : null;
   const local = clip ? time - clip.start : -1;
   const visible = !!clip && (!!clip.text || (!!media && media.kind !== 'audio')) && local >= 0 && local < clip.duration;
   // 正在預覽上編輯這個片段的遮罩：片段本身的變換框先藏起來，免得搶到滑鼠
   const maskKey = useMaskEdit((st) => st.key);
-  const editingMask = !!maskKey && !!clip?.effects?.some((f) => cfxMaskKey(f.id) === maskKey && f.enabled !== false && (f.mask?.shape ?? 'none') !== 'none');
-  const box = visible && !editingMask ? boxOf(clip!, media, local, W, H) : null;
+  const editingMask = !!maskKey && (!!clip?.effects?.some((f) => cfxMaskKey(f.id) === maskKey && f.enabled !== false && (f.mask?.shape ?? 'none') !== 'none')
+    || (!!anim && !clip && maskKey === animMaskKey(anim.id) && (anim.mask?.mask.shape ?? 'none') !== 'none'));
+  const animVisible = !!anim && !editingMask && time >= anim.start && time < anim.start + anim.duration;
+  const box = visible && !editingMask ? boxOf(clip!, media, local, W, H)
+    : animVisible && animBoxClip ? boxOf(animBoxClip, animMedia, time - anim!.start, W, H) : null;
 
   const pt = (ev: { clientX: number; clientY: number }) => {
     const r = layerRef.current!.getBoundingClientRect();
@@ -566,13 +705,14 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
   };
 
   /** 開始拖曳：依 mode 改位置 / 縮放 / 旋轉。按住 Shift = 吸附 */
-  const begin = (e: React.PointerEvent, c: Clip, m: Media | undefined, mode: 'move' | 'scale' | 'scaleX' | 'scaleY' | 'rotate') => {
+  const begin = (e: React.PointerEvent, c: Clip, m: Media | undefined, mode: 'move' | 'scale' | 'scaleX' | 'scaleY' | 'rotate', animId?: string) => {
     e.stopPropagation();
     e.preventDefault();
     stopPreviewFx();
     const s = useStore.getState();
     const l = s.time - c.start;
-    const base = clipTransformAt(c, Math.min(c.duration, Math.max(0, l)));
+    const base = animId ? animTransformAt(useStore.getState().anims.find((a) => a.id === animId)!, animBeatAt(useStore.getState().anims.find((a) => a.id === animId)!, l))
+      : clipTransformAt(c, Math.min(c.duration, Math.max(0, l)));
     // 畫面寬度用輸出比例算（canvas 量到的寬高是整數 px，比例會差一點，吸附到邊緣時縮放就變成 99.9%）
     const W = H * frameAspect();
     const b = boxOf(c, m, l, W, H);
@@ -585,7 +725,7 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
     const p0 = pt(e);
     const d0 = Math.hypot(p0.x - b.cx, p0.y - b.cy) || 1;
     const a0 = Math.atan2(p0.y - b.cy, p0.x - b.cx);
-    const apply = (patch: Partial<Transform>) => applyAt(c.id, patch, l);
+    const apply = (patch: Partial<Transform>) => animId ? applyAnimAt(animId, patch, l) : applyAt(c.id, patch, l);
     dragWin(
       (ev) => {
         const p = pt(ev);
@@ -685,6 +825,7 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
     const p = pt(e);
     // 編輯視窗：只能動正在編輯的那個片段（其他片段鎖住，不會被點選或拖走；被別的片段蓋住也點得到）
     if (useEditorWindow.getState().open) {
+      if (animBoxClip && box && hit(box, p.x, p.y)) begin(e, animBoxClip, animMedia, 'move', anim!.id);
       const sel = s.selection;
       const c = sel?.type === 'clip' ? s.clips.find((x) => x.id === sel.id) : undefined;
       if (!c) return;
@@ -722,24 +863,127 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
       <MaskGizmos W={W} H={H} />
       <ParamGizmos W={W} H={H} />
       <BoxPickLayer W={W} H={H} />
-      {box && clip && editingText !== clip.id && (
+      {box && (clip || animBoxClip) && editingText !== clip?.id && (() => {
+        const active = (clip ?? animBoxClip)!;
+        const activeMedia = clip ? media : animMedia;
+        const activeAnimId = clip ? undefined : anim?.id;
+        const start = (e: React.PointerEvent, mode: 'move' | 'scale' | 'scaleX' | 'scaleY' | 'rotate') => begin(e, active, activeMedia, mode, activeAnimId);
+        return (
         <div
           className="gizmo"
           style={{ left: box.cx - box.w / 2, top: box.cy - box.h / 2, width: box.w, height: box.h, transform: `rotate(${box.rot}deg)` }}
-          onPointerDown={(e) => e.button === 0 && begin(e, clip, media, 'move')}
-          onDoubleClick={() => clip.text && setEditingText(clip.id)}
+          onPointerDown={(e) => { if (e.button !== 0) return; if (anim && !clip) useAnimPick.setState({ animId: anim.id, layerId: null }); start(e, 'move'); }}
+          onDoubleClick={() => clip?.text && setEditingText(clip.id)}
         >
-          {(['x', 'y', 'scaleX', 'scaleY', 'rotation'] as const).some((p) => isAnimated(clip, p)) && <span className="gizmo-tag"><Diamond size={10} fill="currentColor" /> {$t('關鍵影格')}</span>}
+          {(['x', 'y', 'scaleX', 'scaleY', 'rotation'] as const).some((p) => clip ? isAnimated(clip, p) : !!anim?.keys?.[p]?.length) && <span className="gizmo-tag"><Diamond size={10} fill="currentColor" /> {$t('關鍵影格')}</span>}
           {['tl', 'tr', 'bl', 'br'].map((k) => (
-            <div key={k} className={`gh ${k}`} title={$t('等比縮放（Shift = 吸附到畫面邊緣 / 中線 / 網格）')} onPointerDown={(e) => begin(e, clip, media, 'scale')} />
+            <div key={k} className={`gh ${k}`} title={$t('等比縮放（Shift = 吸附到畫面邊緣 / 中線 / 網格）')} onPointerDown={(e) => start(e, 'scale')} />
           ))}
           {(['l', 'r', 't', 'b'] as const).map((k) => (
-            <div key={k} className={`gh edge ${k}`} title={$t('只拉這個方向，拉過中心 = 翻轉（Shift = 吸附）')} onPointerDown={(e) => begin(e, clip, media, k === 'l' || k === 'r' ? 'scaleX' : 'scaleY')} />
+            <div key={k} className={`gh edge ${k}`} title={$t('只拉這個方向，拉過中心 = 翻轉（Shift = 吸附）')} onPointerDown={(e) => start(e, k === 'l' || k === 'r' ? 'scaleX' : 'scaleY')} />
           ))}
-          <div className="grot" onPointerDown={(e) => begin(e, clip, media, 'rotate')} title={$t('拖曳旋轉（Shift = 15° 一格）')} />
+          <div className="grot" onPointerDown={(e) => start(e, 'rotate')} title={$t('拖曳旋轉（Shift = 15° 一格）')} />
         </div>
-      )}
+        );
+      })()}
+      {anim && !clip && !editingMask && layerBoxes.map((b) => (
+        <div key={b.layerId} className={`anim-layer-box ${pickedLayer === b.layerId ? 'on' : ''}`}
+          style={{ left: b.cx - b.w / 2, top: b.cy - b.h / 2, width: b.w, height: b.h, transform: `rotate(${b.rot}deg)` }}
+          onPointerDown={(e) => e.button === 0 && dragAnimLayer(e, anim, b.layerId, W, H)}>
+          <span className="anim-layer-name">{b.name}</span>
+        </div>
+      ))}
+      {anim && <AnimMotionPath item={anim} channel={keyFocus.owner === `anim:${anim.id}` ? keyFocus.channel ?? keyFocus.sel?.ch ?? null : null} time={time} W={W} H={H} />}
       {box && clip?.text && editingText === clip.id && <TextInlineEdit clip={clip} box={box} scaleX={box.xf.scaleX} scaleY={box.xf.scaleY} H={H} onClose={() => setEditingText(null)} />}
     </div>
   );
+}
+
+function AnimMotionPath({ item, channel, time, W, H }: { item: AnimItem; channel: string | null; time: number; W: number; H: number }) {
+  const ks = useKeySel();
+  if (!channel || !/^(all|[^:]+):(x|y)$/.test(channel) || !W || !H) return null;
+  const [layerId] = channel.split(':');
+  const layer = layerId === 'all' ? null : item.layers.find((l) => l.id === layerId);
+  if (layerId !== 'all' && !layer) return null;
+  const keys = layer ? layer.keys : item.keys;
+  const times = [...new Set([...(keys?.x ?? []), ...(keys?.y ?? [])].map((k) => k.t))].sort((a, b) => a - b)
+    .filter((b) => b >= (layer?.fromBeat ?? 0) && b < (layer?.toBeat ?? Infinity));
+  if (!times.length) return null;
+  const aspect = W / H;
+  const at = (beat: number) => {
+    const whole = animTransformAt(item, beat);
+    if (!layer) return whole;
+    const base = layer.base ?? {};
+    const value = (p: AnimProp, fallback: number) => layer.keys[p]?.length ? evalKeys(layer.keys[p]!, beat) : base[p] ?? fallback;
+    return composeAnimTransform({ x: value('x', 0), y: value('y', 0), scaleX: value('scaleX', 1),
+      scaleY: value('scaleY', 1), rotation: value('rotation', 0), opacity: 1 }, whole, aspect);
+  };
+  // 路徑走的是物件看得到的中心（去背的主體中心），跟預覽上的框對齊；整體 = 畫面中心
+  const slot = layer ? withPlaceholderSlots(item).slots.find((sl) => sl.id === layer.slotId) : undefined;
+  const f = slot ? slotFrame(slot, W, H) : null;
+  const point = (beat: number) => placePoint(at(beat), f?.cx ?? 0, f?.cy ?? 0, W, H);
+  const breaks = [...new Set([...times, ...(layer ? Object.values(item.keys ?? {}).flatMap((list) => list?.map((k) => k.t) ?? []) : [])])]
+    .filter((b) => b >= times[0] && b <= times[times.length - 1]).sort((a, b) => a - b);
+  const samples = breaks.flatMap((b, i) => i === breaks.length - 1 ? [b]
+    : Array.from({ length: 13 }, (_, j) => b + (breaks[i + 1] - b) * j / 13));
+  const current = point(animBeatAt(item, Math.max(0, Math.min(item.duration, time - item.start))));
+  // 屬性面板選取的位置關鍵影格（x 或 y 任一個被選就算那一拍）
+  const prefix = layer ? `${layer.id}:` : 'all:';
+  const selected = new Set<number>();
+  if (ks.owner === `anim:${item.id}`) for (const r of ks.keys) {
+    if (r.ch !== `${prefix}x` && r.ch !== `${prefix}y`) continue;
+    const k = (r.ch.endsWith('x') ? keys?.x : keys?.y)?.find((x) => x.id === r.id);
+    if (k) selected.add(k.t);
+  }
+  const near = (a: number, b: number) => Math.abs(a - b) < 1e-6;
+  /** 拖一個點：它被選了 = 選取的點全部一起移動；沒被選 = 只移它 */
+  /** 這一拍的位置關鍵影格（x、y 各一個，有的話） */
+  const refsAt = (beat: number) => (['x', 'y'] as const).flatMap((p) =>
+    (keys?.[p] ?? []).filter((k) => near(k.t, beat)).map((k) => ({ ch: `${prefix}${p}`, id: k.id })));
+  const drag = (e: React.PointerEvent, beat: number) => {
+    e.stopPropagation(); e.preventDefault();
+    const owner = `anim:${item.id}`;
+    const on = [...selected].some((b) => near(b, beat));
+    const mine = ks.owner === owner ? ks.keys : [];
+    const refs = refsAt(beat);
+    // Ctrl / ⌘：加選 / 取消這一點（不拖）
+    if (e.ctrlKey || e.metaKey) {
+      const next = on ? mine.filter((r) => !refs.some((x) => x.ch === r.ch && x.id === r.id)) : [...mine, ...refs];
+      useKeySel.setState({ owner, keys: next, sel: next.length ? { owner, ...next[next.length - 1] } : null, focus: true, channel: channel });
+      return;
+    }
+    // 點沒選的點 = 只選它
+    if (!on && refs.length) useKeySel.setState({ owner, keys: refs, sel: { owner, ...refs[0] }, focus: true, channel: channel });
+    const group = on ? [...selected] : [beat];
+    const start = { x: e.clientX, y: e.clientY };
+    const orig = group.map((b) => ({ b,
+      x: keys?.x?.length ? evalKeys(keys.x, b) : layer?.base?.x ?? item.transform?.x ?? 0,
+      y: keys?.y?.length ? evalKeys(keys.y, b) : layer?.base?.y ?? item.transform?.y ?? 0 }));
+    dragWin((ev) => {
+      const dx = (ev.clientX - start.x) / W, dy = (ev.clientY - start.y) / H;
+      const d = layer ? toLayerDelta(item, beat, dx, dy, aspect) : { x: dx, y: dy };
+      const s = useStore.getState();
+      const fresh = s.anims.find((a) => a.id === item.id);
+      if (!fresh) return;
+      const put = (k: { x?: Keyframe[]; y?: Keyframe[] }) => {
+        let x = k.x ?? [], y = k.y ?? [];
+        for (const o of orig) { x = upsertKey(x, o.b, o.x + d.x); y = upsertKey(y, o.b, o.y + d.y); }
+        return { x, y };
+      };
+      if (!layer) s.updateAnim(item.id, { keys: { ...fresh.keys, ...put(fresh.keys ?? {}) } });
+      else s.updateAnim(item.id, { layers: fresh.layers.map((l) => l.id === layer.id ? { ...l, keys: { ...l.keys, ...put(l.keys) } } : l) });
+    });
+  };
+  const pts = samples.map((b) => { const p = point(b); return `${p.x},${p.y}`; }).join(' ');
+  return <svg className="anim-motion-path" width={W} height={H}>
+    <polyline className="amp-shade" points={pts} />
+    <polyline className="amp-line" points={pts} />
+    {times.map((b) => {
+      const p = point(b);
+      const on = [...selected].some((x) => near(x, b));
+      return <rect key={b} className={`amp-key ${on ? 'sel' : ''}`} x={p.x - 4.5} y={p.y - 4.5} width={9} height={9}
+        transform={`rotate(45 ${p.x} ${p.y})`} onPointerDown={(e) => drag(e, b)} />;
+    })}
+    <circle className="amp-now" cx={current.x} cy={current.y} r={3.5} />
+  </svg>;
 }

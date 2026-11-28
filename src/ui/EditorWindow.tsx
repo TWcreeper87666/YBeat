@@ -1,17 +1,18 @@
 import { $t, displayName } from '../i18n';
 import { useEffect, useRef } from 'react';
-import { Columns2, Rows2, Sparkles, X } from 'lucide-react';
+import { Columns2, Redo2, Rows2, Sparkles, Undo2, X } from 'lucide-react';
 import { parseTrSel, useStore } from '../store';
 import { sortClips, transitionWindow } from '../engine/renderer';
 import { itemName } from './names';
 import { Slot } from './PreviewPanel';
 import { useMaskEdit } from './MaskEditor';
 import { confirmDialog, useEditorMode, useEditorWindow, useLayout } from './uiStore';
-import { docChanged, restoreDoc, snapshotDoc, type HistoryDoc } from '../engine/history';
+import { beginHistoryScope, docChanged, endHistoryScope, redo, snapshotDoc, undo, useHistory, type HistoryDoc } from '../engine/history';
 import type { PanelId } from './dockTree';
 import { isTextField, modalOpen } from './focus';
 import { pickerOpen } from './Library';
 import { Seg } from './Toggle';
+import { templateName } from './PopPicker';
 
 /**
  * 編輯視窗（參考威力導演的子母畫面設計師）：針對「一個片段 / 特效 / 轉場」的編輯畫面。
@@ -34,13 +35,17 @@ export function openEditorWindow(maskKey?: string) {
   const r = scopeOf(s);
   if (!r) return;
   saved = { loop: s.loop, doc: snapshotDoc() };
+  // 視窗裡的編輯有自己的復原紀錄；完成時整段算一步
+  beginHistoryScope();
   // 播放頭不在項目裡 → 移到項目開頭；播放範圍限制在項目內
   useStore.setState({ loop: r, ...(s.time < r.a || s.time >= r.b ? { time: r.a } : {}) });
   useEditorWindow.setState({ open: true });
 }
 
-export function closeEditorWindow() {
+/** 關閉（完成）：視窗裡的變更併成一步；commit = false 是取消（捨棄變更） */
+export function closeEditorWindow(commit = true) {
   if (!useEditorWindow.getState().open) return;
+  endHistoryScope(commit);
   useEditorWindow.setState({ open: false });
   useStore.setState({ loop: saved?.loop ?? null });
   saved = null;
@@ -49,18 +54,17 @@ export function closeEditorWindow() {
 /** 開編輯視窗前的循環設定（關閉時還原）與專案狀態（取消時還原） */
 let saved: { loop: { a: number; b: number } | null; doc: HistoryDoc } | null = null;
 
-/** 取消（✕ / Esc）：有變更時先確認，捨棄後還原成打開時的狀態（還原算一步，可以 Ctrl+Z 拿回來） */
+/** 取消（✕ / Esc）：有變更時先確認，捨棄後還原成打開時的狀態（不留復原紀錄） */
 export async function cancelEditorWindow() {
   if (!useEditorWindow.getState().open || !saved) return;
   if (docChanged(saved.doc)) {
     const ok = await confirmDialog({ title: $t('捨棄變更？'), message: $t('編輯視窗裡的變更還沒套用。'), ok: $t('捨棄'), danger: true });
     if (!ok || !saved) return;
-    restoreDoc(saved.doc);
   }
-  closeEditorWindow();
+  closeEditorWindow(false);
 }
 
-type ScopeState = Pick<ReturnType<typeof useStore.getState>, 'selection' | 'clips' | 'effects'>;
+type ScopeState = Pick<ReturnType<typeof useStore.getState>, 'selection' | 'clips' | 'effects' | 'anims'>;
 /** 編輯視窗針對的項目時間範圍（影片 / 文字片段、特效軌的特效、轉場） */
 function scopeOf(s: ScopeState): { a: number; b: number } | null {
   const sel = s.selection;
@@ -73,8 +77,8 @@ function scopeOf(s: ScopeState): { a: number; b: number } | null {
     const w = transitionWindow(sorted[i - 1], c, side, sorted[i + 1]);
     return w ? { a: w.t0, b: w.t0 + w.d } : null;
   }
-  if (sel?.type !== 'clip' && sel?.type !== 'effect') return null;
-  const it = (sel.type === 'clip' ? s.clips : s.effects).find((x) => x.id === sel.id);
+  if (sel?.type !== 'clip' && sel?.type !== 'effect' && sel?.type !== 'anim') return null;
+  const it = (sel.type === 'clip' ? s.clips : sel.type === 'effect' ? s.effects : s.anims).find((x) => x.id === sel.id);
   return it ? { a: it.start, b: it.start + it.duration } : null;
 }
 
@@ -107,10 +111,15 @@ export function EditorWindow({ hosts }: { hosts: Record<PanelId, HTMLElement> })
       const m = tr && s.modules.find((x) => x.id === tr.moduleId);
       return m ? displayName(m.name) : '';
     }
-    if (!sel || (sel.type !== 'clip' && sel.type !== 'effect')) return '';
-    const it = (sel.type === 'clip' ? s.clips : s.effects).find((x) => x.id === sel.id);
+    if (!sel || (sel.type !== 'clip' && sel.type !== 'effect' && sel.type !== 'anim')) return '';
+    const it = (sel.type === 'clip' ? s.clips : sel.type === 'effect' ? s.effects : s.anims).find((x) => x.id === sel.id);
+    if (sel.type === 'anim') {
+      const a = s.anims.find((x) => x.id === sel.id);
+      return a?.name ?? templateName(a?.presetId) ?? $t('動畫');
+    }
     return it ? itemName(sel.type, it, s.media, s.modules) : '';
   });
+  const { canUndo, canRedo } = useHistory();
   const pref = useLayout((s) => s.editorLayout);
   const split = useLayout((s) => s.editorSplit);
   const leftPx = useLayout((s) => s.ecLeftPx);
@@ -192,8 +201,12 @@ export function EditorWindow({ hosts }: { hosts: Record<PanelId, HTMLElement> })
           <span className="editor-title">{$t('編輯視窗')}</span>
           {name && <span className="editor-name">{name}</span>}
           <span className="spacer" />
+          <span className="editor-history">
+          <button className="title-icon" disabled={!canUndo} title={$t('復原 (Ctrl+Z)')} onClick={undo}><Undo2 size={15} /></button>
+          <button className="title-icon" disabled={!canRedo} title={$t('重做 (Ctrl+Shift+Z)')} onClick={redo}><Redo2 size={15} /></button>
+          </span>
           <Seg className="editor-layouts" value={pref} on={(v) => useLayout.getState().set({ editorLayout: v })} opts={layouts.map((l) => ({ v: l.id, label: l.icon, title: l.label }))} />
-          <button className="btn primary small-h" title={$t('完成 (Ctrl+Enter)')} onClick={closeEditorWindow}>{$t('完成')}</button>
+          <button className="btn primary small-h" title={$t('完成 (Ctrl+Enter)')} onClick={() => closeEditorWindow()}>{$t('完成')}</button>
           <button className="title-icon" title={$t('取消 (Esc)')} onClick={() => void cancelEditorWindow()}><X size={16} /></button>
         </div>
         <div

@@ -5,18 +5,26 @@ import { $t, displayName } from '../i18n';
 import { DEFAULT_MASK, PATH_SHAPE, maskAt, maskKey, type Mask } from '../engine/mask';
 import { CLIP_MASK_ID } from '../modules/extra';
 import { upsertKey } from '../engine/keyframes';
+import { animBeatAt, animMaskAt, animSecAt, type AnimItem } from '../engine/animation';
 import { shapeInfo } from '../engine/maskShapes';
 import { axisAligned, gridSnapLines, rotatedHalf, snapMoveAxis } from '../engine/snap';
 import { useLayout } from './uiStore';
 
 /** 吸附距離（px），跟片段變換框一樣 */
 const SNAP_PX = 8;
-import { cfxCh, clipHost, fxHost } from './EffectControls';
+import { cfxCh, clipHost, fxHost, hostFor } from './EffectControls';
 import { ensureClipBaseMask } from './MaskPanel';
 
 /** 正在預覽畫面上編輯的片段特效遮罩（特效軌的特效選取時一律可以編輯） */
 export const useMaskEdit = create<{ key: string | null }>(() => ({ key: null }));
 export const cfxMaskKey = (fxId: string) => `cfx:${fxId}`;
+/** 動畫的整體遮罩 */
+export const animMaskKey = (animId: string) => `anim:${animId}`;
+/** 動畫屬性面板裡整體遮罩的 channel：`whole:mask.x` */
+export const animMaskCh = (ch: string) => `whole:${ch}`;
+const animOf = (key: string, s = useStore.getState()) => (key.startsWith('anim:') ? s.anims.find((a) => a.id === key.slice(5)) : undefined);
+/** 動畫內的秒數 → 整體遮罩這一刻的樣子 */
+const animMaskNow = (a: AnimItem, local: number) => animMaskAt(a, animBeatAt(a, Math.max(0, Math.min(a.duration, local))));
 
 type Vals = Partial<Record<'x' | 'y' | 'w' | 'h' | 'feather' | 'rotation', number>>;
 interface Target { key: string; label: string; mask: Mask; set(v: Vals): void; active: boolean }
@@ -28,6 +36,7 @@ function useTargets(): Target[] {
   const effects = useStore((s) => s.effects);
   const clips = useStore((s) => s.clips);
   const modules = useStore((s) => s.modules);
+  const anims = useStore((s) => s.anims);
   const editKey = useMaskEdit((s) => s.key);
   const out: Target[] = [];
   const name = (id: string) => {
@@ -68,6 +77,15 @@ function useTargets(): Target[] {
       }
     }
   }
+  if (sel?.type === 'anim') {
+    const a = anims.find((x) => x.id === sel.id);
+    const local = a ? time - a.start : -1;
+    const m = a && local >= 0 && local < a.duration ? animMaskNow(a, local) : null;
+    if (a && m) {
+      const key = animMaskKey(a.id);
+      out.push({ key, label: a.name ?? $t('動畫'), mask: m, active: editKey === key, set: (vals) => writeMask(key, local, vals) });
+    }
+  }
   return out;
 }
 
@@ -91,6 +109,17 @@ function ownerOf(key: string, s: S = useStore.getState()) {
 
 /** 寫入遮罩的數值：有關鍵影格的屬性在 local 打 key，沒有就改固定值 */
 function writeMask(key: string, local: number, vals: Vals) {
+  if (key.startsWith('anim:')) {
+    const host = hostFor(key);
+    for (const [p, v] of Object.entries(vals)) {
+      const a = animOf(key);
+      if (!host || !a) return;
+      const k = a.mask?.keys?.[maskKey(p)];
+      if (k?.length) host.setKeys(animMaskCh(maskKey(p)), upsertKey(k.map((x) => ({ ...x, t: animSecAt(a, x.t) })), local, v));
+      else host.setBase(animMaskCh(maskKey(p)), v);
+    }
+    return;
+  }
   const o = ownerOf(key);
   if (!o) return;
   const host = o.kind === 'fx' ? fxHost(o.fx.id) : clipHost(o.clip.id);
@@ -136,6 +165,22 @@ export interface DrawTarget {
 /** key：`fx:<特效 id>`、`cfx:<片段特效 id>`、`clip:<片段 id>`（片段本身的遮罩，還沒有就在套用時建立） */
 export function drawTarget(key: string): DrawTarget | null {
   const s = useStore.getState();
+  const anim = animOf(key, s);
+  if (anim) {
+    const local = Math.min(Math.max(0, s.time - anim.start), Math.max(0, anim.duration - 1e-4));
+    return {
+      mask: animMaskNow(anim, local),
+      cut: true,
+      off: (st) => ({ ...st, anims: st.anims.filter((a) => a.id !== anim.id) }),
+      on: (st) => ({ ...st, anims: st.anims.map((a) => (a.id === anim.id ? { ...a, mask: undefined } : a)) }),
+      apply: (shape, box) => {
+        const cur = animOf(key);
+        if (!cur) return;
+        useStore.getState().updateAnim(cur.id, { mask: { ...cur.mask, mask: { ...DEFAULT_MASK, ...cur.mask?.mask, shape: PATH_SHAPE, ...shape } } });
+        writeMask(key, local, { ...box, rotation: 0 });
+      },
+    };
+  }
   if (key.startsWith('clip:')) {
     const clip = s.clips.find((c) => c.id === key.slice(5));
     if (!clip) return null;
@@ -181,7 +226,9 @@ export function drawTarget(key: string): DrawTarget | null {
 export function timeInside(key: string): number | null {
   const s = useStore.getState();
   let a: number, b: number;
-  if (key.startsWith('clip:')) {
+  const anim = animOf(key, s);
+  if (anim) [a, b] = [anim.start, anim.start + anim.duration];
+  else if (key.startsWith('clip:')) {
     const c = s.clips.find((x) => x.id === key.slice(5));
     if (!c) return null;
     [a, b] = [c.start, c.start + c.duration];

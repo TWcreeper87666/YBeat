@@ -20,6 +20,8 @@ export interface Mask {
   feather: number;
   /** 旋轉（度） */
   rotation: number;
+  /** Pixel-space forward matrix for an animation guide. */
+  matrix?: [number, number, number, number];
   /** shape = 'path'：只屬於這個遮罩的路徑（鋼筆畫的，沒存進形狀庫），正規化到 200×200 */
   path?: string;
   /** shape = 'path'：鋼筆的原始錨點（再次編輯用，畫面像素座標） */

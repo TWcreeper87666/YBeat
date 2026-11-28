@@ -4,7 +4,7 @@ import { holdScrub, scrubFrameAt } from './scrubCache';
 import { previewUrl } from './proxy';
 import { ensureReverseFrames, reverseFrameAt } from './reverseCache';
 import { fxLevel, makeClip, type AnimItem, type BlendMode, type TransitionRef, type AudioClip, type AudioDrive, type AudioFrom, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
-import { animBeatAtTime, animBeatLen, animLayers, animSecAt, type AnimDrawLayer } from './animation';
+import { animBeatAtTime, animBeatLen, animLayers, animMaskAt, animMatrix, animSecAt, animTransformAt, type AnimDrawLayer } from './animation';
 import { traceMatte } from './subjectPop';
 import { maskAt, type Mask } from './mask';
 import { FIELD_RANGE, getShapeField, maskFieldKey, type ShapeField } from './maskShapes';
@@ -13,8 +13,8 @@ import { DEFAULT_TEXT, renderText, TEXT_PRESETS, textKey } from './text';
 import { fitScale, hexToRgb, isHitFx, isNumeric, paramAt, parseDuration, parseParams, resolveParams, type ParamDef, type ParamValues } from './params';
 import { clipSource, plainSpeed } from './remap';
 import { MATTE_SIZE, matteAt, requestMatte } from './matte';
-import { clipTransformAt } from './transform';
-import { cropView } from './transform';
+import { clipTransformAt, DEFAULT_TRANSFORM } from './transform';
+import { cropView, fitSize } from './transform';
 import { evalKeys, type Keyframe } from './keyframes';
 import { fitOf, followOf, subjectRectInFrame, tracking, withOffset, type Follow, type FollowMap } from './follow';
 import { animFrameAt, animImage, animImageReady } from './animImage';
@@ -44,7 +44,8 @@ const animBeatTime = (item: AnimItem) => {
 /** 動畫的文字層（文字在主體後面）：大字描邊，比主體寬，左右才露得出來 */
 const ANIM_TEXT = { ...(TEXT_PRESETS.find((p) => p.id === 'outline')?.style ?? {}), size: 380 };
 
-function animClip(item: AnimItem, draw: AnimDrawLayer, media?: Media, frameAspect?: number): Clip {
+type DrawClip = Clip & { animMatrix?: [number, number, number, number] };
+function animClip(item: AnimItem, draw: AnimDrawLayer, media?: Media, frameAspect?: number): DrawClip {
   const s = draw.slot;
   const crop = s.crop && media && frameAspect ? cropView(s.crop, media.width / media.height, frameAspect) : null;
   const secAt = (beat: number) => animSecAt(item, beat);
@@ -55,12 +56,17 @@ function animClip(item: AnimItem, draw: AnimDrawLayer, media?: Media, frameAspec
       hits.push({ t: secAt(b), d: Math.min((fx.hitBeats ?? 0.8) * animBeatLen(item), secAt(b + fx.beatEvery) - secAt(b)) });
     return { ...fx, timing: { kind: 'hits' as const, hits } };
   });
-  return makeClip({ id: `anim:${item.id}:${s.id}:${draw.id}`, mediaId: s.mediaId!, track: item.track,
+  const matrix = draw.matrix;
+  const cropX = crop?.x ?? 0, cropY = crop?.y ?? 0;
+  const x = matrix && frameAspect ? draw.x + (matrix[0] * cropX * frameAspect + matrix[2] * cropY) / frameAspect : draw.x + cropX * draw.scaleX;
+  const y = matrix && frameAspect ? draw.y + matrix[1] * cropX * frameAspect + matrix[3] * cropY : draw.y + cropY * draw.scaleY;
+  const clip = makeClip({ id: `anim:${item.id}:${s.id}:${draw.id}`, mediaId: s.mediaId!, track: item.track,
     start: item.start, duration: item.duration, in: s.sourceTime, rate: 0,
     aiMatte: s.cutout?.mode === 'auto', blend: draw.layer.blend,
-    transform: { x: draw.x + (crop?.x ?? 0) * draw.scaleX, y: draw.y + (crop?.y ?? 0) * draw.scaleY,
+    transform: { x, y,
       scaleX: draw.scaleX * (crop?.s ?? 1), scaleY: draw.scaleY * (crop?.s ?? 1), rotation: draw.rotation, opacity: draw.opacity },
     effects, ...(draw.layer.text ? { text: { ...DEFAULT_TEXT, ...ANIM_TEXT, text: draw.layer.text }, fit: 'contain' as const } : {}) });
+  return matrix ? Object.assign(clip, { animMatrix: matrix.map((v) => v * (crop?.s ?? 1)) as [number, number, number, number] }) : clip;
 }
 
 export type FrameInfo =
@@ -290,6 +296,7 @@ const CLIP_FS = `${HEAD}uniform sampler2D u_tex;
 uniform float u_srcAspect;
 uniform vec4 u_xf;       // x, y, （未用）, rotation(rad)
 uniform vec2 u_scl;      // 水平 / 垂直縮放
+uniform mat2 u_inv;
 uniform float u_opacity;
 uniform int u_fit;       // 0 cover, 1 contain, 2 contain + blur bg, 3 原始大小（文字）
 uniform vec2 u_native;   // 原始大小（以畫面高度為 1）
@@ -308,7 +315,7 @@ void main() {
   vec2 p = vec2(v_uv.x - 0.5, 0.5 - v_uv.y) - u_xf.xy;   // 畫面座標，y 向下
   p.x *= ASPECT;
   float c = cos(u_xf.w), s = sin(u_xf.w);
-  vec2 q = vec2(c * p.x + s * p.y, -s * p.x + c * p.y) / u_scl;
+  vec2 q = u_inv * p;
   vec2 uv = q / fitSize(u_fit == 0) + 0.5;
   if (u_flip > 0.5) uv.x = 1.0 - uv.x;
   vec4 col = vec4(0.0);
@@ -352,15 +359,18 @@ uniform sampler2D u_shapeTex;
 uniform vec4 u_box;      // 中心 x, y（0 = 置中，y 向下）, 寬, 高（以畫面寬 / 高為 1）
 uniform float u_feather;
 uniform float u_rot;
+uniform mat2 u_maskInv;
+uniform float u_maskMatrix;
 uniform float u_invert;
+uniform float u_over;    // 1 = u_fx 是半透明的圖層（去背邊緣）：先疊在原畫面上再混，不然邊緣是黑的
 #define ASPECT (u_resolution.x / u_resolution.y)
 void main() {
   // 換成以畫面高度為單位的座標，才能正確旋轉
   vec2 p = vec2(v_uv.x - 0.5 - u_box.x, 0.5 - v_uv.y - u_box.y);
   p.x *= ASPECT;
   float c = cos(u_rot), s = sin(u_rot);
-  p = vec2(c * p.x + s * p.y, -s * p.x + c * p.y);
-  vec2 half_ = max(vec2(1e-4), vec2(u_box.z * ASPECT, u_box.w) * 0.5);
+  p = u_maskMatrix > 0.5 ? u_maskInv * p : vec2(c * p.x + s * p.y, -s * p.x + c * p.y);
+  vec2 half_ = max(vec2(1e-4), (u_maskMatrix > 0.5 ? vec2(ASPECT, 1.0) : vec2(u_box.z * ASPECT, u_box.w)) * 0.5);
   float d;   // 到邊界的距離（外面為正，以畫面高度為單位）
   if (u_shape == 2) {
     float k = length(p / half_);
@@ -382,7 +392,9 @@ void main() {
   float f = max(u_feather, 0.0015);
   float m = 1.0 - smoothstep(-f, f, d);
   if (u_invert > 0.5) m = 1.0 - m;
-  outColor = mix(texture(u_src, v_uv), texture(u_fx, v_uv), m);
+  vec4 base = texture(u_src, v_uv), top = texture(u_fx, v_uv);
+  if (u_over > 0.5) top += base * (1.0 - top.a);
+  outColor = mix(base, top, m);
 }`;
 
 // ───────────────────────── Renderer ─────────────────────────
@@ -1111,6 +1123,13 @@ export class Renderer {
         // 負的縮放 = 翻轉；保留正負號，只避免除以 0
         const nz = (v: number) => (v < 0 ? -1 : 1) * Math.max(0.001, Math.abs(v));
         gl.uniform2f(this.loc(p, 'u_scl'), nz(xf.scaleX), nz(xf.scaleY));
+        const m = (clip as DrawClip).animMatrix;
+        const det = m ? m[0] * m[3] - m[2] * m[1] : 0;
+        const inv = m && Math.abs(det) > 1e-8
+          ? [m[3] / det, -m[1] / det, -m[2] / det, m[0] / det]
+          : [Math.cos(xf.rotation * Math.PI / 180) / nz(xf.scaleX), -Math.sin(xf.rotation * Math.PI / 180) / nz(xf.scaleY),
+            Math.sin(xf.rotation * Math.PI / 180) / nz(xf.scaleX), Math.cos(xf.rotation * Math.PI / 180) / nz(xf.scaleY)];
+        gl.uniformMatrix2fv(this.loc(p, 'u_inv'), false, inv);
         gl.uniform1f(this.loc(p, 'u_opacity'), Math.min(1, Math.max(0, xf.opacity)));
         gl.uniform1i(this.loc(p, 'u_fit'), fit);
         gl.uniform2f(this.loc(p, 'u_native'), native?.[0] ?? 1, native?.[1] ?? 1);
@@ -1243,20 +1262,28 @@ export class Renderer {
     return tex;
   }
 
-  private maskPass(out: Target, src: Target, fxTex: Target, m: Mask) {
+  private maskPass(out: Target, src: Target, fxTex: Target, m: Mask, over = false) {
+    // 形狀貼圖要在綁貼圖之前拿：第一次用到時會建立貼圖（bindTexture 綁在目前的貼圖單元上），
+    // 放在後面會把剛綁好的 u_fx 換掉，那一格畫錯（第一次出現的遮罩形狀那一格是紅的）
+    const key = maskFieldKey(m);
+    const tex = key === 'rect' || key === 'ellipse' ? null : this.shapeTex(key);
     this.pass(out, this.maskProg, (p) => {
       const gl = this.gl;
       this.bindTex(p, 'u_src', src.tex, 0);
       this.bindTex(p, 'u_fx', fxTex.tex, 1);
-      const key = maskFieldKey(m);
-      const tex = key === 'rect' || key === 'ellipse' ? null : this.shapeTex(key);
       gl.uniform1i(this.loc(p, 'u_shape'), m.shape === 'ellipse' ? 2 : tex ? 3 : 1);
       // 沒有形狀貼圖也綁一張不相干的（理由同 drawTex 的 u_matte）
       this.bindTex(p, 'u_shapeTex', tex ?? src.tex, 2);
       gl.uniform4f(this.loc(p, 'u_box'), m.x, m.y, Math.max(0, m.w), Math.max(0, m.h));
       gl.uniform1f(this.loc(p, 'u_feather'), Math.max(0, m.feather));
       gl.uniform1f(this.loc(p, 'u_rot'), (m.rotation * Math.PI) / 180);
+      const mat = m.matrix;
+      const det = mat ? mat[0] * mat[3] - mat[2] * mat[1] : 0;
+      gl.uniform1f(this.loc(p, 'u_maskMatrix'), mat && Math.abs(det) > 1e-8 ? 1 : 0);
+      if (mat && Math.abs(det) > 1e-8) gl.uniformMatrix2fv(this.loc(p, 'u_maskInv'), false,
+        [mat[3] / det, -mat[1] / det, -mat[2] / det, mat[0] / det]);
       gl.uniform1f(this.loc(p, 'u_invert'), m.invert ? 1 : 0);
+      gl.uniform1f(this.loc(p, 'u_over'), over ? 1 : 0);
     });
   }
 
@@ -1281,12 +1308,24 @@ export class Renderer {
       }
     }
     if (!path) return null;
+    const aspect = this.w / this.h;
     const beat = animBeatAtTime(item, t, animBeatTime(item));
     const scale = draw.mask?.scale?.length ? evalKeys(draw.mask.scale, beat) : 1;
-    const guide = animLayers(item, t, animBeatTime(item)).find((l) => l.layer.id === maskLayer?.id);
+    const whole = animTransformAt(item, beat);
+    const guide: AnimDrawLayer = animLayers(item, t, animBeatTime(item), aspect).find((l) => l.layer.id === maskLayer?.id)
+      ?? { id: 'mask', slot: ref, layer: draw.layer, ...whole,
+        ...(item.transform || item.keys ? { matrix: animMatrix(DEFAULT_TRANSFORM, whole) } : {}) };
+    // 輪廓是整張素材的座標：框 = 素材照 cover（含裁切）畫進畫面的那一塊，不是整個畫面
+    const at = animClip(item, { ...guide, slot: ref }, media, aspect);
+    const F = fitSize(true, (media.width || this.w) / (media.height || this.h), aspect);
+    const cw = F[0] / aspect, ch = F[1];
+    const xf = at.transform;
+    const pivot = draw.mask?.pivot;
     return { shape: 'path', path, invert: draw.mask?.mode === 'hole',
-      x: guide?.x ?? 0, y: guide?.y ?? 0, w: Math.abs((guide?.scaleX ?? 1) * scale), h: Math.abs((guide?.scaleY ?? 1) * scale),
-      rotation: guide?.rotation ?? 0, feather: 0 };
+      x: xf.x + (pivot?.x ?? 0) * (1 - scale), y: xf.y + (pivot?.y ?? 0) * (1 - scale),
+      w: Math.abs(xf.scaleX * scale) * cw, h: Math.abs(xf.scaleY * scale) * ch,
+      rotation: xf.rotation, feather: 0,
+      ...(at.animMatrix ? { matrix: at.animMatrix.map((v, i) => v * scale * (i < 2 ? cw : ch)) as [number, number, number, number] } : {}) };
   }
 
   render(ctx: RenderCtx, t: number, mode: 'preview' | 'export', playing = false, extra?: { module: Module; progress: number; duration: number }) {
@@ -1393,20 +1432,31 @@ export class Renderer {
       }
       for (const item of ctx.anims) {
         if (item.track !== ti) continue;
-        for (const draw of animLayers(item, t, animBeatTime(item))) {
+        // 整體遮罩：每個圖層先照平常疊好，再依遮罩跟疊之前的畫面混（遮罩外 = 沒疊這個圖層）
+        const whole = item.mask ? animMaskAt(item, animBeatAtTime(item, t, animBeatTime(item))) : null;
+        for (const draw of animLayers(item, t, animBeatTime(item), this.w / this.h)) {
           const media = ctx.media.get(draw.slot.mediaId!);
           if (!draw.layer.text && (!media || media.missing)) continue;
           const clip = animClip(item, draw, media, this.w / this.h);
           active.add(clip.id);
+          const other = cur === this.targets[2] ? this.targets[3] : this.targets[2];
           if (draw.mask) {
             const mask = this.animMask(item, draw, t, ctx);
             if (!mask) continue;
             this.clear(TA, true);
             this.drawClip(TA, clip, t, ctx, mode, playing, false);
-            const out = cur === this.targets[2] ? this.targets[3] : this.targets[2];
-            this.maskPass(out, cur, TA, mask);
-            cur = out;
-          } else this.drawClip(cur, clip, t, ctx, mode, playing, clip.blend ?? true);
+            this.maskPass(other, cur, TA, mask, true);
+          } else if (whole) {
+            this.pass(other, this.blit, (p) => this.bindTex(p, 'u_tex', cur.tex, 0));
+            this.drawClip(other, clip, t, ctx, mode, playing, clip.blend ?? true);
+          } else {
+            this.drawClip(cur, clip, t, ctx, mode, playing, clip.blend ?? true);
+            continue;
+          }
+          if (whole) {
+            this.maskPass(TB, cur, other, whole);
+            this.pass(cur, this.blit, (p) => this.bindTex(p, 'u_tex', TB.tex, 0));
+          } else cur = other;
         }
       }
     });
@@ -1563,7 +1613,7 @@ export class Renderer {
       if (fr.kind === 'clip') list.push([fr.clip, t - fr.clip.start]);
       else if (fr.kind === 'transition') for (const c of [fr.A, fr.B]) if (c) list.push([c, t - c.start]);
     }
-    for (const item of ctx.anims) for (const draw of animLayers(item, t, animBeatTime(item))) {
+    for (const item of ctx.anims) for (const draw of animLayers(item, t, animBeatTime(item), this.w / this.h)) {
       if (draw.layer.text || !ctx.media.has(draw.slot.mediaId!)) continue;
       list.push([animClip(item, draw), t - item.start]);
     }

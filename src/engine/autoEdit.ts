@@ -138,6 +138,8 @@ export interface PlanMedia {
   srcId?: string;
   /** 主角的臉出現的取樣點（素材時間；圖片 t = 0）。 */
   leadPts?: { t: number; x: number; y: number; w: number; h: number }[];
+  /** 認不太出來、但同框裡最像主角的臉（只拿來決定追誰）。 */
+  leadNear?: { t: number; x: number; y: number; w: number; h: number }[];
   /** 有主角（指定的或自動找到的）：沒取樣到主角的鏡頭不追別人的臉 */
   leadKnown?: true;
   /** 整個素材平均有多少人（0..1；圖片 = 那一張）。 */
@@ -872,8 +874,10 @@ export function planEdit(input: PlanInput): EditPlan {
     const t1 = m.kind === 'image' ? 0 : shot.in + (shot.speed?.sourceMax ?? duration(shot.b0, shot.b1));
     const mid = (t0 + t1) / 2;
     // 取樣大約每秒一格：短鏡頭可能夾在兩格中間，前後放寬 1 秒
-    const pt = m.leadPts?.filter((p) => p.t >= t0 - 1 && p.t <= t1 + 1).sort((a, b) => Math.abs(a.t - mid) - Math.abs(b.t - mid))[0];
-    // 有主角、但這個鏡頭附近沒取樣到他：不追（最大的臉可能是別人）
+    const nearest = (l: typeof m.leadPts) => l?.filter((p) => p.t >= t0 - 1 && p.t <= t1 + 1).sort((a, b) => Math.abs(a.t - mid) - Math.abs(b.t - mid))[0];
+    // 認不出主角（側臉、糊掉）：用同框最像主角的那張臉
+    const pt = nearest(m.leadPts) ?? nearest(m.leadNear);
+    // 有主角、但這個鏡頭附近找不到像他的臉：不追（最大的臉可能是別人）
     if (!pt && m.leadKnown) continue;
     // 推近也對準主角，不是畫面裡最大的臉
     shot.face = pt ? { x: pt.x, y: pt.y, w: pt.w, h: pt.h } : f;

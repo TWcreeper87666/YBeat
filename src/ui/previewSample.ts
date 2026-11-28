@@ -103,9 +103,16 @@ function drawPerson(g: CanvasRenderingContext2D, w: number, h: number, fill: str
   g.save();
   g.translate(w / 2 - 32 * u, 24 * u);
   g.scale(u, u);
+  const path = new Path2D(PERSON_PATH);
   if (shadow) { g.shadowColor = '#0008'; g.shadowBlur = 6; g.shadowOffsetY = 1.5; }
   g.fillStyle = fill;
-  g.fill(new Path2D(PERSON_PATH));
+  g.fill(path);
+  // 黑色外框（遮罩也畫外框：去背時外框跟著人一起留下）
+  g.shadowColor = 'transparent';
+  g.lineJoin = 'round';
+  g.lineWidth = 0.5;
+  g.strokeStyle = shadow ? '#000' : fill;
+  g.stroke(path);
   g.restore();
 }
 
