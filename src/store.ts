@@ -1,3 +1,4 @@
+import type { CutoutEdit } from './engine/cutoutEdit';
 import { $t, displayName } from './i18n';
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
@@ -132,6 +133,8 @@ export interface Clip extends ItemBase {
   audioSplit?: boolean;
   /** AI 去背（U²-Netp，遮罩預先逐格算好） */
   aiMatte?: boolean;
+  /** AI 去背的手動修正（補上 / 擦掉；只對記下的素材有效） */
+  matteEdit?: CutoutEdit;
   /** 追蹤的目標（臉部 / 自訂框選）；套在這個片段上（或看這個片段）的特效 / 轉場的中心會跟著它 */
   subject?: Subject;
   /** 舊版欄位，載入時會轉成 keys */
@@ -184,6 +187,14 @@ export interface AudioClip extends ItemBase {
   rate: number;
   /** 變速時保持音調（沒設定 = 保持） */
   keepPitch?: boolean;
+  /** 聲道：沒設定 = 立體聲 */
+  channels?: 'left' | 'right' | 'swap' | 'mono';
+  /** 左右平衡 -1 ~ 1 */
+  pan?: number;
+  /** 整段音調，單位是半音 */
+  pitch?: number;
+  /** 片段內秒數的音量、平衡與音調關鍵影格 */
+  keys?: Partial<Record<'volume' | 'pan' | 'pitch', Keyframe[]>>;
   /** false = 不提供時間軸的節拍格線（音效之類的） */
   beats?: boolean;
 }
@@ -496,7 +507,7 @@ export function stretchPatch(type: ItemType, it: AnyItem, anchor: number, s: num
     if (c.effects?.length) patch.effects = c.effects.map((f) => (f.keys ? { ...f, keys: scaleKeyMap(f.keys, s) as Record<string, Keyframe[]> } : f));
     return patch;
   }
-  if (type === 'audio') return { ...base, rate: ((it as AudioClip).rate ?? 1) / s } as Partial<AudioClip>;
+  if (type === 'audio') return { ...base, rate: ((it as AudioClip).rate ?? 1) / s, keys: scaleKeyMap((it as AudioClip).keys, s) } as Partial<AudioClip>;
   const f = it as FxItem;
   // 有觸發的方塊：關鍵影格是「每次觸發」的時間，不跟著方塊長度縮放
   if (f.trigger) return base as Partial<FxItem>;
@@ -654,7 +665,8 @@ export const useStore = create<State>()(
         }
         if (type === 'audio') {
           const a = it as AudioClip;
-          return [{ ...a, duration: local, fadeOut: 0 }, { ...a, id: uid(), start: t, duration: a.duration - local, in: a.in + local * (a.rate ?? 1), fadeIn: 0 }];
+          const [ka, kb] = splitKeys(a.keys ?? {}, local);
+          return [{ ...a, duration: local, fadeOut: 0, keys: ka }, { ...a, id: uid(), start: t, duration: a.duration - local, in: a.in + local * (a.rate ?? 1), fadeIn: 0, keys: kb }];
         }
         const f = it as FxItem;
         // 有觸發的方塊：關鍵影格是「每次觸發」的時間，兩半都照原樣保留；手動的 Hit 分到兩段
@@ -1827,8 +1839,13 @@ export const useStore = create<State>()(
                 joined = { ...a, duration: a.duration + b.duration, keys, transitionOut: b.transitionOut ?? null, effects };
               } else if (type === 'audio') {
                 const a = A as AudioClip, b = B as AudioClip;
-                if (a.mediaId !== b.mediaId || (a.rate ?? 1) !== (b.rate ?? 1) || Math.abs(a.in + a.duration * (a.rate ?? 1) - b.in) > 0.05) continue;
-                joined = { ...a, duration: a.duration + b.duration, fadeOut: b.fadeOut };
+                if (a.mediaId !== b.mediaId || (a.rate ?? 1) !== (b.rate ?? 1) || (a.channels ?? 'stereo') !== (b.channels ?? 'stereo') || (a.pan ?? 0) !== (b.pan ?? 0) || (a.pitch ?? 0) !== (b.pitch ?? 0) || Math.abs(a.in + a.duration * (a.rate ?? 1) - b.in) > 0.05) continue;
+                const keys: NonNullable<AudioClip['keys']> = {};
+                for (const k of ['volume', 'pan', 'pitch'] as const) {
+                  const ka = a.keys?.[k], kb = b.keys?.[k];
+                  if (ka?.length || kb?.length) keys[k] = [...(ka ?? []), ...(kb ?? []).map((x) => ({ ...x, t: x.t + a.duration }))];
+                }
+                joined = { ...a, duration: a.duration + b.duration, fadeOut: b.fadeOut, keys };
               } else {
                 const a = A as FxItem, b = B as FxItem;
                 if (a.moduleId !== b.moduleId || JSON.stringify(a.params) !== JSON.stringify(b.params)) continue;

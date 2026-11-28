@@ -1,7 +1,8 @@
 (globalThis as any).localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
 (globalThis as any).window = globalThis;
 import { strict as assert } from 'node:assert';
-import { animLayers, animMaskAt, animTemplate, snapAnimBeats } from '../src/engine/animation';
+import { animLayers, animMaskAt, animTemplate, layerBoxToScreen, layerMaskToScreen, screenBoxToLayer, snapAnimBeats } from '../src/engine/animation';
+import { clipEdit, slotEdit } from '../src/engine/cutoutEdit';
 import { expandPop, POP_VARIANTS } from '../src/engine/subjectPop';
 import { setBeatSource } from '../src/engine/trigger';
 import { settleHistory, undo, resetHistory } from '../src/engine/history';
@@ -262,4 +263,33 @@ console.log('PASS animation store operations and undo');
   assert.equal(animMaskAt(item, 1)!.w, 0.5);
   assert.equal(animMaskAt({ ...item, mask: { mask: { ...mask, shape: 'none' } } }, 1), null);
   console.log('PASS whole-animation mask');
+}
+
+{
+  // 圖層遮罩跟著圖層：圖層移到右邊、放大兩倍 → 遮罩中心跟著移、框跟著變大
+  const A = 9 / 16;
+  const m = { shape: 'rect', invert: false, x: 0.1, y: 0, w: 0.2, h: 0.1, feather: 0, rotation: 0 };
+  const d = { x: 0.25, y: 0, scaleX: 2, scaleY: 2, rotation: 0 };
+  const scr = layerMaskToScreen(m, d, A);
+  assert.ok(Math.abs(scr.x - 0.45) < 1e-9 && Math.abs(scr.y) < 1e-9);
+  assert.ok(scr.matrix && Math.abs(scr.matrix[0] - 0.4) < 1e-9 && Math.abs(scr.matrix[3] - 0.2) < 1e-9);
+  // 畫面上的框 ↔ 圖層座標（旋轉 + 等比縮放）來回換算不變
+  const rot = { x: -0.1, y: 0.2, scaleX: 1.5, scaleY: 1.5, rotation: 30 };
+  const box = layerBoxToScreen(m, rot, A);
+  const back = screenBoxToLayer(box, rot, A, m);
+  for (const k of ['x', 'y', 'w', 'h', 'rotation'] as const) assert.ok(Math.abs(back[k]! - m[k]) < 1e-9, k);
+  console.log('PASS layer mask follows the layer');
+}
+
+{
+  // 去背修正只對記下的那個素材有效（換了素材不套用；關掉去背也不套用）
+  const edit = { mediaId: 'a', fix: [{ op: 'add' as const, pts: [[0.5, 0.5]] as [number, number][], brush: 0.1 }] };
+  const slot = { mediaId: 'a', cutout: { mode: 'auto' as const, edit } };
+  assert.equal(slotEdit(slot), edit);
+  assert.equal(slotEdit({ ...slot, mediaId: 'b' }), null);
+  assert.equal(slotEdit({ ...slot, cutout: { ...slot.cutout, mode: 'off' as const } }), null);
+  assert.equal(slotEdit({ ...slot, cutout: { mode: 'auto' as const, edit: { mediaId: 'a', fix: [] } } }), null);
+  assert.equal(clipEdit({ mediaId: 'a', aiMatte: true, matteEdit: edit }), edit);
+  assert.equal(clipEdit({ mediaId: 'a', aiMatte: undefined, matteEdit: edit }), null);
+  console.log('PASS cutout edit');
 }

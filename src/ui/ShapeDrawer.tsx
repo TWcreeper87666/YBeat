@@ -1,3 +1,4 @@
+import { useLocalView, useWheelZoom, ZoomBadge } from './zoomView';
 import { $t } from '../i18n';
 import { dragPan } from './middlePan';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -164,31 +165,13 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
   const stage = useStageSize(W, H);
 
   // ── 檢視縮放 / 平移：滾輪縮放（以滑鼠為中心）、中鍵或按住空白鍵拖曳平移 ──
-  const [view, setView] = useState({ z: 1, px: 0, py: 0 });
-  const viewRefState = useRef(view);
-  viewRefState.current = view;
+  const { view, get: getView, setView, reset: resetView } = useLocalView();
   const stageRef = useRef<HTMLDivElement>(null);
   const space = useRef(false);
-  const resetView = () => setView({ z: 1, px: 0, py: 0 });
-  useEffect(() => {
-    const el = stageRef.current;
-    if (!el) return;
-    // 2D 畫面：滾輪直接縮放（刻意跟時間軸類的「Ctrl + 滾輪縮放」不同，見 wheelView）
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      const v = viewRefState.current;
-      const r = el.getBoundingClientRect();
-      const mx = e.clientX - r.left, my = e.clientY - r.top;
-      const z = Math.min(16, Math.max(0.5, v.z * Math.pow(1.0015, -e.deltaY)));
-      const k = z / v.z;
-      setView({ z, px: mx - (mx - v.px) * k, py: my - (my - v.py) * k });
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-  }, []);
+  useWheelZoom(stageRef, getView, setView, { min: 0.5, max: 16, origin: 'corner' });
   const onStageDownCapture = (e: React.PointerEvent) => {
     if (e.button !== 1 && !(e.button === 0 && space.current)) return;
-    const v0 = viewRefState.current;
+    const v0 = getView();
     dragPan(e, (dx, dy) => setView({ ...v0, px: v0.px + dx, py: v0.py + dy }));
   };
   useEffect(() => {
@@ -617,9 +600,7 @@ function ShapeDrawer({ id, targetKey, onSaved, close }: { id?: string; targetKey
               }}
             />
           )}
-          <button className="view-zoom sd-zoom" title={$t('檢視縮放（滾輪縮放、中鍵或空白鍵拖曳平移；點一下回到符合視窗）')} onClick={resetView}>
-            {Math.round(view.z * 100)}%
-          </button>
+          <ZoomBadge className="sd-zoom" z={view.z} onReset={resetView} title={$t('檢視縮放（滾輪縮放、中鍵或空白鍵拖曳平移；點一下回到符合視窗）')} />
         </div>
         <div className="dialog-actions sd-foot">
           <input className="sd-name" value={name} onChange={(e) => setName(e.target.value)} placeholder={$t('名稱')} />

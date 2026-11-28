@@ -1,6 +1,9 @@
 import { $t, displayName } from '../i18n';
-import { Layers, AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2, Zap, Crosshair } from 'lucide-react';
+import { Layers, AlignCenter, AlignLeft, AlignRight, Bold, BookmarkPlus, CopyCheck, CircleCheck, Italic, Music, Pipette, Play, Plus, TriangleAlert, Pencil, ChevronDown, ChevronRight, ChevronUp, Eye, EyeOff, Sparkles, Trash2, SquareDashedMousePointer, SquareDashed, PenTool, Unlink, Link2, Unlink2, Zap, Crosshair, Scissors } from 'lucide-react';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { ClipCutoutEditor } from './CutoutEditor';
+import { clipEdit } from '../engine/cutoutEdit';
 import { cutPoints, cutTracks, manualHits, newSeed, triggerBeats, triggerOpts, type FxTrigger } from '../engine/trigger';
 import { attachedAudioIds, keyOf, uid, type ClipFx, hasLinkedAudio, parseTrSel, type TrScope, type TransitionRef, type TrSide, laneOf, mediaUsable, spansOf, useStore, type AudioDrive, type AudioFrom, type BlendMode, type Clip, type FxItem, type Media, type ModuleKind } from '../store';
 import { fxLevel } from '../engine/tracks';
@@ -17,7 +20,7 @@ import { DEFAULT_MASK, type Mask } from '../engine/mask';
 import { CLIP_MASK_ID } from '../modules/extra';
 import { mediaBeats } from '../engine/beats';
 import { shapeName } from '../engine/maskShapes';
-import type { AnimProp, Bez, Keyframe } from '../engine/keyframes';
+import { evalKeys, scaleKeyMap, sortKeys, type AnimProp, type Bez, type Keyframe } from '../engine/keyframes';
 import { isNumeric, canFollow, isHitFx, paramAt, parseDuration, parseParams, parsePointCh, resolveParams, type ParamDef, type ParamValue, type ParamValues } from '../engine/params';
 import { CurveEdit } from './CurveEdit';
 import { updateText } from '../engine/textAnchor';
@@ -61,7 +64,7 @@ import { openShapeDrawer } from './ShapeDrawer';
 import { followMenu, followReset } from './followUi';
 import { fitOf, followOf, tracking, type Follow, type FollowMap, type Subject } from '../engine/follow';
 import { startBoxPick, stopBoxPick, useBoxPick, useSubjectStatus } from './subjectUi';
-import { EffectControls, curveChannel, focusSection, cfxCh, clipChannels, clipHost, fxChannels, fxHost, maskChannels, updateStackFx, type Channel, type Section } from './EffectControls';
+import { EffectControls, curveChannel, focusSection, cfxCh, clipChannels, clipHost, fxChannels, fxHost, maskChannels, registerHostKind, updateStackFx, type Channel, type Host, type Section } from './EffectControls';
 import { Check, Seg, SegToggles, Switch } from './Toggle';
 import { hasFrom } from '../engine/audioReact';
 
@@ -910,6 +913,18 @@ function BoxTargetRow({ clip }: { clip: Clip }) {
 }
 
 /** AI 去背的計算進度 / 失敗重試 */
+/** 開啟「修正去背」視窗（補上 / 擦掉） */
+function MatteFixButton({ clip }: { clip: Clip }) {
+  const [open, setOpen] = useState(false);
+  const on = !!clipEdit(clip);
+  return (
+    <>
+      <button className={`btn small-h ${on ? 'on-accent' : ''}`} onClick={() => setOpen(true)}><Scissors size={12} /> {$t('修正去背')}</button>
+      {open && createPortal(<ClipCutoutEditor clipId={clip.id} onClose={() => setOpen(false)} />, document.body)}
+    </>
+  );
+}
+
 function MatteStatus({ clip, media }: { clip: Clip; media: Media }) {
   useMatte((s) => s.ver);
   const job = useMatte((s) => s.jobs[media.id]);
@@ -1148,9 +1163,12 @@ function ClipInspector({ id }: { id: string }) {
     title: $t('AI 去背'),
     rows: [
       { label: $t('啟用'), node: <Switch v={!!clip.aiMatte} on={(v) => updateClip(clip.id, { aiMatte: v || undefined })} /> },
-      ...(clip.aiMatte ? [{ label: $t('狀態'), node: <MatteStatus clip={clip} media={media} /> }] : []),
+      ...(clip.aiMatte ? [
+        { label: $t('狀態'), node: <MatteStatus clip={clip} media={media} /> },
+        { label: $t('修正'), node: <MatteFixButton clip={clip} /> },
+      ] : []),
     ],
-    onReset: () => updateClip(clip.id, { aiMatte: undefined }),
+    onReset: () => updateClip(clip.id, { aiMatte: undefined, matteEdit: undefined }),
   });
   if (!isText && media && (media.kind === 'video' || media.kind === 'image')) {
     const setKind = (k: string) => {
@@ -1988,23 +2006,64 @@ function TransitionInspector({ selId }: { selId: string }) {
   );
 }
 
+type AudioChannel = 'volume' | 'pan' | 'pitch';
+const AUDIO_CHANNELS: AudioChannel[] = ['volume', 'pan', 'pitch'];
+
+function audioHost(id: string): Host | null {
+  const a = useStore.getState().audios.find((x) => x.id === id);
+  if (!a) return null;
+  return {
+    owner: `audio:${id}`, start: a.start, duration: a.duration,
+    setKeys(ch, list, base) {
+      const cur = useStore.getState().audios.find((x) => x.id === id);
+      if (!cur || !AUDIO_CHANNELS.includes(ch as AudioChannel)) return;
+      const keys = { ...cur.keys };
+      if (list?.length) keys[ch as AudioChannel] = sortKeys(ch === 'pitch' ? list.map((k) => ({ ...k, v: k.v - (cur.pitch ?? 0) })) : list);
+      else delete keys[ch as AudioChannel];
+      useStore.getState().updateAudio(id, { keys, ...(!list?.length && base !== undefined ? { [ch]: base } : {}) });
+    },
+    setBase(ch, v) {
+      if (AUDIO_CHANNELS.includes(ch as AudioChannel)) useStore.getState().updateAudio(id, { [ch]: v });
+    },
+  };
+}
+
+registerHostKind('audio', {
+  host: audioHost,
+  keys: (id, ch) => {
+    const a = useStore.getState().audios.find((x) => x.id === id);
+    const list = a?.keys?.[ch as AudioChannel] ?? [];
+    return ch === 'pitch' ? list.map((k) => ({ ...k, v: k.v + (a?.pitch ?? 0) })) : list;
+  },
+  all: (id) => AUDIO_CHANNELS.flatMap((ch) => (useStore.getState().audios.find((x) => x.id === id)?.keys?.[ch] ?? []).map((k) => ({ ch, id: k.id }))),
+});
+
 function AudioInspector({ id }: { id: string }) {
   const a = useStore((s) => s.audios.find((c) => c.id === id));
   const media = useStore((s) => s.media.find((m) => m.id === a?.mediaId));
   const attached = useStore((s) => !!a && attachedAudioIds(s).has(a.id));
+  const time = useStore((s) => s.time);
   if (!a) return null;
   const { updateAudio } = useStore.getState();
   const bpm = mediaBeats(media)?.bpm;
+  const host = audioHost(id)!;
+  const local = Math.max(0, Math.min(a.duration, time - a.start));
+  const channels: Channel[] = [
+    { id: 'volume', label: $t('音量'), value: a.keys?.volume?.length ? evalKeys(a.keys.volume, local) : a.volume, keys: a.keys?.volume ?? [], def: 1, min: 0, max: 1, step: 0.01, display: 100, suffix: '%' },
+    { id: 'pan', label: $t('平衡'), value: a.keys?.pan?.length ? evalKeys(a.keys.pan, local) : a.pan ?? 0, keys: a.keys?.pan ?? [], def: 0, min: -1, max: 1, step: 0.01, display: 100 },
+    { id: 'pitch', label: $t('音調'), value: (a.pitch ?? 0) + (a.keys?.pitch?.length ? evalKeys(a.keys.pitch, local) : 0), keys: a.keys?.pitch?.map((k) => ({ ...k, v: k.v + (a.pitch ?? 0) })) ?? [], def: 0, min: -24, max: 24, step: 0.1, suffix: $t('半音') },
+  ];
   return (
-    <PlainControls
+    <EffectControls host={host}
       title={<Title kind="k-audio" label={$t('音訊')} name={a.name ?? media?.name ?? $t('（素材遺失）')} onRename={(n) => useStore.getState().renameItem('audio', a.id, n)} />}
-      rows={[
-        ...infoRows(a, media ?? undefined),
-        { label: $t('音量'), node: <DragNumber variant="text" value={a.volume} min={0} max={1} step={0.01} display={100} suffix="%" def={1} onChange={(v) => updateAudio(id, { volume: v })} /> },
+      sections={[{ id: 'info', title: $t('資訊'), rows: infoRows(a, media ?? undefined) }, { id: 'sound', title: $t('聲音'), channels, rows: [
         { label: $t('淡入'), node: <DragNumber variant="text" value={a.fadeIn} min={0} max={Math.min(10, a.duration)} step={0.01} suffix="s" def={0} onChange={(v) => updateAudio(id, { fadeIn: v })} /> },
         { label: $t('淡出'), node: <DragNumber variant="text" value={a.fadeOut} min={0} max={Math.min(10, a.duration)} step={0.01} suffix="s" def={0} onChange={(v) => updateAudio(id, { fadeOut: v })} /> },
-        { label: $t('速率'), node: <DragNumber variant="text" value={a.rate ?? 1} min={0.1} max={4} step={0.01} suffix="×" def={1} onChange={(v) => updateAudio(id, { rate: v, duration: Math.min(a.duration * ((a.rate ?? 1) / v), maxDurFor('audio', a)) })} /> },
+        { label: $t('速率'), node: <DragNumber variant="text" value={a.rate ?? 1} min={0.1} max={4} step={0.01} suffix="×" def={1} onChange={(v) => { const duration = Math.min(a.duration * ((a.rate ?? 1) / v), maxDurFor('audio', a)); updateAudio(id, { rate: v, duration, keys: scaleKeyMap(a.keys, duration / a.duration) }); }} /> },
         { label: $t('保持音調'), node: <PitchSwitch v={a.keepPitch !== false} on={(v) => updateAudio(id, { keepPitch: v })} /> },
+        { label: $t('聲道'), node: <Seg value={a.channels ?? 'stereo'} on={(v) => updateAudio(id, { channels: v === 'stereo' ? undefined : v })} opts={[
+          { v: 'stereo', label: $t('立體聲') }, { v: 'left', label: $t('左') }, { v: 'right', label: $t('右') }, { v: 'swap', label: $t('對調') }, { v: 'mono', label: $t('單聲道') },
+        ] as const} /> },
         // 節拍格線的來源（連結在影片上的原音不提供）
         ...(attached
           ? []
@@ -2012,7 +2071,7 @@ function AudioInspector({ id }: { id: string }) {
               { label: $t('節拍格線'), node: <Switch v={a.beats !== false} on={(v) => updateAudio(id, { beats: v ? undefined : false })} /> },
               ...(a.beats !== false && bpm ? [{ label: 'BPM', node: <span className="muted">{bpm.toFixed(1)}</span> }] : []),
             ]),
-      ]}
+      ] }]}
     />
   );
 }

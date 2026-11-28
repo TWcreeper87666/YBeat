@@ -361,7 +361,7 @@ function clipMaxDur(c: Clip): number {
 
 /** 點擊 / 拖曳時間軸項目：處理 Ctrl / Shift 選取，以及整組移動（可跨軌） */
 /** 雙擊片段 / 特效：選取並打開編輯視窗 */
-function openItemEditor(type: 'clip' | 'effect' | 'anim', id: string) {
+function openItemEditor(type: 'clip' | 'effect' | 'anim' | 'audio', id: string) {
   const s = useStore.getState();
   if (s.selection?.type !== type || s.selection.id !== id) s.select({ type, id });
   openEditorWindow();
@@ -596,7 +596,7 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
       if (trimItems.length > 1) {
         for (const { type: itemType, item } of trimItems) {
           const itemPatch = stretchPatch(itemType, item, anchor, sc);
-          patches[keyOf(itemType, item.id)] = speedMode !== speeding ? { ...item, ...itemPatch } : itemPatch;
+          patches[keyOf(itemType, item.id)] = (speedMode !== speeding ? { ...item, ...itemPatch } : itemPatch) as Partial<AnyItem>;
           resizedSpans.push({ lane: laneOf(itemType, item.track), start: itemPatch.start!, duration: itemPatch.duration! });
           if (itemType === 'clip') {
             const audio = linkedAudioOf(S, item as Clip);
@@ -625,7 +625,7 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
         if (side === 'r') {
           const duration = Math.max(0.05, Math.min(itemEndBounds(itemType, item).max - item.start, edge - item.start));
           const itemPatch = { duration };
-          patches[keyOf(itemType, item.id)] = speedMode !== speeding ? { ...item, ...itemPatch } : itemPatch;
+          patches[keyOf(itemType, item.id)] = (speedMode !== speeding ? { ...item, ...itemPatch } : itemPatch) as Partial<AnyItem>;
           resizedSpans.push({ lane: laneOf(itemType, item.track), start: item.start, duration });
           if (itemType === 'clip') addLinkedAudioPatch(patches, item as Clip, edge, speedMode !== speeding);
         } else {
@@ -637,7 +637,7 @@ function resizeItem(e: React.PointerEvent, type: ItemType, it: AnyItem, side: 'l
             duration: itemEnd - start,
             ...(itemHasIn(itemType, item) ? { in: Math.max(0, ((item as Clip | AudioClip).in ?? 0) + (start - item.start) * speed) } : {}),
           };
-          patches[keyOf(itemType, item.id)] = speedMode !== speeding ? { ...item, ...itemPatch } : itemPatch;
+          patches[keyOf(itemType, item.id)] = (speedMode !== speeding ? { ...item, ...itemPatch } : itemPatch) as Partial<AnyItem>;
           resizedSpans.push({ lane: laneOf(itemType, item.track), start, duration: itemPatch.duration! });
           if (itemType === 'clip') addLinkedAudioPatch(patches, item as Clip, start, speedMode !== speeding);
         }
@@ -834,7 +834,7 @@ function itemMenu(e: React.MouseEvent, type: ItemType, it: AnyItem, media?: Medi
   const n = useStore.getState().selected.length;
   const items: MenuItem[] = [
     // 編輯視窗：屬性 + 預覽的對話框（影片 / 文字片段、特效軌的特效）
-    ...(type !== 'audio' ? [{ label: $t('在編輯視窗中編輯…'), shortcut: $t('雙擊'), action: () => openItemEditor(type, it.id) }, { separator: true } as MenuItem] : []),
+    { label: $t('在編輯視窗中編輯…'), shortcut: $t('雙擊'), action: () => openItemEditor(type, it.id) }, { separator: true } as MenuItem,
     // 分割（S）、修剪（Q / W）不放選單：快捷鍵與工具列就夠了
     { label: $t('節拍'), submenu: beatMenuItems() },
     { separator: true },
@@ -1371,6 +1371,7 @@ const AudioView = React.memo(function AudioView({ a, m, pps, sel }: { a: AudioCl
       style={{ left: a.start * pps, width: w, '--x': `${a.start * pps}px`, '--w': `${w}px`, '--overlap-left': `${preview.affected?.left ?? 0}px`, '--overlap-width': `${preview.affected?.width ?? 0}px` } as React.CSSProperties}
       title={ok ? undefined : $t('素材遺失：右鍵「重新連結素材…」')}
       onPointerDown={(e) => itemPointerDown(e, 'audio', a)}
+      onDoubleClick={() => openItemEditor('audio', a.id)}
       onContextMenu={(e) => itemMenu(e, 'audio', a, m)}
     >
       {ok && <Waveform media={m} inT={a.in} dur={a.duration * (a.rate ?? 1)} width={w} gain={{ volume: a.volume, fadeIn: a.fadeIn, fadeOut: a.fadeOut, len: a.duration }} />}

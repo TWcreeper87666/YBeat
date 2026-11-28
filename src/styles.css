@@ -1353,6 +1353,9 @@ body.rotating, body.rotating * { cursor: var(--cursor-rotate) !important; }
 .editor-sash::after { content: ""; position: absolute; inset: -4px 0; }
 .editor-sash.side::after { inset: 0 -4px; }
 .editor-layouts button { width: 30px; height: 24px; display: inline-flex; align-items: center; justify-content: center; }
+.audio-wave { position: relative; flex: 1; min-width: 0; min-height: 0; cursor: crosshair; touch-action: none; }
+.audio-wave canvas.wave { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.audio-wave-head { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent-bright); pointer-events: none; }
 
 /* 編輯視窗的預覽：檢視縮放 / 平移 */
 .preview.pannable { cursor: grab; }
@@ -1958,3 +1961,21 @@ input[type=color]::-moz-color-swatch { border: none; border-radius: 3px; box-sha
 .anim-slot .dragnum { flex: none; width: 70px; }
 .anim-slot-cut { flex: none; display: inline-flex; }
 .anim-slot.off .anim-slot-pick { opacity: .4; }
+
+/* 修正去背（跟編輯視窗同一套外觀：標題列、左邊工具、右邊畫面） */
+/* 在編輯視窗（90）上面、確認視窗（.overlay 100）下面 */
+.cut-overlay { z-index: 95; }
+.cut-window { width: min(1200px, 94vw); height: min(860px, 90vh); }
+.cut-body { grid-template-columns: 260px 1fr; gap: 4px; }
+.cut-props { flex: 1; overflow-y: auto; }
+.cut-props .seg button { display: inline-flex; align-items: center; justify-content: center; min-width: 52px; padding: 2px 10px; }
+.cut-props .dragnum { width: 80px; }
+.cut-view { position: relative; background: var(--stage-bg); cursor: crosshair; touch-action: none; user-select: none; }
+.cut-view.brush { cursor: none; }
+.cut-stage { position: absolute; background: repeating-conic-gradient(#3a3a3a 0 25%, #2a2a2a 0 50%) 0 0 / 16px 16px; }
+.cut-stage > img, .cut-stage > video, .cut-stage > canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
+.cut-stage > svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.cut-stage svg polyline.lasso { fill: #ffffff22; stroke: #fff; stroke-width: 1.5px; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.cut-stage svg polyline.lasso.erase { fill: #ff284622; }
+.cut-cursor { position: absolute; transform: translate(-50%, -50%); border: 1.5px solid #fff; border-radius: 50%; box-shadow: 0 0 0 1px #000; pointer-events: none; }
+.cut-wait { position: absolute; inset: 0; display: grid; place-items: center; color: #fff; background: #0008; }

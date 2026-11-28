@@ -92,9 +92,9 @@ export function upsertKey(keys: Keyframe[], t: number, v: number): Keyframe[] {
 export const keyAt = (keys: Keyframe[] | undefined, t: number) => keys?.find((k) => Math.abs(k.t - t) < EPS);
 
 /** 把關鍵影格在 local 切成兩段（分割片段用） */
-export function splitKeys(keys: Keys, local: number): [Keys, Keys] {
-  const a: Keys = {}, b: Keys = {};
-  for (const [p, list] of Object.entries(keys) as [AnimProp, Keyframe[]][]) {
+export function splitKeys<K extends string>(keys: Partial<Record<K, Keyframe[]>>, local: number): [Partial<Record<K, Keyframe[]>>, Partial<Record<K, Keyframe[]>>] {
+  const a: Partial<Record<K, Keyframe[]>> = {}, b: Partial<Record<K, Keyframe[]>> = {};
+  for (const [p, list] of Object.entries(keys) as [K, Keyframe[]][]) {
     if (!list?.length) continue;
     const v = evalKeys(list, local);
     const prev = [...list].reverse().find((k) => k.t <= local);

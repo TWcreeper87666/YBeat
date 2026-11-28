@@ -4,6 +4,7 @@ import type { ClipFx } from '../store';
 import type { Crop } from './transform';
 import { DEFAULT_TRANSFORM, type Transform } from './transform';
 import { maskAt, type Mask } from './mask';
+import type { CutoutEdit } from './cutoutEdit';
 
 export interface AnimSlot {
   id: string;
@@ -12,7 +13,8 @@ export interface AnimSlot {
   mediaId: string | null;
   sourceTime: number;
   crop?: Crop;
-  cutout?: { mode: 'auto' | 'off'; outline?: string };
+  /** edit：手動修正（補上 / 擦掉、轉成路徑），只對 edit 記的那張圖、那一格有效 */
+  cutout?: { mode: 'auto' | 'off'; outline?: string; edit?: CutoutEdit };
   /** 不顯示（用到這個位置的圖層都不畫；例如不要背景，看下面的軌道） */
   hidden?: true;
 }
@@ -31,6 +33,8 @@ export interface AnimLayer {
   mask?: { slotId: string; layerId?: string; mode: 'window' | 'hole'; scale?: Keyframe[]; pivot?: { x: number; y: number } };
   effects?: (ClipFx & { beatEvery?: 1 | 2; hitBeats?: number })[];
   text?: string;
+  /** 圖層自己的遮罩：座標以圖層本身為準（圖層在原位、沒縮放時的畫面座標），圖層動遮罩跟著動；關鍵影格（mask.x…）用拍 */
+  clipMask?: { mask: Mask; keys?: Record<string, Keyframe[]> };
 }
 
 export interface AnimItem {
@@ -203,3 +207,57 @@ export function animTemplate(variant: PopVariant, opts: { id: string; start: num
 
 export const ANIM_TEMPLATES = Object.fromEntries(POP_VARIANTS.map((variant) =>
   [variant, animTemplate(variant, { id: `template:${variant}`, start: 0, duration: 4 })])) as Record<PopVariant, AnimItem>;
+
+// ───── 圖層自己的遮罩（跟著圖層動） ─────
+
+type LayerXf = Pick<AnimDrawLayer, 'x' | 'y' | 'scaleX' | 'scaleY' | 'rotation' | 'matrix'>;
+/** 圖層的 2×2 變換（以畫面高度為單位，column-major）：有整體變換時用 matrix，沒有 = 旋轉 × 縮放 */
+export function layerMatrix(d: LayerXf): [number, number, number, number] {
+  if (d.matrix) return d.matrix;
+  const r = (d.rotation * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r);
+  return [c * d.scaleX, s * d.scaleX, -s * d.scaleY, c * d.scaleY];
+}
+
+/** 圖層遮罩在第 beat 拍的樣子（圖層座標；沒有形狀 = null） */
+export const layerMaskAt = (layer: AnimLayer, beat: number) => maskAt(layer.clipMask?.mask, layer.clipMask?.keys, beat);
+
+/** 圖層座標的遮罩 → 畫面上的遮罩（渲染用，含變換矩陣，非等比縮放也正確） */
+export function layerMaskToScreen(m: Mask, d: LayerXf, aspect: number): Mask {
+  const M = layerMatrix(d);
+  const cu = m.x * aspect, cv = m.y;
+  const r = (m.rotation * Math.PI) / 180, c = Math.cos(r), s = Math.sin(r);
+  const B = [c * m.w, s * m.w, -s * m.h, c * m.h];
+  const matrix: [number, number, number, number] = [
+    M[0] * B[0] + M[2] * B[1], M[1] * B[0] + M[3] * B[1],
+    M[0] * B[2] + M[2] * B[3], M[1] * B[2] + M[3] * B[3]];
+  return { ...m, x: d.x + (M[0] * cu + M[2] * cv) / aspect, y: d.y + M[1] * cu + M[3] * cv, matrix };
+}
+
+type Box = Pick<Mask, 'x' | 'y' | 'w' | 'h' | 'rotation'>;
+/** 預覽上的編輯框：圖層座標 → 畫面（旋轉 / 等比縮放準確；非等比縮放加上旋轉時是近似的外框） */
+export function layerBoxToScreen(m: Box, d: LayerXf, aspect: number): Box {
+  const M = layerMatrix(d);
+  const sx = Math.hypot(M[0], M[1]), sy = Math.hypot(M[2], M[3]);
+  const th = (Math.atan2(M[1], M[0]) * 180) / Math.PI;
+  const cu = m.x * aspect, cv = m.y;
+  return { x: d.x + (M[0] * cu + M[2] * cv) / aspect, y: d.y + M[1] * cu + M[3] * cv, w: m.w * sx, h: m.h * sy, rotation: m.rotation + th };
+}
+
+/** 反過來：畫面上改了哪些值 → 圖層座標的值（只換算有給的那幾個） */
+export function screenBoxToLayer(v: Partial<Box>, d: LayerXf, aspect: number, cur: Box): Partial<Box> {
+  const M = layerMatrix(d);
+  const sx = Math.hypot(M[0], M[1]) || 1, sy = Math.hypot(M[2], M[3]) || 1;
+  const th = (Math.atan2(M[1], M[0]) * 180) / Math.PI;
+  const out: Partial<Box> = {};
+  if (v.x !== undefined || v.y !== undefined) {
+    const scr = layerBoxToScreen(cur, d, aspect);
+    const X = ((v.x ?? scr.x) - d.x) * aspect, Y = (v.y ?? scr.y) - d.y;
+    const det = M[0] * M[3] - M[2] * M[1] || 1e-9;
+    out.x = ((M[3] * X - M[2] * Y) / det) / aspect;
+    out.y = (-M[1] * X + M[0] * Y) / det;
+  }
+  if (v.w !== undefined) out.w = v.w / sx;
+  if (v.h !== undefined) out.h = v.h / sy;
+  if (v.rotation !== undefined) out.rotation = v.rotation - th;
+  return out;
+}

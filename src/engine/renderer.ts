@@ -4,7 +4,8 @@ import { holdScrub, scrubFrameAt } from './scrubCache';
 import { previewUrl } from './proxy';
 import { ensureReverseFrames, reverseFrameAt } from './reverseCache';
 import { fxLevel, makeClip, type AnimItem, type BlendMode, type TransitionRef, type AudioClip, type AudioDrive, type AudioFrom, type Clip, type FxItem, type Media, type Module, type Tracks } from '../store';
-import { animBeatAtTime, animBeatLen, animLayers, animMaskAt, animMatrix, animSecAt, animTransformAt, type AnimDrawLayer } from './animation';
+import { animBeatAtTime, animBeatLen, animLayers, animMaskAt, animMatrix, animSecAt, animTransformAt, layerMaskAt, layerMaskToScreen, type AnimDrawLayer } from './animation';
+import { clipEdit, EDIT_SIZE, editedMatte, editKey, slotEdit, type CutoutEdit } from './cutoutEdit';
 import { traceMatte } from './subjectPop';
 import { maskAt, type Mask } from './mask';
 import { FIELD_RANGE, getShapeField, maskFieldKey, type ShapeField } from './maskShapes';
@@ -62,11 +63,21 @@ function animClip(item: AnimItem, draw: AnimDrawLayer, media?: Media, frameAspec
   const y = matrix && frameAspect ? draw.y + matrix[1] * cropX * frameAspect + matrix[3] * cropY : draw.y + cropY * draw.scaleY;
   const clip = makeClip({ id: `anim:${item.id}:${s.id}:${draw.id}`, mediaId: s.mediaId!, track: item.track,
     start: item.start, duration: item.duration, in: s.sourceTime, rate: 0,
-    aiMatte: s.cutout?.mode === 'auto', blend: draw.layer.blend,
+    aiMatte: s.cutout?.mode === 'auto', matteEdit: s.cutout?.edit, blend: draw.layer.blend,
     transform: { x, y,
       scaleX: draw.scaleX * (crop?.s ?? 1), scaleY: draw.scaleY * (crop?.s ?? 1), rotation: draw.rotation, opacity: draw.opacity },
     effects, ...(draw.layer.text ? { text: { ...DEFAULT_TEXT, ...ANIM_TEXT, text: draw.layer.text }, fit: 'contain' as const } : {}) });
   return matrix ? Object.assign(clip, { animMatrix: matrix.map((v) => v * (crop?.s ?? 1)) as [number, number, number, number] }) : clip;
+}
+
+/** 去背用的遮罩：有手動修正就是修正後的（EDIT_SIZE），沒有 = AI 遮罩；還沒好 = null */
+function slotMatte(media: Media, t: number, edit: CutoutEdit | null): { data: Uint8Array; size: number; stamp: string } | null {
+  const m = matteAt(media, t);
+  if (!m) return null;
+  const base = `${media.id}:${m.idx}`;
+  if (!edit) return { data: m.data, size: MATTE_SIZE, stamp: base };
+  const data = editedMatte({ data: m.data, size: MATTE_SIZE }, edit.fix, (media.width || 1) / (media.height || 1), base);
+  return { data, size: EDIT_SIZE, stamp: `${base}:${editKey(edit)}` };
 }
 
 export type FrameInfo =
@@ -988,7 +999,8 @@ export class Renderer {
       return this.drawTex(target, clip, local, this.missingTex(), fake, blend);
     }
     let matteSrc = 0;
-    if (media.kind === 'image') tex = this.imageTex(media, local);
+    // 動態圖片：遮罩也照片段內時間找那一格
+    if (media.kind === 'image') { tex = this.imageTex(media, local); matteSrc = local; }
     else if (media?.kind === 'video') {
       const { src, rate } = clipSource(clip, local, media, ctx.modules);
       matteSrc = src;
@@ -1058,14 +1070,14 @@ export class Renderer {
   /** AI 去背遮罩貼圖：遮罩還沒算好就先排進背景計算，這一格照原樣畫 */
   private matteTex(clip: Clip, media: Media, src: number, ctx: RenderCtx): WebGLTexture | null {
     if (media.kind !== 'video' && media.kind !== 'image') return null;
-    const m = matteAt(media, src);
+    const m = slotMatte(media, src, clipEdit(clip));
     if (!m) {
       requestMatte(clip, media, ctx.modules);
       return null;
     }
     const gl = this.gl;
     const key = 'matte:' + clip.id;
-    const stamp = `${media.id}:${m.idx}`;
+    const stamp = m.stamp;
     let tex = this.textures.get(key);
     if (tex && this.matteIdx.get(key) === stamp) return tex;
     if (!tex) {
@@ -1074,7 +1086,7 @@ export class Renderer {
     }
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, MATTE_SIZE, MATTE_SIZE, 0, gl.RED, gl.UNSIGNED_BYTE, m.data);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, m.size, m.size, 0, gl.RED, gl.UNSIGNED_BYTE, m.data);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 4);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     this.matteIdx.set(key, stamp);
@@ -1293,18 +1305,20 @@ export class Renderer {
     const ref = item.slots.find((s) => s.id === (maskLayer?.slotId ?? draw.mask?.slotId));
     const media = ref?.mediaId && ctx.media.get(ref.mediaId);
     if (!ref || !media || media.missing) return null;
-    let path = ref.cutout?.outline;
+    // 有手動修正：輪廓照修正後的遮罩描（不用範本記的輪廓）
+    const edit = slotEdit(ref);
+    let path = edit ? undefined : ref.cutout?.outline;
     if (!path) {
-      const matte = matteAt(media, ref.sourceTime);
+      const matte = slotMatte(media, ref.sourceTime, edit);
       if (!matte) {
         requestMatte(animClip(item, { ...draw, slot: ref }), media, ctx.modules);
         return null;
       }
-      const key = `${media.id}:${matte.idx}`;
-      path = this.animOutlines.get(key);
+      path = this.animOutlines.get(matte.stamp);
       if (path === undefined) {
-        path = traceMatte(matte.data, MATTE_SIZE);
-        this.animOutlines.set(key, path);
+        path = traceMatte(matte.data, matte.size);
+        if (this.animOutlines.size > 64) this.animOutlines.delete(this.animOutlines.keys().next().value!);
+        this.animOutlines.set(matte.stamp, path);
       }
     }
     if (!path) return null;
@@ -1433,30 +1447,41 @@ export class Renderer {
       for (const item of ctx.anims) {
         if (item.track !== ti) continue;
         // 整體遮罩：每個圖層先照平常疊好，再依遮罩跟疊之前的畫面混（遮罩外 = 沒疊這個圖層）
-        const whole = item.mask ? animMaskAt(item, animBeatAtTime(item, t, animBeatTime(item))) : null;
-        for (const draw of animLayers(item, t, animBeatTime(item), this.w / this.h)) {
+        const beat = animBeatAtTime(item, t, animBeatTime(item));
+        const whole = item.mask ? animMaskAt(item, beat) : null;
+        const aspect = this.w / this.h;
+        for (const draw of animLayers(item, t, animBeatTime(item), aspect)) {
           const media = ctx.media.get(draw.slot.mediaId!);
           if (!draw.layer.text && (!media || media.missing)) continue;
-          const clip = animClip(item, draw, media, this.w / this.h);
+          const clip = animClip(item, draw, media, aspect);
           active.add(clip.id);
-          const other = cur === this.targets[2] ? this.targets[3] : this.targets[2];
+          // 遮罩：剪影窗 / 挖洞的輪廓、圖層自己的遮罩（跟著圖層）、整體遮罩，全部都要過（交集）
+          const masks: Mask[] = [];
           if (draw.mask) {
-            const mask = this.animMask(item, draw, t, ctx);
-            if (!mask) continue;
-            this.clear(TA, true);
-            this.drawClip(TA, clip, t, ctx, mode, playing, false);
-            this.maskPass(other, cur, TA, mask, true);
-          } else if (whole) {
-            this.pass(other, this.blit, (p) => this.bindTex(p, 'u_tex', cur.tex, 0));
-            this.drawClip(other, clip, t, ctx, mode, playing, clip.blend ?? true);
-          } else {
+            const outline = this.animMask(item, draw, t, ctx);
+            if (!outline) continue;
+            masks.push(outline);
+          }
+          const own = draw.layer.clipMask ? layerMaskAt(draw.layer, beat) : null;
+          if (own) masks.push(layerMaskToScreen(own, draw, aspect));
+          if (whole) masks.push(whole);
+          if (!masks.length) {
             this.drawClip(cur, clip, t, ctx, mode, playing, clip.blend ?? true);
             continue;
           }
-          if (whole) {
-            this.maskPass(TB, cur, other, whole);
-            this.pass(cur, this.blit, (p) => this.bindTex(p, 'u_tex', TB.tex, 0));
-          } else cur = other;
+          // 先照平常疊好（含混合模式），再依每個遮罩跟疊之前的畫面混：遮罩外 = 沒疊這個圖層
+          const other = cur === this.targets[2] ? this.targets[3] : this.targets[2];
+          const base = cur;
+          this.pass(other, this.blit, (p) => this.bindTex(p, 'u_tex', base.tex, 0));
+          this.drawClip(other, clip, t, ctx, mode, playing, clip.blend ?? true);
+          let src = other;
+          for (const m of masks) {
+            const dst = src === other ? TB : other;
+            this.maskPass(dst, base, src, m);
+            src = dst;
+          }
+          if (src === other) cur = other;
+          else this.pass(cur, this.blit, (p) => this.bindTex(p, 'u_tex', TB.tex, 0));
         }
       }
     });

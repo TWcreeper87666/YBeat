@@ -9,6 +9,7 @@ import type { MatteReq, MatteRes } from './matteWorker';
 import { hasKeyIn, insertKey, pickFrame, snapFps, toKey } from './matteIndex';
 import { decodeRange } from './matteDecode';
 import { Need, clipStill } from './jobNeed';
+import { animImage, animImageReady, frameIndexAt } from './animImage';
 
 export const MATTE_SIZE = 320;
 /** 偵測不到影片影格率時的預設 */
@@ -320,12 +321,26 @@ async function runDecode(media: Media, e: Entry, times: number[], live: () => bo
 /** live = 還有人需要（沒人需要就停下來，已經算好的存起來） */
 async function runJob(media: Media, times: number[], live: () => boolean) {
   const e = entry(media.id);
-  if (media.kind === 'image' && e.frames.has(0)) return;
   if (media.kind !== 'image' && media.kind !== 'video') return;
+  // 動態圖片（GIF…）：每一格各算一張（key = 第幾格）；靜態圖片只有第 0 格
+  const anim = media.kind === 'image' ? await animImageReady(media) : null;
+  if (media.kind === 'image' && (anim ? anim.frames : [0]).every((_, i) => e.frames.has(i))) return;
   const g = canvas();
   let v: RVFCVideo | null = null;
   try {
-    if (media.kind === 'image') {
+    if (media.kind === 'image' && anim) {
+      const n = anim.frames.length;
+      for (let i = 0; i < n; i++) {
+        if (!live()) break;
+        setProgress(media.id, i, n);
+        if (e.frames.has(i)) continue;
+        e.frames.set(i, await infer(grab(g, anim.frames[i])));
+        insertKey(e.keys, i);
+        e.dirty = true;
+        bump();
+        if (i % 24 === 23) await persist(media.id);
+      }
+    } else if (media.kind === 'image') {
       setProgress(media.id, 0, 1);
       const img = new Image();
       img.src = media.url;
@@ -468,8 +483,11 @@ export function ensureMatte(media: Media, times: number[], by?: { id: string; st
 export function matteAt(media: Media, t: number): { idx: number; data: Uint8Array } | null {
   const e = entry(media.id);
   if (media.kind === 'image') {
-    const d = e.frames.get(0);
-    return d ? { idx: 0, data: d } : null;
+    // 動態圖片：照時間找第幾格（跟畫面同一個算法，會循環）
+    const a = animImage(media);
+    const idx = a ? frameIndexAt(a.starts, a.total, t) : 0;
+    const d = e.frames.get(idx);
+    return d ? { idx, data: d } : null;
   }
   if (!e.fps) return null;
   const k = pickFrame(e.keys, t, 1 / e.fps, e.step);
@@ -522,7 +540,12 @@ export function requestMatte(clip: Clip, media: Media, modules: Map<string, Modu
  */
 export function matteCoverage(clip: Clip, media: Media, modules: Map<string, Module>, n: number): Uint8Array {
   const out = new Uint8Array(n);
-  if (media.kind === 'image') return out.fill(matteAt(media, 0) ? 1 : 0);
+  if (media.kind === 'image') {
+    // 動態圖片：片段內時間 = 圖片的時間（循環）
+    if (!animImage(media)) return out.fill(matteAt(media, 0) ? 1 : 0);
+    for (let k = 0; k < n; k++) out[k] = matteAt(media, ((k + 0.5) / n) * clip.duration) ? 1 : 0;
+    return out;
+  }
   for (let k = 0; k < n; k++) {
     const { src } = clipSource(clip, ((k + 0.5) / n) * clip.duration, media, modules);
     out[k] = matteAt(media, src) ? 1 : 0;

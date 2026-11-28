@@ -1,3 +1,4 @@
+import { isFitView, useWheelZoom, ZoomBadge } from './zoomView';
 import { $t, displayName } from '../i18n';
 import { Diamond, X } from 'lucide-react';
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -15,7 +16,7 @@ import { clipTransformAt, DEFAULT_TRANSFORM, fitSize, isAnimated, setPropsAt, ty
 import { animBeatAt, animBeatLen, animLayers, animTransformAt, composeAnimTransform, type AnimItem, type AnimLayer } from '../engine/animation';
 import { evalKeys, upsertKey, type AnimProp, type Keyframe } from '../engine/keyframes';
 import { textSize } from '../engine/text';
-import { MaskGizmos, animMaskKey, cfxMaskKey, useMaskEdit } from './MaskEditor';
+import { MaskGizmos, animMaskKey, cfxMaskKey, layerMaskKey, useMaskEdit } from './MaskEditor';
 import { GridOverlay } from './GridOverlay';
 import { ParamGizmos } from './ParamGizmos';
 import { TextInlineEdit } from './TextInlineEdit';
@@ -219,7 +220,7 @@ export function Preview() {
   const aspect = fmt.w / fmt.h;
   const availW = Math.max(1, box.w - PAD * 2), availH = Math.max(1, box.h - PAD * 2);
   const fitW = Math.min(availW, availH * aspect), fitH = fitW / aspect;
-  const zoomed = (view.z !== 1 || view.px !== 0 || view.py !== 0);
+  const zoomed = !isFitView(view);
   useEffect(() => {
     if (!pickingColor) return;
     const onKey = (e: KeyboardEvent) => {
@@ -247,23 +248,7 @@ export function Preview() {
     ? { position: 'absolute', maxWidth: 'none', maxHeight: 'none', width: fitW * view.z, height: fitH * view.z, left: (box.w - fitW * view.z) / 2 + view.px, top: (box.h - fitH * view.z) / 2 + view.py }
     : undefined;
 
-  useEffect(() => {
-    const el = boxRef.current;
-    if (!el) return;
-    // 2D 畫面：滾輪直接縮放（刻意跟時間軸類的「Ctrl + 滾輪縮放」不同，見 wheelView）
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      const v = usePreviewView.getState();
-      const r = el.getBoundingClientRect();
-      // 滑鼠底下的點保持不動
-      const mx = e.clientX - r.left - r.width / 2, my = e.clientY - r.top - r.height / 2;
-      const z = Math.min(ZMAX, Math.max(ZMIN, v.z * Math.pow(1.0015, -e.deltaY)));
-      const k = z / v.z;
-      usePreviewView.setState({ z, px: mx - (mx - v.px) * k, py: my - (my - v.py) * k });
-    };
-    el.addEventListener('wheel', onWheel, { passive: false });
-    return () => el.removeEventListener('wheel', onWheel);
-  }, []);
+  useWheelZoom(boxRef, usePreviewView.getState, (v) => usePreviewView.setState(v), { min: ZMIN, max: ZMAX, origin: 'center' });
 
   /** 平移：中鍵任何地方、或左 / 右鍵拖畫面外的空白處 */
   const startPan = (e: React.PointerEvent) => {
@@ -312,9 +297,7 @@ export function Preview() {
       <Gizmo canvasRef={ref} />
       <FxPreviewLabel />
       {zoomed && (
-        <button className="view-zoom" title={$t('檢視縮放（滾輪縮放、拖曳空白處或中鍵平移；點一下回到符合視窗）')} onClick={resetView}>
-          {Math.round(view.z * 100)}% · {$t('符合')}
-        </button>
+        <ZoomBadge z={view.z} fit onReset={resetView} title={$t('檢視縮放（滾輪縮放、拖曳空白處或中鍵平移；點一下回到符合視窗）')} />
       )}
     </div>
   );
@@ -694,7 +677,8 @@ function Gizmo({ canvasRef }: { canvasRef: React.RefObject<HTMLCanvasElement> })
   // 正在預覽上編輯這個片段的遮罩：片段本身的變換框先藏起來，免得搶到滑鼠
   const maskKey = useMaskEdit((st) => st.key);
   const editingMask = !!maskKey && (!!clip?.effects?.some((f) => cfxMaskKey(f.id) === maskKey && f.enabled !== false && (f.mask?.shape ?? 'none') !== 'none')
-    || (!!anim && !clip && maskKey === animMaskKey(anim.id) && (anim.mask?.mask.shape ?? 'none') !== 'none'));
+    || (!!anim && !clip && maskKey === animMaskKey(anim.id) && (anim.mask?.mask.shape ?? 'none') !== 'none')
+    || (!!anim && !clip && anim.layers.some((l) => maskKey === layerMaskKey(anim.id, l.id) && (l.clipMask?.mask.shape ?? 'none') !== 'none')));
   const animVisible = !!anim && !editingMask && time >= anim.start && time < anim.start + anim.duration;
   const box = visible && !editingMask ? boxOf(clip!, media, local, W, H)
     : animVisible && animBoxClip ? boxOf(animBoxClip, animMedia, time - anim!.start, W, H) : null;

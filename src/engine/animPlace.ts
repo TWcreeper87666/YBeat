@@ -152,7 +152,7 @@ export function pasteSlots(target: AnimItem, clip: SlotClip, opts: { usable: (me
   const shown = new Set(usedImageSlots(target).map((s) => s.id));
   const set = (s: AnimSlot, img: SlotImage | undefined, sameRole: boolean): AnimSlot => !img ? s : {
     ...s, mediaId: img.mediaId, sourceTime: img.sourceTime, crop: img.crop && structuredClone(img.crop),
-    ...(sameRole && img.cutout && s.cutout ? { cutout: { ...s.cutout, mode: img.cutout.mode } } : {}),
+    ...(sameRole && img.cutout && s.cutout ? { cutout: { ...s.cutout, mode: img.cutout.mode, edit: img.cutout.edit } } : {}),
   };
   if (target.sameMedia) {
     const first = subjects[0] ?? backs[0] ?? reveals[0] ?? copies[0];
@@ -215,7 +215,7 @@ export function pasteAnimImages(animIds: string[], slotId?: string): number {
       if (!img || !a.slots.some((x) => x.id === slotId)) continue;
       const share = { mediaId: img.image.mediaId, sourceTime: img.image.sourceTime, crop: img.image.crop && structuredClone(img.image.crop) };
       patches[`anim:${a.id}`] = { slots: a.slots.map((x) => x.id === slotId
-        ? { ...x, ...share, ...(img.role === x.role && img.image.cutout && x.cutout ? { cutout: { ...x.cutout, mode: img.image.cutout.mode } } : {}) }
+        ? { ...x, ...share, ...(img.role === x.role && img.image.cutout && x.cutout ? { cutout: { ...x.cutout, mode: img.image.cutout.mode, edit: img.image.cutout.edit } } : {}) }
         : a.sameMedia && x.role !== 'other' ? { ...x, ...share } : x) };
       continue;
     }

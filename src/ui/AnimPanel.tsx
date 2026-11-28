@@ -4,13 +4,15 @@
  */
 import React, { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronUp, Crop as CropIcon, Eye, EyeOff, Play, Save, Sparkles, Trash2, X } from 'lucide-react';
+import { ChevronDown, ChevronUp, Crop as CropIcon, Eye, EyeOff, Play, Save, Scissors, Sparkles, Trash2, X } from 'lucide-react';
 import { $t } from '../i18n';
 import { mediaUsable, uid, useStore, type BlendMode } from '../store';
 import { DEFAULT_MASK } from '../engine/mask';
 import { CLIP_MASK_ID } from '../modules/extra';
-import { animMaskCh, animMaskKey, useMaskEdit } from './MaskEditor';
+import { animMaskCh, animMaskKey, layerMaskCh, layerMaskKey, useMaskEdit } from './MaskEditor';
 import { CropDialog, isFullCrop } from './RangePicker';
+import { SlotCutoutEditor } from './CutoutEditor';
+import { slotEdit } from '../engine/cutoutEdit';
 import { usePrefs, type AnimPreset } from '../prefs';
 import { ANIM_PROPS, evalKeys, sortKeys, type AnimProp, type Keyframe } from '../engine/keyframes';
 import { animBeatAt, animSecAt, animTransformAt, type AnimItem, type AnimLayer, type AnimSlot } from '../engine/animation';
@@ -153,7 +155,15 @@ function moveFx(animId: string, layerId: string, fxId: string, dir: -1 | 1) {
 }
 
 /** 整體遮罩的 channel（`whole:mask.x`）→ `mask.x` */
-const parseWhole = (ch: string) => (ch.startsWith('whole:') ? ch.slice(6) : null);
+type StoredMask = NonNullable<AnimItem['mask']>;
+/** 遮罩的 channel → 哪一個遮罩（整體 `whole:mask.x` / 圖層 `lmask:<圖層>:mask.x`）、讀寫方法、屬性名（mask.x） */
+function maskOfCh(ch: string): { prop: string; get: (x: AnimItem) => StoredMask | undefined; put: (x: AnimItem, v: StoredMask | undefined) => Partial<AnimItem> } | null {
+  if (ch.startsWith('whole:')) return { prop: ch.slice(6), get: (x) => x.mask, put: (_x, v) => ({ mask: v }) };
+  if (!ch.startsWith('lmask:')) return null;
+  const [, layerId, ...rest] = ch.split(':');
+  return { prop: rest.join(':'), get: (x) => x.layers.find((l) => l.id === layerId)?.clipMask,
+    put: (x, v) => ({ layers: x.layers.map((l) => (l.id === layerId ? { ...l, clipMask: v } : l)) }) };
+}
 
 /** 關鍵影格：拍 ↔ 項目內秒數 */
 const toSec = (a: AnimItem, list: Keyframe[]) => list.map((k) => ({ ...k, t: animSecAt(a, k.t) }));
@@ -180,15 +190,16 @@ function animHost(id: string): Host | null {
         else delete keys[fx.param];
         return updateFx(id, fx.layerId, fx.fxId, { keys, ...(!list?.length && base !== undefined ? fxBasePatch(f, fx.param, base) : {}) });
       }
-      const wm = parseWhole(ch);
+      const wm = maskOfCh(ch);
       if (wm) {
         const cur = useStore.getState().anims.find((x) => x.id === id);
         if (!cur) return;
-        const keys = { ...cur.mask?.keys };
-        if (list?.length) keys[wm] = toBeat(cur, list);
-        else delete keys[wm];
-        const mask = { ...DEFAULT_MASK, ...cur.mask?.mask, ...(!list?.length && base !== undefined ? { [wm.slice(5)]: base } : {}) };
-        return useStore.getState().updateAnim(id, { mask: { mask, ...(Object.keys(keys).length ? { keys } : {}) } });
+        const old = wm.get(cur);
+        const keys = { ...old?.keys };
+        if (list?.length) keys[wm.prop] = toBeat(cur, list);
+        else delete keys[wm.prop];
+        const mask = { ...DEFAULT_MASK, ...old?.mask, ...(!list?.length && base !== undefined ? { [wm.prop.slice(5)]: base } : {}) };
+        return useStore.getState().updateAnim(id, wm.put(cur, { mask, ...(Object.keys(keys).length ? { keys } : {}) }));
       }
       const { layerId, prop } = parseCh(ch);
       const cur = useStore.getState().anims.find((x) => x.id === id);
@@ -213,10 +224,11 @@ function animHost(id: string): Host | null {
         const f = findFx(id, fx.layerId, fx.fxId);
         return void (f && updateFx(id, fx.layerId, fx.fxId, fxBasePatch(f, fx.param, v)));
       }
-      const wm = parseWhole(ch);
+      const wm = maskOfCh(ch);
       if (wm) {
         const cur = useStore.getState().anims.find((x) => x.id === id);
-        if (cur) useStore.getState().updateAnim(id, { mask: { ...cur.mask, mask: { ...DEFAULT_MASK, ...cur.mask?.mask, [wm.slice(5)]: v } } });
+        const old = cur && wm.get(cur);
+        if (cur) useStore.getState().updateAnim(id, wm.put(cur, { ...old, mask: { ...DEFAULT_MASK, ...old?.mask, [wm.prop.slice(5)]: v } }));
         return;
       }
       const { layerId, prop } = parseCh(ch);
@@ -238,8 +250,8 @@ registerHostKind('anim', {
     if (!a) return [];
     const fx = parseAfx(ch);
     if (fx) return findFx(id, fx.layerId, fx.fxId)?.keys?.[fx.param] ?? [];
-    const wm = parseWhole(ch);
-    if (wm) return toSec(a, a.mask?.keys?.[wm] ?? []);
+    const wm = maskOfCh(ch);
+    if (wm) return toSec(a, wm.get(a)?.keys?.[wm.prop] ?? []);
     const { layerId, prop } = parseCh(ch);
     if (layerId === 'all') return toSec(a, a.keys?.[prop] ?? []);
     return toSec(a, a.layers.find((l) => l.id === layerId)?.keys[prop] ?? []);
@@ -251,6 +263,7 @@ registerHostKind('anim', {
       ...Object.entries(a?.mask?.keys ?? {}).flatMap(([k, list]) => list.map((x) => ({ ch: animMaskCh(k), id: x.id }))),
       ...(a?.layers ?? []).flatMap((l) => [
       ...Object.entries(l.keys).flatMap(([prop, list]) => (list ?? []).map((k) => ({ ch: chId(l.id, prop as AnimProp), id: k.id }))),
+      ...Object.entries(l.clipMask?.keys ?? {}).flatMap(([k, list]) => list.map((x) => ({ ch: layerMaskCh(l.id, k), id: x.id }))),
       ...(l.effects ?? []).flatMap((f) => Object.entries(f.keys ?? {}).flatMap(([param, list]) => list.map((k) => ({ ch: afxCh(l.id, f.id, param), id: k.id })))),
       ]),
     ];
@@ -270,6 +283,7 @@ function SlotRow({ a, slot, name }: { a: AnimItem; slot: AnimSlot; name: string 
   const anchor = usePickerAnchor();
   const picking = !!anchor && anchor === pickRef.current;
   const [cropping, setCropping] = useState(false);
+  const [fixing, setFixing] = useState(false);
   return (
     <div className={`anim-slot ${ok ? '' : 'missing'} ${over ? 'drop-here' : ''} ${picking ? 'picking' : ''} ${slot.hidden ? 'off' : ''}`} data-anim-slot={`${a.id}|${slot.id}`}
       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); openMenu(e.clientX, e.clientY, imageMenu([a.id], slot.id)); }}>
@@ -288,6 +302,10 @@ function SlotRow({ a, slot, name }: { a: AnimItem; slot: AnimSlot; name: string 
         <button className={`ec-icon ${isFullCrop(slot.crop) ? '' : 'on'}`} title={$t('裁切')} onClick={() => setCropping(true)}><CropIcon size={13} /></button>
       )}
       {cropping && ok && createPortal(<CropDialog m={m} time={slot.sourceTime} init={slot.crop} onCommit={(crop) => set({ crop })} onClose={() => setCropping(false)} />, document.body)}
+      {ok && slot.cutout?.mode === 'auto' && (m.kind === 'video' || m.kind === 'image') && (
+        <button className={`ec-icon ${slotEdit(slot) ? 'on' : ''}`} title={$t('修正去背')} onClick={() => setFixing(true)}><Scissors size={13} /></button>
+      )}
+      {fixing && createPortal(<SlotCutoutEditor animId={a.id} slotId={slot.id} onClose={() => setFixing(false)} />, document.body)}
       {slot.cutout && <span className="anim-slot-cut" title={$t('去背')}><Switch v={slot.cutout.mode === 'auto'} on={(v) => set({ cutout: { ...slot.cutout, mode: v ? 'auto' : 'off' } })} /></span>}
       <button className={`ec-icon ${slot.hidden ? 'on' : ''}`} title={slot.hidden ? $t('顯示') : $t('隱藏')} onClick={() => set({ hidden: slot.hidden ? undefined : true })}>{slot.hidden ? <EyeOff size={13} /> : <Eye size={13} />}</button>
       {slot.mediaId && <button className="ec-icon" title={$t('清除')} onClick={() => set({ mediaId: null })}><X size={12} /></button>}
@@ -339,26 +357,37 @@ function fxSections(a: AnimItem, l: AnimLayer, local: number, modules: ReturnTyp
   });
 }
 
-/** 整體遮罩（跟片段遮罩同一套：形狀、繪製、在預覽中編輯、反轉、關鍵影格） */
-function wholeMaskSection(a: AnimItem, local: number): Section {
-  const asFx = (x: AnimItem): FxLike => ({ moduleId: CLIP_MASK_ID, params: {}, mask: x.mask?.mask,
-    keys: Object.fromEntries(Object.entries(x.mask?.keys ?? {}).map(([k, l]) => [k, toSec(x, l)])) });
+/**
+ * 動畫的遮罩（整體 / 圖層，跟片段遮罩同一套：形狀、繪製、在預覽中編輯、反轉、關鍵影格）。
+ * ch：channel 的前綴（`whole:` / `lmask:<圖層>:`）；key：預覽上編輯 / 繪製的對象
+ */
+function animMaskBlock(a: AnimItem, local: number, chOf: (c: string) => string, key: string) {
+  const ref = maskOfCh(chOf('mask.x'))!;
+  const asFx = (x: AnimItem): FxLike => {
+    const m = ref.get(x);
+    return { moduleId: CLIP_MASK_ID, params: {}, mask: m?.mask, keys: Object.fromEntries(Object.entries(m?.keys ?? {}).map(([k, l]) => [k, toSec(x, l)])) };
+  };
   const fresh = () => useStore.getState().anims.find((x) => x.id === a.id);
-  const clear = () => useStore.getState().updateAnim(a.id, { mask: undefined });
+  const clear = () => { const cur = fresh(); if (cur) useStore.getState().updateAnim(a.id, ref.put(cur, undefined)); };
   const update = (p: Partial<FxLike>) => {
     const cur = fresh();
     if (!cur) return;
     if (('mask' in p && !p.mask) || p.mask?.shape === 'none') return clear();
+    const old = ref.get(cur);
     const keys = p.keys
       ? Object.fromEntries(Object.entries(p.keys).filter(([k]) => k.startsWith('mask.')).map(([k, l]) => [k, toBeat(cur, l)]))
-      : cur.mask?.keys;
-    useStore.getState().updateAnim(a.id, { mask: { mask: p.mask ?? cur.mask?.mask ?? DEFAULT_MASK, ...(keys && Object.keys(keys).length ? { keys } : {}) } });
+      : old?.keys;
+    useStore.getState().updateAnim(a.id, ref.put(cur, { mask: p.mask ?? old?.mask ?? DEFAULT_MASK, ...(keys && Object.keys(keys).length ? { keys } : {}) }));
   };
-  const key = animMaskKey(a.id);
   const { rows, chs } = maskBlock(asFx(a), local, update, {
     fresh: () => { const x = fresh(); return x && asFx(x); },
-    editKey: key, drawKey: key, ch: animMaskCh,
+    editKey: key, drawKey: key, ch: chOf,
   });
+  return { rows, chs, clear };
+}
+
+function wholeMaskSection(a: AnimItem, local: number): Section {
+  const { rows, chs, clear } = animMaskBlock(a, local, animMaskCh, animMaskKey(a.id));
   return { id: 'allmask', title: $t('遮罩'), rows: [{ ...rows[0], label: $t('形狀') }, ...rows.slice(1)], channels: chs, onReset: clear };
 }
 
@@ -375,6 +404,8 @@ export function AnimInspector({ id }: { id: string }) {
   const slots = usedImageSlots(a);
   const slotOf = new Map(a.slots.map((s) => [s.id, s]));
   const names = slotNames(a);
+  // 圖層自己的遮罩（跟著圖層動）
+  const layerMask = (l: AnimLayer) => animMaskBlock(a, local, (c) => layerMaskCh(l.id, c), layerMaskKey(a.id, l.id));
   const setLayer = (layerId: string, p: Partial<AnimLayer>) => {
     const cur = useStore.getState().anims.find((x) => x.id === id);
     if (cur) useStore.getState().updateAnim(id, { layers: cur.layers.map((x) => (x.id === layerId ? { ...x, ...p } : x)) });
@@ -396,7 +427,7 @@ export function AnimInspector({ id }: { id: string }) {
       footer: <div className="anim-slots" onContextMenu={(e) => { e.preventDefault(); openMenu(e.clientX, e.clientY, imageMenu([a.id])); }}>{slots.map((s) => <SlotRow key={s.id} a={a} slot={s} name={names.get(s.id) ?? ''} />)}</div>,
     },
     // 文字層（文字在主體後面）沒有圖片，但文字和位置要能改
-    ...a.layers.filter((l) => slotOf.get(l.slotId)?.role !== 'other' || l.text !== undefined).flatMap((l, i): Section[] => [{
+    ...a.layers.filter((l) => slotOf.get(l.slotId)?.role !== 'other' || l.text !== undefined).map((l) => ({ l, lm: layerMask(l) })).flatMap(({ l, lm }, i): Section[] => [{
       id: `layer.${l.id}`,
       defaultCollapsed: a.layers.length > 3,
       title: `${$t('圖層 {0}', i + 1)} · ${names.get(l.slotId) ?? ''}`,
@@ -409,6 +440,7 @@ export function AnimInspector({ id }: { id: string }) {
             {Object.entries(BLENDS()).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
           </select>
         ) },
+        ...lm.rows,
       ],
       actions: (
         <button className="ec-icon" title={$t('加入特效…')}
@@ -421,7 +453,7 @@ export function AnimInspector({ id }: { id: string }) {
         const base = l.base?.[prop] ?? DEF[prop];
         return { id: chId(l.id, prop), label, step, suffix, min, max, def: DEF[prop],
           value: keys.length ? evalKeys(keys, beat) : base, keys: toSec(a, keys) };
-      }),
+      }).concat(lm.chs),
     }, ...fxSections(a, l, local, modules)]),
   ];
   return (

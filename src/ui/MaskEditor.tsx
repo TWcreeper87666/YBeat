@@ -5,7 +5,7 @@ import { $t, displayName } from '../i18n';
 import { DEFAULT_MASK, PATH_SHAPE, maskAt, maskKey, type Mask } from '../engine/mask';
 import { CLIP_MASK_ID } from '../modules/extra';
 import { upsertKey } from '../engine/keyframes';
-import { animBeatAt, animMaskAt, animSecAt, type AnimItem } from '../engine/animation';
+import { animBeatAt, animBeatLen, animLayers, animMaskAt, animSecAt, layerBoxToScreen, layerMaskAt, screenBoxToLayer, type AnimItem, type AnimLayer } from '../engine/animation';
 import { shapeInfo } from '../engine/maskShapes';
 import { axisAligned, gridSnapLines, rotatedHalf, snapMoveAxis } from '../engine/snap';
 import { useLayout } from './uiStore';
@@ -23,6 +23,27 @@ export const animMaskKey = (animId: string) => `anim:${animId}`;
 /** 動畫屬性面板裡整體遮罩的 channel：`whole:mask.x` */
 export const animMaskCh = (ch: string) => `whole:${ch}`;
 const animOf = (key: string, s = useStore.getState()) => (key.startsWith('anim:') ? s.anims.find((a) => a.id === key.slice(5)) : undefined);
+/** 動畫圖層自己的遮罩（跟著圖層動） */
+export const layerMaskKey = (animId: string, layerId: string) => `alayer:${animId}:${layerId}`;
+/** 動畫屬性面板裡圖層遮罩的 channel：`lmask:<圖層>:mask.x` */
+export const layerMaskCh = (layerId: string, ch: string) => `lmask:${layerId}:${ch}`;
+const layerOf = (key: string, s = useStore.getState()) => {
+  if (!key.startsWith('alayer:')) return undefined;
+  const [, animId, layerId] = key.split(':');
+  const a = s.anims.find((x) => x.id === animId);
+  const layer = a?.layers.find((l) => l.id === layerId);
+  return a && layer ? { a, layer } : undefined;
+};
+/** 圖層遮罩在畫面上的樣子（local = 動畫內秒數；這一刻圖層沒出現 = null） */
+function layerMaskNow(key: string, local: number, s = useStore.getState()) {
+  const o = layerOf(key, s);
+  if (!o) return null;
+  const beat = animBeatAt(o.a, Math.max(0, Math.min(o.a.duration, local)));
+  const m = layerMaskAt(o.layer, beat);
+  const aspect = s.format.w / s.format.h;
+  const d = animLayers(o.a, o.a.start + local, animBeatLen(o.a), aspect).find((x) => x.layer.id === o.layer.id);
+  return m && d ? { mask: { ...m, ...layerBoxToScreen(m, d, aspect) }, local: m, d, aspect, ...o } : null;
+}
 /** 動畫內的秒數 → 整體遮罩這一刻的樣子 */
 const animMaskNow = (a: AnimItem, local: number) => animMaskAt(a, animBeatAt(a, Math.max(0, Math.min(a.duration, local))));
 
@@ -85,6 +106,10 @@ function useTargets(): Target[] {
       const key = animMaskKey(a.id);
       out.push({ key, label: a.name ?? $t('動畫'), mask: m, active: editKey === key, set: (vals) => writeMask(key, local, vals) });
     }
+    // 圖層遮罩：只顯示正在編輯的那一個（圖層多的時候框會疊在一起）
+    const lk = editKey?.startsWith(`alayer:${sel.id}:`) ? editKey : null;
+    const lm = a && lk && local >= 0 && local < a.duration ? layerMaskNow(lk, local) : null;
+    if (lk && lm) out.push({ key: lk, label: $t('圖層遮罩'), mask: lm.mask, active: true, set: (vals) => writeMask(lk, local, vals) });
   }
   return out;
 }
@@ -109,6 +134,22 @@ function ownerOf(key: string, s: S = useStore.getState()) {
 
 /** 寫入遮罩的數值：有關鍵影格的屬性在 local 打 key，沒有就改固定值 */
 function writeMask(key: string, local: number, vals: Vals) {
+  if (key.startsWith('alayer:')) {
+    const now = layerMaskNow(key, local);
+    if (!now) return;
+    const host = hostFor(`anim:${now.a.id}`);
+    const { feather, ...box } = vals;
+    const loc: Vals = { ...screenBoxToLayer(box, now.d, now.aspect, now.local), ...(feather !== undefined ? { feather } : {}) };
+    for (const [p, v] of Object.entries(loc)) {
+      const cur = layerOf(key);
+      if (!host || !cur) return;
+      const k = cur.layer.clipMask?.keys?.[maskKey(p)];
+      const ch = layerMaskCh(cur.layer.id, maskKey(p));
+      if (k?.length) host.setKeys(ch, upsertKey(k.map((x) => ({ ...x, t: animSecAt(cur.a, x.t) })), local, v));
+      else host.setBase(ch, v);
+    }
+    return;
+  }
   if (key.startsWith('anim:')) {
     const host = hostFor(key);
     for (const [p, v] of Object.entries(vals)) {
@@ -165,6 +206,26 @@ export interface DrawTarget {
 /** key：`fx:<特效 id>`、`cfx:<片段特效 id>`、`clip:<片段 id>`（片段本身的遮罩，還沒有就在套用時建立） */
 export function drawTarget(key: string): DrawTarget | null {
   const s = useStore.getState();
+  const lo = layerOf(key, s);
+  if (lo) {
+    const local = Math.min(Math.max(0, s.time - lo.a.start), Math.max(0, lo.a.duration - 1e-4));
+    const { a: la, layer: ll } = lo;
+    const upd = (st: S, fn: (l: AnimLayer) => AnimLayer | null): S => ({ ...st, anims: st.anims.map((a) => (a.id === la.id
+      ? { ...a, layers: a.layers.flatMap((l) => { if (l.id !== ll.id) return [l]; const n = fn(l); return n ? [n] : []; }) } : a)) });
+    return {
+      mask: layerMaskNow(key, local, s)?.mask ?? null,
+      cut: true,
+      off: (st) => upd(st, () => null),
+      on: (st) => upd(st, (l) => ({ ...l, clipMask: undefined })),
+      apply: (shape, box) => {
+        const cur = layerOf(key);
+        if (!cur) return;
+        const clipMask = { ...cur.layer.clipMask, mask: { ...DEFAULT_MASK, ...cur.layer.clipMask?.mask, shape: PATH_SHAPE, ...shape } };
+        useStore.getState().updateAnim(cur.a.id, { layers: cur.a.layers.map((l) => (l.id === cur.layer.id ? { ...l, clipMask } : l)) });
+        writeMask(key, local, { ...box, rotation: 0 });
+      },
+    };
+  }
   const anim = animOf(key, s);
   if (anim) {
     const local = Math.min(Math.max(0, s.time - anim.start), Math.max(0, anim.duration - 1e-4));
@@ -226,7 +287,7 @@ export function drawTarget(key: string): DrawTarget | null {
 export function timeInside(key: string): number | null {
   const s = useStore.getState();
   let a: number, b: number;
-  const anim = animOf(key, s);
+  const anim = animOf(key, s) ?? layerOf(key, s)?.a;
   if (anim) [a, b] = [anim.start, anim.start + anim.duration];
   else if (key.startsWith('clip:')) {
     const c = s.clips.find((x) => x.id === key.slice(5));

@@ -3,6 +3,8 @@ import type { AudioClip, Clip, Media, Tracks } from '../store';
 import type { Module } from '../modules/builtin';
 import { plainSpeed } from './remap';
 import { timeStretch } from './stretch';
+import { evalKeys } from './keyframes';
+import { detectPitch, pitchMarks, psola, type PitchMark } from './psola';
 
 export const SAMPLE_RATE = 48000;
 
@@ -104,6 +106,10 @@ export interface AudioPlanItem {
   fadeOut: number;
   /** 變速時保持音調 */
   keepPitch: boolean;
+  pan?: number;
+  channels?: AudioClip['channels'];
+  pitch?: number;
+  keys?: AudioClip['keys'];
 }
 
 type PlanInput = { audios: AudioClip[]; clips: Clip[]; media: Media[]; tracks: Tracks };
@@ -113,8 +119,8 @@ export function audioPlan(s: PlanInput, modules: Map<string, Module>): AudioPlan
   const out: AudioPlanItem[] = [];
   for (const a of s.audios) {
     const m = media.get(a.mediaId);
-    if (!m || m.missing || audioMuted(s, a) || a.volume <= 0) continue;
-    out.push({ url: m.url, start: a.start, duration: a.duration, in: a.in, rate: a.rate ?? 1, volume: a.volume, fadeIn: a.fadeIn, fadeOut: a.fadeOut, keepPitch: a.keepPitch !== false });
+    if (!m || m.missing || audioMuted(s, a) || (a.volume <= 0 && !a.keys?.volume?.length)) continue;
+    out.push({ url: m.url, start: a.start, duration: a.duration, in: a.in, rate: a.rate ?? 1, volume: a.volume, fadeIn: a.fadeIn, fadeOut: a.fadeOut, keepPitch: a.keepPitch !== false, pan: a.pan, channels: a.channels, pitch: a.pitch, keys: a.keys });
   }
   // 影片原音：只有一般變速（非倒放 / 非自訂重映射）的片段會帶聲音
   for (const c of s.clips) {
@@ -132,33 +138,91 @@ export function audioPlan(s: PlanInput, modules: Map<string, Module>): AudioPlan
 
 const stretched = new Map<string, Promise<AudioBuffer | null>>();
 const needsStretch = (p: AudioPlanItem) => p.keepPitch && Math.abs(p.rate - 1) > 1e-3;
-const stretchKey = (p: AudioPlanItem) => `${p.url}|${p.in.toFixed(4)}|${(p.duration * p.rate).toFixed(4)}|${p.rate.toFixed(5)}`;
+const needsPitch = (p: AudioPlanItem) => !!p.pitch || !!p.keys?.pitch?.length;
+const needsProcess = (p: AudioPlanItem) => needsStretch(p) || needsPitch(p);
+const stretchKey = (p: AudioPlanItem) => `${p.url}|${p.in.toFixed(4)}|${(p.duration * p.rate).toFixed(4)}|${p.rate.toFixed(5)}|${p.keepPitch}|${p.pitch ?? 0}|${JSON.stringify(p.keys?.pitch ?? [])}`;
+const markCache = new Map<string, Promise<PitchMark[]>>();
+/** 已經處理好的聲音（拖播放頭時不能等，處理好的才用） */
+const processedReady = new Map<string, AudioBuffer>();
 
 /**
  * 取得要播放的音訊：一般情況直接用解碼好的素材；保持音調的變速片段 → 先做成「已經變速、音調不變」的那一段，
  * 之後以 1× 播放（回傳改寫過的 in / rate）。
  */
 function sourceFor(p: AudioPlanItem): Promise<{ buf: AudioBuffer; p: AudioPlanItem } | null> {
-  if (!needsStretch(p)) return getAudioBuffer(p.url).then((buf) => (buf ? { buf, p } : null));
+  if (!needsProcess(p)) return getAudioBuffer(p.url).then((buf) => (buf ? { buf, p } : null));
   const key = stretchKey(p);
   let job = stretched.get(key);
   if (!job) {
-    job = getAudioBuffer(p.url).then((src) => {
+    job = getAudioBuffer(p.url).then(async (src) => {
       if (!src) return null;
       const a = Math.max(0, Math.floor(p.in * src.sampleRate));
       const b = Math.min(src.length, Math.ceil((p.in + p.duration * p.rate) * src.sampleRate));
       if (b <= a) return null;
       const chans = Array.from({ length: src.numberOfChannels }, (_, i) => src.getChannelData(i).subarray(a, b));
-      const out = timeStretch(chans, p.rate);
+      let out: Float32Array[];
+      if (needsPitch(p)) {
+        const markKey = `${p.url}|${a}|${b}`;
+        let marks = markCache.get(markKey);
+        if (!marks) {
+          marks = Promise.resolve().then(() => {
+            const mono = new Float32Array(b - a);
+            for (const ch of chans) for (let i = 0; i < mono.length; i++) mono[i] += ch[i] / chans.length;
+            return pitchMarks(mono, src.sampleRate, detectPitch(mono, src.sampleRate));
+          });
+          markCache.set(markKey, marks);
+          if (markCache.size > 32) markCache.delete(markCache.keys().next().value!);
+        }
+        // 保持音調：輸出長度 = 片段長度（素材長 / 速率）；不保持：輸出照素材時間，播放時再用 rate 變速
+        const stretch = p.keepPitch ? 1 / p.rate : 1;
+        out = psola(chans, src.sampleRate, await marks, { stretch, beta: (tOut) => {
+          const local = p.keepPitch ? tOut : tOut / p.rate;
+          const semitones = (p.pitch ?? 0) + (p.keys?.pitch?.length ? evalKeys(p.keys.pitch, local) : 0);
+          return 2 ** (semitones / 12);
+        } });
+      } else out = timeStretch(chans, p.rate);
       const buf = new AudioBuffer({ length: out[0].length, numberOfChannels: out.length, sampleRate: src.sampleRate });
-      out.forEach((d, i) => buf.copyToChannel(d, i));
+      out.forEach((d, i) => buf.copyToChannel(new Float32Array(d), i));
+      if (stretched.has(key)) processedReady.set(key, buf);
       return buf;
     });
     stretched.set(key, job);
     // 快取別無限長大（拖速度滑桿時會產生很多版本）
-    if (stretched.size > 48) stretched.delete(stretched.keys().next().value!);
+    if (stretched.size > 48) {
+      const old = stretched.keys().next().value!;
+      stretched.delete(old);
+      processedReady.delete(old);
+    }
   }
-  return job.then((buf) => (buf ? { buf, p: { ...p, in: 0, rate: 1 } } : null));
+  return job.then((buf) => (buf ? { buf, p: { ...p, in: 0, rate: p.keepPitch ? 1 : p.rate } } : null));
+}
+
+function connectChannels(ctx: BaseAudioContext, src: AudioBufferSourceNode, buf: AudioBuffer, mode: AudioPlanItem['channels']): AudioNode {
+  if (!mode || buf.numberOfChannels < 2) return src;
+  const split = ctx.createChannelSplitter(2), merge = ctx.createChannelMerger(2);
+  src.connect(split);
+  if (mode === 'left' || mode === 'right') {
+    const ch = mode === 'left' ? 0 : 1;
+    split.connect(merge, ch, 0);
+    split.connect(merge, ch, 1);
+  } else if (mode === 'swap') {
+    split.connect(merge, 1, 0);
+    split.connect(merge, 0, 1);
+  } else {
+    const left = ctx.createGain(), right = ctx.createGain();
+    left.gain.value = right.gain.value = 0.5;
+    split.connect(left, 0); split.connect(right, 1);
+    left.connect(merge, 0, 0); right.connect(merge, 0, 0);
+    left.connect(merge, 0, 1); right.connect(merge, 0, 1);
+  }
+  return merge;
+}
+
+function curve(from: number, duration: number, fn: (local: number) => number): Float32Array {
+  const n = Math.max(2, Math.ceil(duration / 0.01) + 1);
+  const values = new Float32Array(n);
+  for (let i = 0; i < n; i++) values[i] = fn(from + duration * i / (n - 1));
+  return values;
 }
 
 /**
@@ -190,14 +254,27 @@ function schedule(ctx: BaseAudioContext, dest: AudioNode, buf: AudioBuffer, p: A
     return p.volume * Math.min(1, Math.max(0, k));
   };
   const local0 = when - c0 + t0 - p.start;
-  g.gain.setValueAtTime(gain(local0), when);
-  if (p.fadeIn > 0 && local0 < p.fadeIn) g.gain.linearRampToValueAtTime(p.volume, at(p.start + p.fadeIn));
-  if (p.fadeOut > 0) {
-    const fs = Math.max(local0, p.duration - p.fadeOut);
-    g.gain.setValueAtTime(gain(fs), at(p.start + fs));
-    g.gain.linearRampToValueAtTime(0, at(end));
+  if (p.keys?.volume?.length) {
+    const fade = (local: number) => {
+      let k = 1;
+      if (p.fadeIn > 0) k = Math.min(k, local / p.fadeIn);
+      if (p.fadeOut > 0) k = Math.min(k, (p.duration - local) / p.fadeOut);
+      return Math.max(0, Math.min(1, k));
+    };
+    g.gain.setValueCurveAtTime(curve(local0, dur, (local) => Math.max(0, evalKeys(p.keys!.volume!, local)) * fade(local)), when, dur);
+  } else {
+    g.gain.setValueAtTime(gain(local0), when);
+    if (p.fadeIn > 0 && local0 < p.fadeIn) g.gain.linearRampToValueAtTime(p.volume, at(p.start + p.fadeIn));
+    if (p.fadeOut > 0) {
+      const fs = Math.max(local0, p.duration - p.fadeOut);
+      g.gain.setValueAtTime(gain(fs), at(p.start + fs));
+      g.gain.linearRampToValueAtTime(0, at(end));
+    }
   }
-  src.connect(g).connect(dest);
+  const pan = ctx.createStereoPanner();
+  if (p.keys?.pan?.length) pan.pan.setValueCurveAtTime(curve(local0, dur, (local) => Math.max(-1, Math.min(1, evalKeys(p.keys!.pan!, local)))), when, dur);
+  else pan.pan.value = p.pan ?? 0;
+  connectChannels(ctx, src, buf, p.channels).connect(g).connect(pan).connect(dest);
   src.start(when, offset, dur * p.rate);
   return src;
 }
@@ -217,7 +294,7 @@ let modMap: { src: Module[] | null; map: Map<string, Module> } = { src: null, ma
 let prepTimer: ReturnType<typeof setTimeout> | undefined;
 
 const planKey = (p: AudioPlanItem) =>
-  `${p.url}|${p.start}|${p.duration}|${p.in}|${p.rate}|${p.volume}|${p.fadeIn}|${p.fadeOut}|${p.keepPitch}`;
+  `${p.url}|${p.start}|${p.duration}|${p.in}|${p.rate}|${p.volume}|${p.fadeIn}|${p.fadeOut}|${p.keepPitch}|${p.pan ?? 0}|${p.channels ?? ''}|${p.pitch ?? 0}|${JSON.stringify(p.keys ?? {})}`;
 
 function killItem(it: LiveItem) {
   it.dead = true;
@@ -303,29 +380,41 @@ function scrubGrain(ctx: AudioContext, plan: AudioPlanItem[], t: number) {
   const now = ctx.currentTime + 0.005;
   for (const p of plan) {
     if (t < p.start || t >= p.start + p.duration) continue;
-    const buf = ready.get(p.url);
+    const local = t - p.start;
+    let buf = ready.get(p.url);
+    let offset = p.in + local * p.rate;
+    let rate = p.rate;
+    // 變調 / 保持音調的變速：用處理好的聲音（還沒好就先處理，這一格先用原本的）
+    if (needsProcess(p)) {
+      const done = processedReady.get(stretchKey(p));
+      if (done) {
+        buf = done;
+        rate = p.keepPitch ? 1 : p.rate;
+        offset = local * rate;
+      } else void sourceFor(p);
+    }
     if (!buf) {
       void getAudioBuffer(p.url).then((b) => b && ready.set(p.url, b));
       continue;
     }
-    const local = t - p.start;
-    const offset = p.in + local * p.rate;
     if (offset >= buf.duration) continue;
     let k = 1;
     if (p.fadeIn > 0) k = Math.min(k, local / p.fadeIn);
     if (p.fadeOut > 0) k = Math.min(k, (p.duration - local) / p.fadeOut);
-    const vol = p.volume * Math.min(1, Math.max(0, k));
+    const vol = (p.keys?.volume?.length ? evalKeys(p.keys.volume, local) : p.volume) * Math.min(1, Math.max(0, k));
     if (vol <= 0) continue;
     const src = ctx.createBufferSource();
     src.buffer = buf;
-    src.playbackRate.value = Math.min(4, Math.max(0.25, p.rate));
+    src.playbackRate.value = Math.min(4, Math.max(0.25, rate));
     // 很短的淡入淡出，避免喀喀聲
     const g = ctx.createGain();
     g.gain.setValueAtTime(0, now);
     g.gain.linearRampToValueAtTime(vol, now + 0.008);
     g.gain.setValueAtTime(vol, now + GRAIN - 0.015);
     g.gain.linearRampToValueAtTime(0, now + GRAIN);
-    src.connect(g).connect(monitorOut(ctx));
+    const pan = ctx.createStereoPanner();
+    pan.pan.value = p.keys?.pan?.length ? evalKeys(p.keys.pan, local) : (p.pan ?? 0);
+    connectChannels(ctx, src, buf, p.channels).connect(g).connect(pan).connect(monitorOut(ctx));
     src.start(now, offset);
     src.stop(now + GRAIN + 0.01);
     src.onended = () => g.disconnect();
@@ -346,7 +435,7 @@ export function syncAudioPreview(s: PlanInput & { modules: Module[] }, t: number
     // 保持音調的變速片段：停止編輯一下子之後才預先處理（拖速度滑桿時不要每一格都算）
     clearTimeout(prepTimer);
     prepTimer = setTimeout(() => {
-      for (const p of audioPlan(s, modMap.map)) if (needsStretch(p)) void sourceFor(p);
+      for (const p of audioPlan(s, modMap.map)) if (needsProcess(p)) void sourceFor(p);
     }, 400);
   }
   if (!playing) {

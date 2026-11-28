@@ -13,6 +13,7 @@ import { isTextField, modalOpen } from './focus';
 import { pickerOpen } from './Library';
 import { Seg } from './Toggle';
 import { templateName } from './PopPicker';
+import { AudioWave } from './AudioWave';
 
 /**
  * 編輯視窗（參考威力導演的子母畫面設計師）：針對「一個片段 / 特效 / 轉場」的編輯畫面。
@@ -64,7 +65,7 @@ export async function cancelEditorWindow() {
   closeEditorWindow(false);
 }
 
-type ScopeState = Pick<ReturnType<typeof useStore.getState>, 'selection' | 'clips' | 'effects' | 'anims'>;
+type ScopeState = Pick<ReturnType<typeof useStore.getState>, 'selection' | 'clips' | 'effects' | 'anims' | 'audios'>;
 /** 編輯視窗針對的項目時間範圍（影片 / 文字片段、特效軌的特效、轉場） */
 function scopeOf(s: ScopeState): { a: number; b: number } | null {
   const sel = s.selection;
@@ -77,8 +78,8 @@ function scopeOf(s: ScopeState): { a: number; b: number } | null {
     const w = transitionWindow(sorted[i - 1], c, side, sorted[i + 1]);
     return w ? { a: w.t0, b: w.t0 + w.d } : null;
   }
-  if (sel?.type !== 'clip' && sel?.type !== 'effect' && sel?.type !== 'anim') return null;
-  const it = (sel.type === 'clip' ? s.clips : sel.type === 'effect' ? s.effects : s.anims).find((x) => x.id === sel.id);
+  if (sel?.type !== 'clip' && sel?.type !== 'effect' && sel?.type !== 'anim' && sel?.type !== 'audio') return null;
+  const it = (sel.type === 'clip' ? s.clips : sel.type === 'effect' ? s.effects : sel.type === 'anim' ? s.anims : s.audios).find((x) => x.id === sel.id);
   return it ? { a: it.start, b: it.start + it.duration } : null;
 }
 
@@ -111,8 +112,8 @@ export function EditorWindow({ hosts }: { hosts: Record<PanelId, HTMLElement> })
       const m = tr && s.modules.find((x) => x.id === tr.moduleId);
       return m ? displayName(m.name) : '';
     }
-    if (!sel || (sel.type !== 'clip' && sel.type !== 'effect' && sel.type !== 'anim')) return '';
-    const it = (sel.type === 'clip' ? s.clips : sel.type === 'effect' ? s.effects : s.anims).find((x) => x.id === sel.id);
+    if (!sel || (sel.type !== 'clip' && sel.type !== 'effect' && sel.type !== 'anim' && sel.type !== 'audio')) return '';
+    const it = (sel.type === 'clip' ? s.clips : sel.type === 'effect' ? s.effects : sel.type === 'anim' ? s.anims : s.audios).find((x) => x.id === sel.id);
     if (sel.type === 'anim') {
       const a = s.anims.find((x) => x.id === sel.id);
       return a?.name ?? templateName(a?.presetId) ?? $t('動畫');
@@ -127,7 +128,8 @@ export function EditorWindow({ hosts }: { hosts: Record<PanelId, HTMLElement> })
   // 自動排版看輸出尺寸：橫式（16:9 等）預覽本來就扁 → 放上面、屬性在下（關鍵影格時間軸變寬）；
   // 直式（9:16 等）預覽很瘦高 → 放右邊用滿高度、屬性在左
   const landscape = useStore((s) => s.format.w >= s.format.h);
-  const mode = useEditorMode(landscape) ?? 'side';
+  const preferredMode = useEditorMode(landscape) ?? 'side';
+  const mode = sel?.type === 'audio' ? 'stacked' : preferredMode;
 
   useEffect(() => {
     if (!open) return;
@@ -184,7 +186,7 @@ export function EditorWindow({ hosts }: { hosts: Record<PanelId, HTMLElement> })
   // DOM 順序固定（屬性、分隔線、預覽），上下排用 CSS order 換位置：搬動預覽的 DOM 會讓畫面和框閃一下舊位置
   const st = mode === 'stacked';
   const props = <div className="editor-props" key="props" style={{ order: st ? 2 : 0 }}><Slot host={hosts.inspector} /></div>;
-  const preview = <div className="editor-preview" key="preview" style={{ order: st ? 0 : 2 }}><Slot host={hosts.preview} /></div>;
+  const preview = <div className="editor-preview" key="preview" style={{ order: st ? 0 : 2 }}>{sel?.type === 'audio' ? <AudioWave id={sel.id} /> : <Slot host={hosts.preview} />}</div>;
   const sash = <div key="sash" className={`editor-sash ${mode}`} style={{ order: 1 }} onPointerDown={drag} onDoubleClick={() => useLayout.getState().set({ editorSplit: { ...split, [mode]: mode === 'stacked' ? 0.6 : 0.42 } })} />;
 
   // 排版切換：三個固定位置的圖示按鈕（文字會變長變短的單一按鈕，連點時位置會跑掉）
@@ -205,7 +207,7 @@ export function EditorWindow({ hosts }: { hosts: Record<PanelId, HTMLElement> })
           <button className="title-icon" disabled={!canUndo} title={$t('復原 (Ctrl+Z)')} onClick={undo}><Undo2 size={15} /></button>
           <button className="title-icon" disabled={!canRedo} title={$t('重做 (Ctrl+Shift+Z)')} onClick={redo}><Redo2 size={15} /></button>
           </span>
-          <Seg className="editor-layouts" value={pref} on={(v) => useLayout.getState().set({ editorLayout: v })} opts={layouts.map((l) => ({ v: l.id, label: l.icon, title: l.label }))} />
+          {sel?.type !== 'audio' && <Seg className="editor-layouts" value={pref} on={(v) => useLayout.getState().set({ editorLayout: v })} opts={layouts.map((l) => ({ v: l.id, label: l.icon, title: l.label }))} />}
           <button className="btn primary small-h" title={$t('完成 (Ctrl+Enter)')} onClick={() => closeEditorWindow()}>{$t('完成')}</button>
           <button className="title-icon" title={$t('取消 (Esc)')} onClick={() => void cancelEditorWindow()}><X size={16} /></button>
         </div>
